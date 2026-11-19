@@ -1,0 +1,8 @@
+{
+  "name": "Agra: Nightfall",
+  "description": "First-person 3D zombie survival, parkour, and freeflow combat set in a post-apocalyptic Taj Mahal courtyard.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

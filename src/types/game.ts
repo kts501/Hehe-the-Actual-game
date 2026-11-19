@@ -1,8 +1,10 @@
 import * as THREE from 'three';
+import type { AwakeningHudSnapshot } from '../game/awakening';
+import type { WeaponId, WeaponSlot } from '../game/weapons';
 
 export type GamePhase = 'start' | 'playing' | 'gameover' | 'victory';
 
-export type ZombieKind = 'shambler' | 'runner' | 'brute' | 'dog';
+export type ZombieKind = 'shambler' | 'runner' | 'brute' | 'dog' | 'screamer';
 
 export interface CounterIndicator {
   id: number;
@@ -45,7 +47,14 @@ export interface HudSnapshot {
   firecrackerCooldown: number; // seconds remaining
   kickCooldown: number;
   canMantle: boolean;
-  activeWeapon: 'bat' | 'machete' | 'pipe';
+  activeWeapon: WeaponId;
+  previousWeapon: WeaponId;
+  scrapParts: number;
+  weaponDurability: Record<WeaponId, number>;
+  weaponWheelOpen: boolean;
+  wheelHoveredSlot: WeaponSlot;
+  wheelCursorX: number;
+  wheelCursorY: number;
   timeLabel: string;
   subtitleText: string;
   subtitleSpeaker: string;
@@ -75,6 +84,7 @@ export interface HudSnapshot {
   introRadioVisible?: boolean;
   introRadioText?: string;
   tutorialHintOpacity?: number;
+  awakening?: AwakeningHudSnapshot;
   minimap?: MinimapTelemetry;
 }
 

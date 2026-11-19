@@ -1,5 +1,7 @@
 import * as THREE from 'three';
+import type { AwakeningViewmodelPose } from './awakening';
 import type { ProceduralTextureSet } from './textures';
+import { WEAPONS_BY_ID, type WeaponId } from './weapons';
 
 export type WeaponAnimState =
   | 'idle'
@@ -30,6 +32,10 @@ export interface ParkourAnimDetail {
   leftGripWorld?: THREE.Vector3;
   rightGripWorld?: THREE.Vector3;
   ledgeNormalWorld?: THREE.Vector3;
+  awakeningActive?: boolean;
+  awakeningPose?: AwakeningViewmodelPose;
+  awakeningBatEmissive?: THREE.Color | null;
+  awakeningBatEmissiveIntensity?: number;
 }
 
 interface SparkParticle {
@@ -70,8 +76,9 @@ interface ThumbJoints {
 }
 
 type LeftHandPose = 'RELAXED_IDLE' | 'OPEN_REACH' | 'FIST_CLENCH' | 'LEDGE_CLAMP' | 'PALM_PRESS';
+type RightHandPose = 'UNARMED_READY' | 'TIGHT_FIST' | 'WEAPON_GRIP' | 'PARKOUR_OPEN';
 
-interface LeftFingerAngles {
+interface FingerAngles {
   mcp: number;
   pip: number;
   dip: number;
@@ -84,18 +91,18 @@ const DEG2RAD = Math.PI / 180;
 const LEFT_POSE_TABLE: Record<
   LeftHandPose,
   {
-    fingers: [LeftFingerAngles, LeftFingerAngles, LeftFingerAngles, LeftFingerAngles]; // Index, Middle, Ring, Pinky
+    fingers: [FingerAngles, FingerAngles, FingerAngles, FingerAngles]; // Index, Middle, Ring, Pinky
     thumb: { cmcX: number; cmcY: number; cmcZ: number; mcp: number; ip: number };
   }
 > = {
   RELAXED_IDLE: {
     fingers: [
-      { mcp: 22, pip: 28, dip: 15, splay: -2.5 },
-      { mcp: 28, pip: 34, dip: 18, splay: -0.5 },
-      { mcp: 34, pip: 40, dip: 22, splay: 1.5 },
-      { mcp: 40, pip: 45, dip: 25, splay: 3.5 },
+      { mcp: 14, pip: 18, dip: 12, splay: -3.5 }, // Index (lead pointer)
+      { mcp: 22, pip: 26, dip: 16, splay: -1.0 }, // Middle (slightly deeper curl)
+      { mcp: 30, pip: 34, dip: 20, splay: 1.5 }, // Ring
+      { mcp: 38, pip: 42, dip: 24, splay: 4.0 }, // Pinky
     ],
-    thumb: { cmcX: 20, cmcY: -22, cmcZ: -18, mcp: 14, ip: 12 },
+    thumb: { cmcX: 18, cmcY: -26, cmcZ: -32, mcp: 18, ip: 16 },
   },
   OPEN_REACH: {
     fingers: [
@@ -135,6 +142,56 @@ const LEFT_POSE_TABLE: Record<
   },
 };
 
+// Right-Hand 4-state articulated finger targets (degrees, Index -> Pinky)
+const RIGHT_POSE_TABLE: Record<
+  RightHandPose,
+  {
+    fingers: [FingerAngles, FingerAngles, FingerAngles, FingerAngles];
+    thumb: { cmcX: number; cmcY: number; cmcZ: number; mcp: number; ip: number };
+  }
+> = {
+  // State A: Unarmed / Parkour Ready — natural relaxed semi-fist (45 / 55 / 35)
+  UNARMED_READY: {
+    fingers: [
+      { mcp: 42, pip: 52, dip: 32, splay: 2.5 },
+      { mcp: 45, pip: 55, dip: 35, splay: 0.6 },
+      { mcp: 48, pip: 58, dip: 37, splay: -1.2 },
+      { mcp: 52, pip: 62, dip: 40, splay: -3.0 },
+    ],
+    thumb: { cmcX: 28, cmcY: -22, cmcZ: 8, mcp: 24, ip: 22 },
+  },
+  // State B: Tight Combat Fist — clenched 85°-95° with thumb locked across index/middle
+  TIGHT_FIST: {
+    fingers: [
+      { mcp: 88, pip: 95, dip: 86, splay: 0 },
+      { mcp: 88, pip: 95, dip: 86, splay: 0 },
+      { mcp: 89, pip: 95, dip: 86, splay: 0 },
+      { mcp: 90, pip: 94, dip: 85, splay: 0 },
+    ],
+    thumb: { cmcX: 54, cmcY: -46, cmcZ: 20, mcp: 48, ip: 56 },
+  },
+  // State C: Weapon Grip Pose — wraps around equipped weapon's gripRadius
+  WEAPON_GRIP: {
+    fingers: [
+      { mcp: 78, pip: 78, dip: 64, splay: -8.5 },
+      { mcp: 80, pip: 78, dip: 64, splay: -9.5 },
+      { mcp: 81, pip: 79, dip: 64, splay: -10.0 },
+      { mcp: 83, pip: 80, dip: 65, splay: -10.5 },
+    ],
+    thumb: { cmcX: 46, cmcY: -36, cmcZ: 12, mcp: 38, ip: 40 },
+  },
+  // State D: Parkour Vault & Ledge Grab Pose — splayed open 10°-15°
+  PARKOUR_OPEN: {
+    fingers: [
+      { mcp: 10, pip: 12, dip: 9, splay: 5.5 },
+      { mcp: 11, pip: 14, dip: 10, splay: 1.8 },
+      { mcp: 12, pip: 15, dip: 11, splay: -1.8 },
+      { mcp: 14, pip: 16, dip: 12, splay: -5.5 },
+    ],
+    thumb: { cmcX: 10, cmcY: -12, cmcZ: -32, mcp: 8, ip: 6 },
+  },
+};
+
 // Pre-allocated math helpers (zero GC inside update loop)
 const _toTarget = new THREE.Vector3();
 const _uDir = new THREE.Vector3();
@@ -159,18 +216,53 @@ const _tipWorld = new THREE.Vector3();
 const _baseWorld = new THREE.Vector3();
 const _trailLocalTip = new THREE.Vector3();
 const _trailLocalBase = new THREE.Vector3();
-const _leftPole = new THREE.Vector3(-0.62, -0.82, 0.24).normalize();
+const _leftPole = new THREE.Vector3(-0.36, -0.88, 0.18).normalize();
 const _rightPole = new THREE.Vector3(0.62, -0.82, 0.24).normalize();
 const _ikLeftLocal = new THREE.Vector3();
 const _ikRightLocal = new THREE.Vector3();
 const _ikReachVec = new THREE.Vector3();
-const _ikLeftShoulder = new THREE.Vector3(-0.36, -0.5, 0.04);
+const _ikLeftShoulder = new THREE.Vector3(-0.28, -0.46, 0.02);
 const _ikRightShoulder = new THREE.Vector3(0.36, -0.5, 0.04);
 
 const TRAIL_SEGMENTS = 14;
 
 function smoothGeo<T extends THREE.BufferGeometry>(geo: T): T {
   geo.computeVertexNormals();
+  return geo;
+}
+
+/**
+ * Adds subtle baked ambient-occlusion vertex colors along Y (0 = proximal crease, 1 = distal end)
+ * so skin creases near knuckles, wrist wraps, and sleeve cuffs never wash out under harsh lights.
+ */
+function applySkinVertexAO<T extends THREE.BufferGeometry>(
+  geo: T,
+  bottomAO = 0.74,
+  midAO = 1.0,
+  topAO = 0.86,
+): T {
+  const pos = geo.attributes.position;
+  if (!pos) return geo;
+  let minY = Infinity;
+  let maxY = -Infinity;
+  for (let i = 0; i < pos.count; i++) {
+    const y = pos.getY(i);
+    if (y < minY) minY = y;
+    if (y > maxY) maxY = y;
+  }
+  const span = Math.max(0.0001, maxY - minY);
+  const colors = new Float32Array(pos.count * 3);
+  for (let i = 0; i < pos.count; i++) {
+    const t = (pos.getY(i) - minY) / span;
+    const bell = Math.sin(t * Math.PI);
+    const endMix = THREE.MathUtils.lerp(bottomAO, topAO, t);
+    const ao = THREE.MathUtils.lerp(endMix, midAO, bell * 0.85);
+    // Subtle warm grime shift in AO shadows
+    colors[i * 3] = ao;
+    colors[i * 3 + 1] = ao * (0.95 + 0.05 * ao);
+    colors[i * 3 + 2] = ao * (0.92 + 0.08 * ao);
+  }
+  geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
   return geo;
 }
 
@@ -183,8 +275,8 @@ function createTaperedLimbGeo(
   radiusMid: number,
   radiusTop: number,
   length: number,
-  radialSegments = 16,
-  capSegments = 8,
+  radialSegments = 12,
+  capSegments = 6,
 ): THREE.LatheGeometry {
   const pts: THREE.Vector2[] = [];
   // Bottom cap dome
@@ -211,6 +303,362 @@ function createTaperedLimbGeo(
     pts.push(new THREE.Vector2(r, y));
   }
   return smoothGeo(new THREE.LatheGeometry(pts, radialSegments));
+}
+
+/**
+ * Applies warm weathered survivor vertex shading (#C88D6B base -> #A86E50 in creases, hollows, wrist & tip dirt)
+ * for bare-hand meshes whose material base color is #C88D6B.
+ */
+function applyLeftBareSkinShading<T extends THREE.BufferGeometry>(
+  geo: T,
+  mode: 'forearm' | 'palm' | 'phalanx' | 'web',
+): T {
+  const pos = geo.attributes.position;
+  if (!pos) return geo;
+  let minY = Infinity;
+  let maxY = -Infinity;
+  for (let i = 0; i < pos.count; i++) {
+    const y = pos.getY(i);
+    if (y < minY) minY = y;
+    if (y > maxY) maxY = y;
+  }
+  const span = Math.max(0.0001, maxY - minY);
+  const colors = new Float32Array(pos.count * 3);
+
+  // Target #A86E50 relative to #C88D6B base => (0.84, 0.78, 0.75)
+  const creaseR = 0.84;
+  const creaseG = 0.78;
+  const creaseB = 0.75;
+
+  for (let i = 0; i < pos.count; i++) {
+    const x = pos.getX(i);
+    const y = pos.getY(i);
+    const z = pos.getZ(i);
+    const t = (y - minY) / span;
+    let warmth = 0; // 0 = clean #C88D6B, 1 = deep #A86E50 crease/dirt
+
+    if (mode === 'forearm') {
+      // Sleeve edge grime + wrist bone crease + subtle inner-forearm ventral shadow
+      const cuffAO = Math.max(0, 1 - t / 0.16) * 0.78;
+      const wristAO = Math.max(0, (t - 0.84) / 0.16) * 0.65;
+      const ventralAO = z < 0 ? Math.min(0.45, (-z / 0.036) * 0.45) : 0;
+      warmth = Math.min(1, Math.max(cuffAO, wristAO) + ventralAO * 0.55);
+    } else if (mode === 'palm') {
+      // Palmar hollow, wrist crease, tendon valleys, and subtle knuckle dirt
+      const wristCrease = Math.max(0, 1 - t / 0.2) * 0.68;
+      const palmHollow = z < -0.002 ? Math.min(0.85, (-z / 0.013) * 0.7 + (1 - Math.abs(x) / 0.038) * 0.25) : 0;
+      const tendonValley = z > 0.002 ? Math.max(0, 0.5 - 0.5 * Math.cos((x / 0.018) * Math.PI * 2)) * 0.35 : 0;
+      const knuckleWeather = t > 0.78 && z > 0.004 ? ((t - 0.78) / 0.22) * 0.35 : 0;
+      warmth = Math.min(1, Math.max(wristCrease, palmHollow, tendonValley + knuckleWeather));
+    } else if (mode === 'phalanx') {
+      // Knuckle flexion creases at both ends + light dirt weathering near distal tip
+      const proxCrease = Math.max(0, 1 - t / 0.22) * 0.75;
+      const distCrease = Math.max(0, (t - 0.78) / 0.22) * 0.62;
+      const palmarShade = z < 0 ? 0.28 : 0;
+      warmth = Math.min(1, Math.max(proxCrease, distCrease) + palmarShade);
+    } else {
+      // Purlicue web crease transition
+      warmth = 0.55;
+    }
+
+    colors[i * 3] = THREE.MathUtils.lerp(1.0, creaseR, warmth);
+    colors[i * 3 + 1] = THREE.MathUtils.lerp(1.0, creaseG, warmth);
+    colors[i * 3 + 2] = THREE.MathUtils.lerp(1.0, creaseB, warmth);
+  }
+
+  geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+  return geo;
+}
+
+/**
+ * Custom lofted multi-ring bare forearm (12 radial segments, 8 longitudinal rings, closed caps)
+ * with outer brachioradialis muscle bulge, flatter ventral inner plane, and ulnar/radial styloid wrist bones.
+ */
+function createAnatomicalForearmGeo(yStart: number, yEnd: number): THREE.BufferGeometry {
+  const radSegs = 12;
+  const rings = 8;
+  const span = yEnd - yStart;
+  const positions: number[] = [];
+  const uvs: number[] = [];
+  const indices: number[] = [];
+
+  for (let r = 0; r <= rings; r++) {
+    const u = r / rings;
+    const y = yStart + u * span;
+    // Muscular taper: fuller upper-mid forearm -> narrow oval wrist
+    const baseR =
+      u < 0.35
+        ? THREE.MathUtils.lerp(0.047, 0.0435, u / 0.35)
+        : THREE.MathUtils.lerp(0.0435, 0.0285, (u - 0.35) / 0.65);
+
+    for (let s = 0; s < radSegs; s++) {
+      const theta = (s / radSegs) * Math.PI * 2;
+      const cosT = Math.cos(theta); // +X = radial (thumb side), -X = ulnar (outer left)
+      const sinT = Math.sin(theta); // +Z = dorsal (back), -Z = ventral (inner palm)
+
+      let rx = baseR * 1.1;
+      let rz = baseR * 0.84;
+
+      // Outer brachioradialis muscle belly bulge along dorsal-radial & outer upper forearm
+      const brachioBell = Math.sin(THREE.MathUtils.clamp((u - 0.05) / 0.6, 0, 1) * Math.PI);
+      if (cosT < 0.25 && sinT > -0.35) {
+        rx += brachioBell * 0.0046;
+        rz += brachioBell * 0.0032;
+      }
+
+      // Flatter ventral (-Z) inner forearm plane
+      if (sinT < 0) {
+        rz *= 0.86;
+      }
+
+      // Subtle ulnar (-X, +Z) & radial (+X) styloid wrist bone bumps just behind wrist joint
+      const styloidBell = Math.exp(-Math.pow((u - 0.9) / 0.08, 2));
+      if (cosT < -0.5 && sinT > 0.1) {
+        rx += styloidBell * 0.0028;
+        rz += styloidBell * 0.0022;
+      } else if (cosT > 0.65 && Math.abs(sinT) < 0.65) {
+        rx += styloidBell * 0.0022;
+      }
+
+      positions.push(cosT * rx, y, sinT * rz);
+      uvs.push(s / radSegs, u);
+    }
+  }
+
+  for (let r = 0; r < rings; r++) {
+    const row0 = r * radSegs;
+    const row1 = (r + 1) * radSegs;
+    for (let s = 0; s < radSegs; s++) {
+      const next = (s + 1) % radSegs;
+      const a = row0 + s;
+      const b = row0 + next;
+      const c = row1 + s;
+      const d = row1 + next;
+      indices.push(a, c, b, b, c, d);
+    }
+  }
+
+  // Closed proximal & distal end caps
+  const botCenterIdx = positions.length / 3;
+  positions.push(0, yStart, 0);
+  uvs.push(0.5, 0);
+  for (let s = 0; s < radSegs; s++) {
+    indices.push(botCenterIdx, s, (s + 1) % radSegs);
+  }
+
+  const topCenterIdx = positions.length / 3;
+  positions.push(0, yEnd, 0);
+  uvs.push(0.5, 1);
+  const topRow = rings * radSegs;
+  for (let s = 0; s < radSegs; s++) {
+    indices.push(topCenterIdx, topRow + ((s + 1) % radSegs), topRow + s);
+  }
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geo.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+  geo.setIndex(indices);
+  return applyLeftBareSkinShading(smoothGeo(geo), 'forearm');
+}
+
+/**
+ * Thick multi-layered folded sleeve cuff with jagged stylized fabric creases at forearm base.
+ */
+function createFoldedSleeveCuffGeo(yStart: number, yEnd: number): THREE.BufferGeometry {
+  const radSegs = 12;
+  const rings = 5;
+  const span = yEnd - yStart;
+  const positions: number[] = [];
+  const uvs: number[] = [];
+  const indices: number[] = [];
+
+  for (let r = 0; r <= rings; r++) {
+    const u = r / rings;
+    const yBase = yStart + u * span;
+    const cuffFlare = u > 0.55 ? Math.sin(((u - 0.55) / 0.45) * Math.PI) * 0.0065 : 0;
+    const baseR = THREE.MathUtils.lerp(0.052, 0.047, u) + cuffFlare;
+
+    for (let s = 0; s < radSegs; s++) {
+      const theta = (s / radSegs) * Math.PI * 2;
+      const crease =
+        Math.sin(theta * 5 + r * 0.9) * 0.0028 +
+        Math.cos(theta * 3 - r * 0.6) * 0.0022;
+      const rLocal = baseR + crease;
+      const yRipple = u > 0.7 ? Math.sin(theta * 4 + s * 0.4) * 0.0038 : 0;
+      positions.push(Math.cos(theta) * rLocal * 1.08, yBase + yRipple, Math.sin(theta) * rLocal * 0.88);
+      uvs.push(s / radSegs, u);
+    }
+  }
+
+  for (let r = 0; r < rings; r++) {
+    const row0 = r * radSegs;
+    const row1 = (r + 1) * radSegs;
+    for (let s = 0; s < radSegs; s++) {
+      const next = (s + 1) % radSegs;
+      indices.push(row0 + s, row1 + s, row0 + next, row0 + next, row1 + s, row1 + next);
+    }
+  }
+
+  const botIdx = positions.length / 3;
+  positions.push(0, yStart, 0);
+  uvs.push(0.5, 0);
+  for (let s = 0; s < radSegs; s++) {
+    indices.push(botIdx, s, (s + 1) % radSegs);
+  }
+  const topIdx = positions.length / 3;
+  positions.push(0, yEnd, 0);
+  uvs.push(0.5, 1);
+  const topRow = rings * radSegs;
+  for (let s = 0; s < radSegs; s++) {
+    indices.push(topIdx, topRow + ((s + 1) % radSegs), topRow + s);
+  }
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geo.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+  geo.setIndex(indices);
+  return smoothGeo(geo);
+}
+
+/**
+ * Wedge-tapered bare palm geometry with arched dorsum (+Z), 4 extensor tendon ridges,
+ * concave palmar hollow (-Z), and thenar pad fullness on radial (+X) base.
+ */
+function createBarePalmGeo(): THREE.BufferGeometry {
+  const radSegs = 12;
+  const rings = 6;
+  const yStart = -0.005;
+  const yEnd = 0.083;
+  const positions: number[] = [];
+  const uvs: number[] = [];
+  const indices: number[] = [];
+
+  for (let r = 0; r <= rings; r++) {
+    const u = r / rings;
+    const y = THREE.MathUtils.lerp(yStart, yEnd, u);
+    const halfWidth = THREE.MathUtils.lerp(0.029, 0.04, Math.sin(u * Math.PI * 0.68));
+    const halfThick = THREE.MathUtils.lerp(0.0135, 0.0108, u);
+
+    for (let s = 0; s < radSegs; s++) {
+      const theta = (s / radSegs) * Math.PI * 2;
+      const cosT = Math.cos(theta);
+      const sinT = Math.sin(theta);
+
+      let x = cosT * halfWidth;
+      let z = sinT * halfThick;
+
+      // Dorsal arch & 4 extensor tendon ridges fanning from wrist toward knuckles
+      if (sinT > 0.15) {
+        const arch = (1 - cosT * cosT * 0.55) * 0.0026;
+        const tendonFan = Math.pow(0.5 + 0.5 * Math.cos(cosT * 3.8 * Math.PI), 2) * 0.0014 * Math.sin(u * Math.PI);
+        z += arch + tendonFan;
+      }
+
+      // Concave palm hollow (-Z) + thenar swelling on radial (+X) wrist base
+      if (sinT < -0.15) {
+        const hollow = (1 - cosT * cosT) * 0.0024 * Math.sin(u * Math.PI);
+        z += hollow;
+        if (cosT > 0.25 && u < 0.58) {
+          const thenarBell = Math.sin((u / 0.58) * Math.PI);
+          z -= thenarBell * 0.0038 * cosT;
+          x += thenarBell * 0.0024;
+        }
+      }
+
+      // Subtle ulnar heel ridge (-X)
+      if (cosT < -0.65 && u < 0.5) {
+        x -= Math.sin((u / 0.5) * Math.PI) * 0.002;
+      }
+
+      positions.push(x, y, z);
+      uvs.push(s / radSegs, u);
+    }
+  }
+
+  for (let r = 0; r < rings; r++) {
+    const row0 = r * radSegs;
+    const row1 = (r + 1) * radSegs;
+    for (let s = 0; s < radSegs; s++) {
+      const next = (s + 1) % radSegs;
+      indices.push(row0 + s, row1 + s, row0 + next, row0 + next, row1 + s, row1 + next);
+    }
+  }
+
+  const botIdx = positions.length / 3;
+  positions.push(0, yStart, 0);
+  uvs.push(0.5, 0);
+  for (let s = 0; s < radSegs; s++) {
+    indices.push(botIdx, s, (s + 1) % radSegs);
+  }
+  const topIdx = positions.length / 3;
+  positions.push(0, yEnd, 0);
+  uvs.push(0.5, 1);
+  const topRow = rings * radSegs;
+  for (let s = 0; s < radSegs; s++) {
+    indices.push(topIdx, topRow + ((s + 1) % radSegs), topRow + s);
+  }
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geo.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+  geo.setIndex(indices);
+  return applyLeftBareSkinShading(smoothGeo(geo), 'palm');
+}
+
+/**
+ * Stretched triangular thumb-index webbing (purlicue) connecting index metacarpal to abducted thumb base.
+ */
+function createPurlicueWebGeo(): THREE.BufferGeometry {
+  // Thin closed double-sided wedge bridging radial palm edge (+X) to thumb mid-proximal zone
+  const dorsal = [
+    [0.031, 0.036, 0.006], // 0: palm base radial dorsal
+    [0.031, 0.072, 0.004], // 1: index MCP dorsal
+    [0.056, 0.044, -0.001], // 2: thumb mid dorsal
+    [0.044, 0.056, -0.002], // 3: curved web saddle midpoint
+  ];
+  const palmar = [
+    [0.03, 0.036, -0.004], // 4
+    [0.03, 0.072, -0.003], // 5
+    [0.055, 0.044, -0.008], // 6
+    [0.043, 0.056, -0.007], // 7
+  ];
+  const pts = [...dorsal, ...palmar].flat();
+  const uvs = [
+    0, 0, 0, 1, 1, 0.2, 0.5, 0.6,
+    0, 0, 0, 1, 1, 0.2, 0.5, 0.6,
+  ];
+  const indices = [
+    // Dorsal triangles
+    0, 3, 1, 0, 2, 3,
+    // Palmar triangles
+    4, 5, 7, 4, 7, 6,
+    // Free leading saddle edge (1 -> 3 -> 2) stitched to palmar (5 -> 7 -> 6)
+    1, 3, 7, 1, 7, 5,
+    3, 2, 6, 3, 6, 7,
+    // Inner edges sealed into palm & thumb
+    0, 4, 2, 2, 4, 6,
+    0, 1, 5, 0, 5, 4,
+  ];
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(pts, 3));
+  geo.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+  geo.setIndex(indices);
+  return applyLeftBareSkinShading(smoothGeo(geo), 'web');
+}
+
+/**
+ * Chamfered 8-sided phalanx geometry with subtle proximal/distal knuckle flares and closed rounded tip.
+ */
+function createChamferedPhalanxGeo(r0: number, r1: number, length: number): THREE.BufferGeometry {
+  const pts: THREE.Vector2[] = [];
+  pts.push(new THREE.Vector2(0.0004, -0.001));
+  pts.push(new THREE.Vector2(r0 * 0.96, 0));
+  pts.push(new THREE.Vector2(r0 * 1.04, length * 0.14)); // slight proximal knuckle flare
+  pts.push(new THREE.Vector2(THREE.MathUtils.lerp(r0, r1, 0.45) * 0.94, length * 0.5)); // tapered waist
+  pts.push(new THREE.Vector2(r1 * 1.02, length * 0.85)); // slight distal joint flare
+  pts.push(new THREE.Vector2(r1 * 0.82, length * 0.96));
+  pts.push(new THREE.Vector2(0.0004, length + r1 * 0.18));
+  return applyLeftBareSkinShading(smoothGeo(new THREE.LatheGeometry(pts, 8)), 'phalanx');
 }
 
 /**
@@ -241,10 +689,13 @@ export class WeaponAndEffects {
   private readonly rightThumb!: ThumbJoints;
 
   private readonly batGroup = new THREE.Group();
+  private readonly batWoodMat: THREE.MeshStandardMaterial;
+  private readonly batAuraMesh: THREE.Mesh;
+  private readonly batAuraMat: THREE.MeshBasicMaterial;
   private readonly batTipMarker = new THREE.Object3D();
   private readonly batThroatMarker = new THREE.Object3D();
-  private readonly macheteGroup = new THREE.Group();
-  private readonly pipeGroup = new THREE.Group();
+  private readonly daggerGroup = new THREE.Group();
+  private readonly cleaverGroup = new THREE.Group();
 
   // Biomarker LED material (cyan in day/safe zone, pulsing crimson at night)
   private readonly biomarkerLedMat: THREE.MeshStandardMaterial;
@@ -279,7 +730,10 @@ export class WeaponAndEffects {
   private readonly firecrackerLight: THREE.PointLight;
   private readonly disposables: Array<{ dispose: () => void }> = [];
 
-  private activeWeapon: 'bat' | 'machete' | 'pipe' = 'bat';
+  private activeWeapon: WeaponId = 'bat';
+  private pendingWeapon: WeaponId | null = null;
+  private equipSwapTime = -1;
+  private readonly equipSwapDuration = 0.28;
   private animState: WeaponAnimState = 'idle';
   private animTime = 0;
   private animDuration = 0.44;
@@ -287,29 +741,42 @@ export class WeaponAndEffects {
   private shockwaveTime = -1;
   private kickTime = -1;
   private kickIsDropkick = false;
+  private batEmberTimer = 0;
 
   // Smoothed Kinematic State
-  private readonly curLeftPos = new THREE.Vector3(-0.26, -0.24, -0.38);
-  private readonly curLeftEuler = new THREE.Euler(-1.12, 0.24, -0.18);
-  private readonly curRightPos = new THREE.Vector3(0.28, -0.26, -0.4);
-  private readonly curRightEuler = new THREE.Euler(0.25, -0.35, 0.22);
+  private readonly curLeftPos = new THREE.Vector3(-0.34, -0.24, -0.5);
+  private readonly curLeftEuler = new THREE.Euler(-1.08, 0.36, -0.42);
+  private readonly curRightPos = new THREE.Vector3(0.29, -0.26, -0.44);
+  private readonly curRightEuler = new THREE.Euler(-0.38, 0.95, -1.05);
   private curVmRoll = 0;
   private curVmPullback = 0;
   private swayYawLag = 0;
   private swayPitchLag = 0;
-  private readonly curLeftCurl = [22, 28, 34, 40];
-  private readonly curLeftPip = [28, 34, 40, 45];
-  private readonly curLeftDip = [15, 18, 22, 25];
-  private readonly curLeftSplay = [-2.5, -0.5, 1.5, 3.5];
-  private curThumbCmcX = 20;
-  private curThumbCmcY = -22;
-  private curThumbCmcZ = -18;
-  private curThumbMcp = 14;
-  private curThumbIp = 12;
+  private landingDipPos = 0;
+  private landingDipVel = 0;
+  private readonly curLeftCurl = [14, 22, 30, 38];
+  private readonly curLeftPip = [18, 26, 34, 42];
+  private readonly curLeftDip = [12, 16, 20, 24];
+  private readonly curLeftSplay = [-3.5, -1.0, 1.5, 4.0];
+  private curThumbCmcX = 18;
+  private curThumbCmcY = -26;
+  private curThumbCmcZ = -32;
+  private curThumbMcp = 18;
+  private curThumbIp = 16;
+
+  private readonly curRightCurl = [78, 80, 81, 83];
+  private readonly curRightPip = [78, 78, 79, 80];
+  private readonly curRightDip = [64, 64, 64, 65];
+  private readonly curRightSplay = [-8.5, -9.5, -10.0, -10.5];
+  private curRThumbCmcX = 46;
+  private curRThumbCmcY = -36;
+  private curRThumbCmcZ = 12;
+  private curRThumbMcp = 38;
+  private curRThumbIp = 40;
   private curRightExertion = 0;
 
-  private readonly upperArmLen = 0.34;
-  private readonly forearmLen = 0.27;
+  private readonly upperArmLen = 0.36;
+  private readonly forearmLen = 0.28;
 
   private readonly scene: THREE.Scene;
   private readonly camera: THREE.PerspectiveCamera;
@@ -330,156 +797,307 @@ export class WeaponAndEffects {
     camera.add(this.viewmodelGroup);
 
     // =========================================================================
-    // MATERIALS (PBR Standard with procedural CanvasTextures)
+    // MATERIALS (Anti-blowout calibrated PBR Standard materials)
     // =========================================================================
     const skinMat = trackMat(
       new THREE.MeshStandardMaterial({
         map: textures.skinDetail,
-        color: 0xffffff,
-        roughness: 0.62,
-        metalness: 0.02,
+        color: 0xeac1a8, // * #d89b78 => #C98E6B warm survivor skin tone
+        roughness: 0.78,
+        metalness: 0.0,
+        emissive: 0x000000,
+        envMapIntensity: 0.4,
+        vertexColors: true,
+        toneMapped: true,
       }),
     );
     const nailMat = trackMat(
       new THREE.MeshStandardMaterial({
-        color: 0xe8c4b0,
-        roughness: 0.32,
-        metalness: 0.04,
+        color: 0xd9b39c,
+        roughness: 0.42,
+        metalness: 0.0,
+        envMapIntensity: 0.35,
+        toneMapped: true,
       }),
     );
     const sleeveMat = trackMat(
       new THREE.MeshStandardMaterial({
         map: textures.zombieCloth,
-        color: 0x353d30,
+        color: 0x454d49, // #3A403D rolled olive-slate survivor sleeve cuff
         roughness: 0.88,
         metalness: 0.02,
+        envMapIntensity: 0.35,
+        toneMapped: true,
       }),
     );
     const gloveMat = trackMat(
       new THREE.MeshStandardMaterial({
         map: textures.tacticalGlove,
-        color: 0xffffff,
-        roughness: 0.45,
-        metalness: 0.06,
+        color: 0xd0d4dc, // #22252A matte charcoal fingerless tactical glove
+        roughness: 0.85,
+        metalness: 0.05,
+        envMapIntensity: 0.4,
+        toneMapped: true,
+      }),
+    );
+    const palmGripMat = trackMat(
+      new THREE.MeshStandardMaterial({
+        map: textures.tacticalGlove,
+        color: 0x9aa0aa, // Perforated inner-palm & Velcro strap reinforcement
+        roughness: 0.92,
+        metalness: 0.04,
+        envMapIntensity: 0.35,
+        toneMapped: true,
       }),
     );
     const carbonPadMat = trackMat(
       new THREE.MeshStandardMaterial({
-        color: 0x262b33,
-        roughness: 0.28,
-        metalness: 0.46,
+        color: 0x15171a, // Hard-shell beveled carbon knuckle guard
+        roughness: 0.35,
+        metalness: 0.45,
+        envMapIntensity: 0.4,
+        toneMapped: true,
       }),
     );
     const wristWrapMat = trackMat(
       new THREE.MeshStandardMaterial({
         map: textures.wristWrapTape,
-        color: 0xffffff,
-        roughness: 0.86,
-        metalness: 0.02,
+        color: 0x26292f, // #1E2024 matte-charcoal athletic compression wrist wrap
+        roughness: 0.88,
+        metalness: 0.03,
+        envMapIntensity: 0.35,
+        toneMapped: true,
       }),
     );
-    const nylonStrapMat = trackMat(
+    const watchStrapMat = trackMat(
       new THREE.MeshStandardMaterial({
-        map: textures.tacticalGlove,
-        color: 0x1a1d22,
-        roughness: 0.72,
-        metalness: 0.05,
+        map: textures.wristWrapTape,
+        color: 0x353b32, // #2D322B paracord / nylon survival wrist strap
+        roughness: 0.84,
+        metalness: 0.06,
+        envMapIntensity: 0.4,
+        toneMapped: true,
       }),
     );
     const bezelMetalMat = trackMat(
       new THREE.MeshStandardMaterial({
         color: 0x6c7480,
-        roughness: 0.28,
-        metalness: 0.86,
+        roughness: 0.32,
+        metalness: 0.82,
+        envMapIntensity: 0.45,
+        toneMapped: true,
       }),
     );
     this.biomarkerLedMat = trackMat(
       new THREE.MeshStandardMaterial({
-        color: 0x00f0ff,
-        emissive: 0x00f0ff,
-        emissiveIntensity: 2.1,
-        roughness: 0.15,
+        color: 0x7eeeff,
+        emissive: 0x5ce1ff,
+        emissiveIntensity: 0.72,
+        roughness: 0.2,
         metalness: 0.1,
-        toneMapped: false,
+        toneMapped: true,
+      }),
+    );
+
+    // Calibrated Bare Left-Arm Survivor Skin & Nail + Tactical Watch + Paracord Materials
+    const leftSkinMat = trackMat(
+      new THREE.MeshStandardMaterial({
+        color: 0xc88d6b,
+        bumpMap: textures.skinDetail,
+        bumpScale: 0.0024,
+        roughness: 0.76,
+        metalness: 0.0,
+        emissive: 0x000000,
+        envMapIntensity: 0.35,
+        vertexColors: true,
+        toneMapped: true,
+      }),
+    );
+    const leftNailMat = trackMat(
+      new THREE.MeshStandardMaterial({
+        color: 0xd8ae96,
+        roughness: 0.55,
+        metalness: 0.0,
+        envMapIntensity: 0.3,
+        toneMapped: true,
+      }),
+    );
+    const leftSleeveMat = trackMat(
+      new THREE.MeshStandardMaterial({
+        map: textures.zombieCloth,
+        color: 0x353b36, // #2B302C dark charcoal-olive folded sleeve cuff
+        roughness: 0.9,
+        metalness: 0.02,
+        envMapIntensity: 0.3,
+        toneMapped: true,
+      }),
+    );
+    const watchStrapMatLeft = trackMat(
+      new THREE.MeshStandardMaterial({
+        map: textures.tacticalGlove,
+        color: 0x1e2024, // #1A1C20 ballistic nylon/rubber watch strap
+        roughness: 0.88,
+        metalness: 0.04,
+        envMapIntensity: 0.32,
+        toneMapped: true,
+      }),
+    );
+    const watchSteelMat = trackMat(
+      new THREE.MeshStandardMaterial({
+        color: 0x25282e, // Chunky octagonal dark-steel watch case & notched bezel
+        roughness: 0.35,
+        metalness: 0.6,
+        envMapIntensity: 0.45,
+        toneMapped: true,
+      }),
+    );
+    const gunmetalBuckleMat = trackMat(
+      new THREE.MeshStandardMaterial({
+        color: 0x525862, // Brushed gunmetal tang buckle & crown
+        roughness: 0.32,
+        metalness: 0.78,
+        envMapIntensity: 0.45,
+        toneMapped: true,
       }),
     );
     const watchFaceBackingMat = trackMat(
       new THREE.MeshStandardMaterial({
-        color: 0x090e16,
-        roughness: 0.22,
-        metalness: 0.4,
+        color: 0x0e1116, // Recessed dark tactical dial
+        roughness: 0.42,
+        metalness: 0.12,
+        envMapIntensity: 0.25,
+      }),
+    );
+    const watchAmberTickMat = trackMat(
+      new THREE.MeshStandardMaterial({
+        color: 0xe6a640,
+        emissive: 0xd9942a,
+        emissiveIntensity: 0.55,
+        roughness: 0.3,
+        metalness: 0.1,
+        toneMapped: true,
+      }),
+    );
+    const watchGlassMat = trackMat(
+      new THREE.MeshStandardMaterial({
+        color: 0x9fb8cc,
+        roughness: 0.12,
+        metalness: 0.1,
+        transparent: true,
+        opacity: 0.2,
+        envMapIntensity: 0.45,
+        depthWrite: false,
+      }),
+    );
+    const paracordOliveMat = trackMat(
+      new THREE.MeshStandardMaterial({
+        color: 0x4a523b,
+        roughness: 0.88,
+        metalness: 0.02,
+        envMapIntensity: 0.28,
+        toneMapped: true,
+      }),
+    );
+    const paracordBrownMat = trackMat(
+      new THREE.MeshStandardMaterial({
+        color: 0x362b23,
+        roughness: 0.88,
+        metalness: 0.02,
+        envMapIntensity: 0.28,
+        toneMapped: true,
+      }),
+    );
+    const crimsonAgletMat = trackMat(
+      new THREE.MeshStandardMaterial({
+        color: 0x8b2626,
+        roughness: 0.48,
+        metalness: 0.12,
+        envMapIntensity: 0.35,
+        toneMapped: true,
       }),
     );
 
-    const batWoodMat = trackMat(
+    this.batWoodMat = trackMat(
       new THREE.MeshStandardMaterial({
         map: textures.baseballBatWood,
-        color: 0xffffff,
-        roughness: 0.56,
+        color: 0xeadfce,
+        emissive: 0x000000,
+        emissiveIntensity: 1.0,
+        roughness: 0.62,
         metalness: 0.04,
+        envMapIntensity: 0.4,
+        toneMapped: true,
       }),
     );
+    const batWoodMat = this.batWoodMat;
     const batGripMat = trackMat(
       new THREE.MeshStandardMaterial({
         map: textures.batGripTape,
-        color: 0xffffff,
+        color: 0xd4d4d8,
         roughness: 0.88,
         metalness: 0.04,
+        envMapIntensity: 0.35,
+        toneMapped: true,
       }),
     );
     const pommelMat = trackMat(
       new THREE.MeshStandardMaterial({
         map: textures.baseballBatWood,
-        color: 0xa47748,
-        roughness: 0.62,
+        color: 0x9b6f42,
+        roughness: 0.66,
         metalness: 0.04,
+        envMapIntensity: 0.4,
+        toneMapped: true,
       }),
     );
 
-    // Swappable weapon materials (machete / pipe)
-    const leatherMat = trackMat(new THREE.MeshStandardMaterial({ color: 0x3b2618, roughness: 0.82 }));
-    const rustPipeMat = trackMat(
+    // Swappable weapon materials (dagger / heavy cleaver)
+    const leatherMat = trackMat(
       new THREE.MeshStandardMaterial({
-        map: textures.rustedMetal,
-        color: 0x6b6f75,
-        roughness: 0.56,
-        metalness: 0.78,
+        color: 0x3b2618,
+        roughness: 0.84,
+        envMapIntensity: 0.35,
       }),
     );
     const forgedBladeMat = trackMat(
       new THREE.MeshStandardMaterial({
         map: textures.rustedMetal,
         color: 0x454b54,
-        roughness: 0.44,
-        metalness: 0.82,
+        roughness: 0.46,
+        metalness: 0.8,
+        envMapIntensity: 0.42,
       }),
     );
     const edgeSteelMat = trackMat(
       new THREE.MeshStandardMaterial({
-        color: 0xcbd5e1,
-        roughness: 0.2,
-        metalness: 0.95,
+        color: 0xbac4d0,
+        roughness: 0.24,
+        metalness: 0.9,
+        envMapIntensity: 0.45,
       }),
     );
     const darkIronMat = trackMat(
       new THREE.MeshStandardMaterial({
         color: 0x292d34,
-        roughness: 0.38,
-        metalness: 0.88,
+        roughness: 0.4,
+        metalness: 0.85,
+        envMapIntensity: 0.42,
       }),
     );
     const copperWireMat = trackMat(
       new THREE.MeshStandardMaterial({
-        color: 0xd97706,
-        roughness: 0.28,
-        metalness: 0.85,
+        color: 0xc86d0a,
+        roughness: 0.3,
+        metalness: 0.84,
+        envMapIntensity: 0.42,
       }),
     );
     const bloodRustMat = trackMat(
       new THREE.MeshStandardMaterial({
         color: 0x7c2d12,
-        roughness: 0.72,
-        metalness: 0.25,
+        roughness: 0.74,
+        metalness: 0.22,
+        envMapIntensity: 0.35,
       }),
     );
     const jeanMat = trackMat(
@@ -487,161 +1105,285 @@ export class WeaponAndEffects {
         map: textures.zombieCloth,
         color: 0x394433,
         roughness: 0.88,
+        envMapIntensity: 0.35,
       }),
     );
-    const bootMat = trackMat(new THREE.MeshStandardMaterial({ color: 0x423830, roughness: 0.62 }));
-    const soleMat = trackMat(new THREE.MeshStandardMaterial({ color: 0x18181b, roughness: 0.92 }));
+    const bootMat = trackMat(new THREE.MeshStandardMaterial({ color: 0x423830, roughness: 0.66, envMapIntensity: 0.35 }));
+    const soleMat = trackMat(new THREE.MeshStandardMaterial({ color: 0x18181b, roughness: 0.92, envMapIntensity: 0.3 }));
 
     // =========================================================================
-    // 1. LEFT ARM SKELETAL RIG (Parkour & Dying Light Biomarker Hand)
+    // 1. LEFT ARM SKELETAL RIG (Bare-Handed Runner Forearm + Field Watch + Paracord)
     // =========================================================================
-    this.leftShoulder.position.set(-0.36, -0.5, 0.04);
+    this.leftShoulder.position.set(-0.28, -0.46, 0.02);
     this.viewmodelGroup.add(this.leftShoulder);
 
-    // Upper Arm (rolled olive/charcoal athletic sleeve)
-    const lUpperGeo = trackGeo(createTaperedLimbGeo(0.055, 0.052, 0.045, this.upperArmLen, 16, 8));
-    const lUpperMesh = new THREE.Mesh(lUpperGeo, sleeveMat);
+    // Upper Arm sleeve extending off-screen back into shoulder
+    const lUpperGeo = trackGeo(createTaperedLimbGeo(0.056, 0.052, 0.046, this.upperArmLen, 12, 6));
+    const lUpperMesh = new THREE.Mesh(lUpperGeo, leftSleeveMat);
     lUpperMesh.scale.set(1.04, 1.0, 0.92);
     this.leftUpperArm.add(lUpperMesh);
     this.leftShoulder.add(this.leftUpperArm);
 
-    // Forearm attached at elbow (0, upperArmLen, 0), tapering 0.042m -> 0.029m
+    // Forearm attached at elbow (0, upperArmLen, 0)
     this.leftForearm.position.set(0, this.upperArmLen, 0);
     this.leftUpperArm.add(this.leftForearm);
 
-    // Rolled sleeve segment covering proximal 0.11m of forearm + thick rolled cuff ring
-    const lLowerSleeveGeo = trackGeo(createTaperedLimbGeo(0.046, 0.047, 0.044, 0.115, 16, 8));
-    const lLowerSleeveMesh = new THREE.Mesh(lLowerSleeveGeo, sleeveMat);
-    lLowerSleeveMesh.scale.set(1.06, 1.0, 0.88);
+    // Rolled-up multi-layered folded dark charcoal-olive fabric cuff (#2B302C) at lower-left edge
+    const lLowerSleeveGeo = trackGeo(createFoldedSleeveCuffGeo(-0.05, 0.105));
+    const lLowerSleeveMesh = new THREE.Mesh(lLowerSleeveGeo, leftSleeveMat);
     this.leftForearm.add(lLowerSleeveMesh);
 
-    const lRolledCuffGeo = trackGeo(smoothGeo(new THREE.TorusGeometry(0.043, 0.0095, 10, 16)));
-    const lRolledCuff = new THREE.Mesh(lRolledCuffGeo, sleeveMat);
-    lRolledCuff.rotation.x = Math.PI / 2;
-    lRolledCuff.scale.set(1.06, 0.88, 1.0);
-    lRolledCuff.position.y = 0.114;
-    this.leftForearm.add(lRolledCuff);
+    const lOuterCuffRollGeo = trackGeo(createFoldedSleeveCuffGeo(0.088, 0.128));
+    const lOuterCuffRoll = new THREE.Mesh(lOuterCuffRollGeo, leftSleeveMat);
+    lOuterCuffRoll.scale.set(1.06, 1.0, 1.06);
+    this.leftForearm.add(lOuterCuffRoll);
 
-    // Bare forearm tapering 0.042m -> 0.029m into wrist
-    const lForearmSkinGeo = trackGeo(createTaperedLimbGeo(0.042, 0.039, 0.029, this.forearmLen - 0.095, 16, 8));
-    const lForearmSkin = new THREE.Mesh(lForearmSkinGeo, skinMat);
-    lForearmSkin.scale.set(1.06, 1.0, 0.84);
-    lForearmSkin.position.y = 0.095;
+    // Custom lofted anatomical bare forearm (12 radial segments, 8 longitudinal rings)
+    const lForearmSkinGeo = trackGeo(createAnatomicalForearmGeo(0.095, this.forearmLen + 0.006));
+    const lForearmSkin = new THREE.Mesh(lForearmSkinGeo, leftSkinMat);
     this.leftForearm.add(lForearmSkin);
 
-    // Dying Light Biomarker Cuff wrapped around distal left wrist (y = 0.232m)
-    const biomarkerGroup = new THREE.Group();
-    biomarkerGroup.position.y = 0.232;
-    this.leftForearm.add(biomarkerGroup);
+    // Braided Paracord Survival Bracelet directly behind watch (y = 0.188m)
+    const paracordGroup = new THREE.Group();
+    paracordGroup.position.y = 0.188;
+    this.leftForearm.add(paracordGroup);
 
-    const nylonStrap = new THREE.Mesh(
-      trackGeo(smoothGeo(new THREE.CylinderGeometry(0.0322, 0.0338, 0.038, 16, 2))),
-      nylonStrapMat,
-    );
-    nylonStrap.scale.set(1.08, 1.0, 0.86);
-    biomarkerGroup.add(nylonStrap);
-
-    // Stitched strap trim ribs
-    [-0.015, 0.015].forEach((ry) => {
-      const rib = new THREE.Mesh(
-        trackGeo(smoothGeo(new THREE.TorusGeometry(0.0332, 0.0022, 8, 16))),
-        carbonPadMat,
+    const weaveCount = 14;
+    for (let w = 0; w < weaveCount; w++) {
+      const ang = (w / weaveCount) * Math.PI * 2;
+      const seg = new THREE.Mesh(
+        trackGeo(smoothGeo(new THREE.BoxGeometry(0.0115, 0.016, 0.0075))),
+        w % 2 === 0 ? paracordOliveMat : paracordBrownMat,
       );
-      rib.rotation.x = Math.PI / 2;
-      rib.scale.set(1.08, 0.86, 1.0);
-      rib.position.y = ry;
-      biomarkerGroup.add(rib);
+      seg.position.set(Math.cos(ang) * 0.0365, (w % 2 === 0 ? 1 : -1) * 0.0012, Math.sin(ang) * 0.0285);
+      seg.rotation.y = -ang + Math.PI * 0.5;
+      seg.rotation.z = (w % 2 === 0 ? 1 : -1) * 0.34;
+      paracordGroup.add(seg);
+    }
+
+    // Outer cobra knot + two short stiffened braided cord tails with crimson aglet beads (#8B2626)
+    const paracordKnot = new THREE.Mesh(
+      trackGeo(smoothGeo(new THREE.BoxGeometry(0.012, 0.019, 0.014))),
+      paracordOliveMat,
+    );
+    paracordKnot.position.set(-0.038, 0, 0.006);
+    paracordGroup.add(paracordKnot);
+
+    [-0.004, 0.005].forEach((cz, idx) => {
+      const tailPivot = new THREE.Group();
+      tailPivot.position.set(-0.041, -0.004, 0.006 + cz);
+      tailPivot.rotation.set(idx === 0 ? -0.32 : -0.18, 0, idx === 0 ? -0.45 : -0.25);
+      paracordGroup.add(tailPivot);
+
+      const cordLen = idx === 0 ? 0.03 : 0.024;
+      const cordMesh = new THREE.Mesh(
+        trackGeo(smoothGeo(new THREE.CylinderGeometry(0.0024, 0.0022, cordLen, 6))),
+        idx === 0 ? paracordBrownMat : paracordOliveMat,
+      );
+      cordMesh.position.y = -cordLen * 0.5;
+      tailPivot.add(cordMesh);
+
+      const agletBead = new THREE.Mesh(
+        trackGeo(smoothGeo(new THREE.CylinderGeometry(0.0031, 0.0028, 0.0075, 8))),
+        crimsonAgletMat,
+      );
+      agletBead.position.y = -cordLen - 0.003;
+      tailPivot.add(agletBead);
     });
 
-    // Metallic Bezel & Glowing Biomarker LED Arc mounted on dorsal (+Z) side of wrist
-    const bezelHousing = new THREE.Mesh(
-      trackGeo(smoothGeo(new THREE.CylinderGeometry(0.022, 0.0235, 0.012, 16))),
-      bezelMetalMat,
-    );
-    bezelHousing.rotation.x = Math.PI / 2;
-    bezelHousing.position.set(0.002, 0, 0.026);
-    biomarkerGroup.add(bezelHousing);
+    // Heavy-Duty Tactical Field Watch mounted snugly at wrist (y = 0.236m), angled outward-upward
+    const watchGroup = new THREE.Group();
+    watchGroup.position.y = 0.236;
+    this.leftForearm.add(watchGroup);
 
-    const dialBacking = new THREE.Mesh(
-      trackGeo(smoothGeo(new THREE.CylinderGeometry(0.0175, 0.0175, 0.004, 16))),
+    // Wide matte-black ballistic nylon/rubber watch strap (#1A1C20)
+    const watchBand = new THREE.Mesh(
+      trackGeo(smoothGeo(new THREE.CylinderGeometry(0.032, 0.0335, 0.035, 12, 1))),
+      watchStrapMatLeft,
+    );
+    watchBand.scale.set(1.12, 1.0, 0.85);
+    watchGroup.add(watchBand);
+
+    // Twin strap keeper loops on underside/radial side
+    [-0.011, 0.008].forEach((ky) => {
+      const keeper = new THREE.Mesh(
+        trackGeo(smoothGeo(new THREE.TorusGeometry(0.0332, 0.0024, 6, 12))),
+        watchStrapMatLeft,
+      );
+      keeper.rotation.x = Math.PI / 2;
+      keeper.scale.set(1.13, 0.86, 1.0);
+      keeper.position.y = ky;
+      watchGroup.add(keeper);
+    });
+
+    // Brushed gunmetal tang buckle on the underside (-Z) of wrist strap
+    const buckleFrame = new THREE.Mesh(
+      trackGeo(smoothGeo(new THREE.BoxGeometry(0.016, 0.028, 0.0055))),
+      gunmetalBuckleMat,
+    );
+    buckleFrame.position.set(0, 0, -0.0285);
+    watchGroup.add(buckleFrame);
+
+    const buckleTang = new THREE.Mesh(
+      trackGeo(smoothGeo(new THREE.CylinderGeometry(0.0016, 0.0016, 0.024, 6))),
+      gunmetalBuckleMat,
+    );
+    buckleTang.rotation.z = Math.PI * 0.5;
+    buckleTang.position.set(0, 0, -0.0308);
+    watchGroup.add(buckleTang);
+
+    // Chunky Octagonal Dark-Steel Watch Housing facing outward-upward toward player camera
+    const watchCaseGroup = new THREE.Group();
+    watchCaseGroup.position.set(-0.007, 0.002, 0.024);
+    watchCaseGroup.rotation.set(-0.04, -0.22, 0);
+    watchGroup.add(watchCaseGroup);
+
+    const lugBridge = new THREE.Mesh(
+      trackGeo(smoothGeo(new THREE.BoxGeometry(0.03, 0.048, 0.0085))),
+      watchSteelMat,
+    );
+    lugBridge.position.z = 0.001;
+    watchCaseGroup.add(lugBridge);
+
+    const octagonalCase = new THREE.Mesh(
+      trackGeo(smoothGeo(new THREE.CylinderGeometry(0.023, 0.0245, 0.012, 8))),
+      watchSteelMat,
+    );
+    octagonalCase.rotation.x = Math.PI / 2;
+    octagonalCase.rotation.y = Math.PI / 8;
+    octagonalCase.position.z = 0.005;
+    watchCaseGroup.add(octagonalCase);
+
+    // Raised notched compass bezel + 12 perimeter grip notches
+    const bezelRing = new THREE.Mesh(
+      trackGeo(smoothGeo(new THREE.TorusGeometry(0.0195, 0.0032, 6, 12))),
+      watchSteelMat,
+    );
+    bezelRing.position.z = 0.0112;
+    watchCaseGroup.add(bezelRing);
+
+    for (let n = 0; n < 12; n++) {
+      const a = (n / 12) * Math.PI * 2;
+      const notch = new THREE.Mesh(
+        trackGeo(smoothGeo(new THREE.BoxGeometry(0.003, 0.0042, 0.0032))),
+        n % 3 === 0 ? gunmetalBuckleMat : watchSteelMat,
+      );
+      notch.position.set(Math.cos(a) * 0.0205, Math.sin(a) * 0.0205, 0.0115);
+      notch.rotation.z = a;
+      watchCaseGroup.add(notch);
+    }
+
+    // Crown guard, center knurled crown, and two side pushers on right (+X) edge of case
+    const crownGuard = new THREE.Mesh(
+      trackGeo(smoothGeo(new THREE.BoxGeometry(0.005, 0.014, 0.008))),
+      watchSteelMat,
+    );
+    crownGuard.position.set(0.0235, 0, 0.0055);
+    watchCaseGroup.add(crownGuard);
+
+    const watchCrown = new THREE.Mesh(
+      trackGeo(smoothGeo(new THREE.CylinderGeometry(0.0036, 0.0036, 0.005, 8))),
+      gunmetalBuckleMat,
+    );
+    watchCrown.rotation.z = Math.PI / 2;
+    watchCrown.position.set(0.0265, 0, 0.0055);
+    watchCaseGroup.add(watchCrown);
+
+    [-0.0105, 0.0105].forEach((py) => {
+      const pusher = new THREE.Mesh(
+        trackGeo(smoothGeo(new THREE.CylinderGeometry(0.0024, 0.0024, 0.0052, 8))),
+        gunmetalBuckleMat,
+      );
+      pusher.rotation.z = Math.PI / 2;
+      pusher.position.set(0.024, py, 0.0055);
+      watchCaseGroup.add(pusher);
+    });
+
+    // Recessed Dark Tactical Dial (#0E1116) + Pale-Cyan/Amber Ticks + Minimalist Hands + Crystal
+    const dialPlate = new THREE.Mesh(
+      trackGeo(smoothGeo(new THREE.CylinderGeometry(0.0172, 0.0172, 0.0022, 16))),
       watchFaceBackingMat,
     );
-    dialBacking.rotation.x = Math.PI / 2;
-    dialBacking.position.set(0.002, 0, 0.0315);
-    biomarkerGroup.add(dialBacking);
+    dialPlate.rotation.x = Math.PI / 2;
+    dialPlate.position.z = 0.0098;
+    watchCaseGroup.add(dialPlate);
 
-    const ledArc = new THREE.Mesh(
-      trackGeo(smoothGeo(new THREE.TorusGeometry(0.0135, 0.0024, 8, 16, Math.PI * 1.45))),
-      this.biomarkerLedMat,
+    for (let h = 0; h < 12; h++) {
+      const a = (h / 12) * Math.PI * 2;
+      const isCardinal = h % 3 === 0;
+      const tick = new THREE.Mesh(
+        trackGeo(new THREE.BoxGeometry(isCardinal ? 0.0018 : 0.0011, isCardinal ? 0.0038 : 0.0024, 0.0008)),
+        h === 0 ? watchAmberTickMat : this.biomarkerLedMat,
+      );
+      tick.position.set(Math.sin(a) * 0.0138, Math.cos(a) * 0.0138, 0.0112);
+      tick.rotation.z = -a;
+      watchCaseGroup.add(tick);
+    }
+
+    const hourHand = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.0016, 0.0085, 0.0008)), watchAmberTickMat);
+    hourHand.position.set(0.0026, 0.0026, 0.0116);
+    hourHand.rotation.z = -0.82;
+    watchCaseGroup.add(hourHand);
+
+    const minuteHand = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.0012, 0.0125, 0.0008)), this.biomarkerLedMat);
+    minuteHand.position.set(-0.0022, 0.0046, 0.0118);
+    minuteHand.rotation.z = 0.44;
+    watchCaseGroup.add(minuteHand);
+
+    const centerPinion = new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.0016, 0.0016, 0.0012, 8)), gunmetalBuckleMat);
+    centerPinion.rotation.x = Math.PI / 2;
+    centerPinion.position.z = 0.012;
+    watchCaseGroup.add(centerPinion);
+
+    const watchCrystal = new THREE.Mesh(
+      trackGeo(smoothGeo(new THREE.CylinderGeometry(0.0176, 0.0176, 0.0012, 16))),
+      watchGlassMat,
     );
-    ledArc.position.set(0.002, 0, 0.034);
-    ledArc.rotation.z = Math.PI * 0.78;
-    biomarkerGroup.add(ledArc);
+    watchCrystal.rotation.x = Math.PI / 2;
+    watchCrystal.position.z = 0.0128;
+    watchCaseGroup.add(watchCrystal);
 
-    const ledCenterNode = new THREE.Mesh(
-      trackGeo(smoothGeo(new THREE.SphereGeometry(0.0036, 12, 8))),
-      this.biomarkerLedMat,
-    );
-    ledCenterNode.scale.set(1.0, 1.0, 0.5);
-    ledCenterNode.position.set(0.002, 0, 0.0342);
-    biomarkerGroup.add(ledCenterNode);
-
-    // Left Wrist Joint (smooth spherical connector so wrist never gaps when flexing)
+    // Left Wrist Joint (bare skin anatomical wrist bridge so flexing never gaps)
     this.leftWrist.position.set(0, this.forearmLen, 0);
     this.leftForearm.add(this.leftWrist);
 
-    const lWristJoint = new THREE.Mesh(
-      trackGeo(smoothGeo(new THREE.SphereGeometry(0.0285, 16, 10))),
-      nylonStrapMat,
+    const lWristJointGeo = applyLeftBareSkinShading(
+      trackGeo(smoothGeo(new THREE.SphereGeometry(0.028, 12, 8))),
+      'forearm',
     );
-    lWristJoint.scale.set(1.08, 0.78, 0.76);
+    const lWristJoint = new THREE.Mesh(lWristJointGeo, leftSkinMat);
+    lWristJoint.scale.set(1.06, 0.68, 0.72);
     this.leftWrist.add(lWristJoint);
 
-    // Left Palm (0.078m W x 0.024m T x 0.082m L) in fingerless tactical glove
+    // Left Bare Palm: wedge-tapered metacarpal geometry with tendon ridges, thenar pad & 4 knuckle domes
     this.leftWrist.add(this.leftPalm);
 
-    const lPalmGloveGeo = trackGeo(createTaperedLimbGeo(0.032, 0.0385, 0.039, 0.082, 16, 8));
-    const lPalmMesh = new THREE.Mesh(lPalmGloveGeo, gloveMat);
-    lPalmMesh.scale.set(1.0, 1.0, 0.31); // width ~0.078m, thickness ~0.024m, length 0.082m
+    const lPalmMesh = new THREE.Mesh(trackGeo(createBarePalmGeo()), leftSkinMat);
     this.leftPalm.add(lPalmMesh);
 
-    // Fingerless glove palm guard & thumb base reinforcement
-    const lThenarPad = new THREE.Mesh(
-      trackGeo(smoothGeo(new THREE.CapsuleGeometry(0.014, 0.032, 8, 16))),
-      gloveMat,
-    );
-    lThenarPad.scale.set(1.0, 1.0, 0.65);
-    lThenarPad.position.set(0.024, 0.026, -0.004);
-    lThenarPad.rotation.z = -0.35;
-    this.leftPalm.add(lThenarPad);
-
-    // Raised molded carbon knuckle pads across dorsal (+Z) knuckle ridge
-    [-0.027, -0.009, 0.009, 0.027].forEach((kx, idx) => {
-      const ky = 0.076 - Math.abs(idx - 1.5) * 0.0025;
-      const pad = new THREE.Mesh(
-        trackGeo(smoothGeo(new THREE.SphereGeometry(0.0096, 12, 8))),
-        carbonPadMat,
+    // Four distinct anatomical knuckle domes across dorsal MCP ridge
+    [0.0275, 0.0092, -0.0092, -0.0275].forEach((kx, idx) => {
+      const ky = 0.078 - Math.abs(idx - 1.3) * 0.0024;
+      const domeGeo = applyLeftBareSkinShading(
+        trackGeo(smoothGeo(new THREE.SphereGeometry(0.0094, 10, 8))),
+        'phalanx',
       );
-      pad.scale.set(0.95, 0.85, 0.68);
-      pad.position.set(kx, ky, 0.0115);
-      this.leftPalm.add(pad);
+      const dome = new THREE.Mesh(domeGeo, leftSkinMat);
+      dome.scale.set(0.95, 0.88, 0.72);
+      dome.position.set(kx, ky, 0.0088);
+      this.leftPalm.add(dome);
     });
-    const lKnuckleBridge = new THREE.Mesh(
-      trackGeo(smoothGeo(new THREE.CapsuleGeometry(0.0068, 0.056, 8, 16))),
-      carbonPadMat,
-    );
-    lKnuckleBridge.rotation.z = Math.PI / 2;
-    lKnuckleBridge.scale.set(1.0, 1.0, 0.65);
-    lKnuckleBridge.position.set(0, 0.075, 0.0105);
-    this.leftPalm.add(lKnuckleBridge);
 
-    // Left 4 Fingers (Index on +X -> Pinky on -X), each with MCP -> PIP -> DIP
-    // Proximal phalanx is covered by fingerless glove; Middle + Distal phalanges are exposed skin + fingernail
+    // Stretched Thumb-Index Webbing (Purlicue)
+    const purlicueMesh = new THREE.Mesh(trackGeo(createPurlicueWebGeo()), leftSkinMat);
+    this.leftPalm.add(purlicueMesh);
+
+    // Five Articulated Bare Fingers (Index on +X -> Pinky on -X), 3 chamfered skin phalanges + fingernail beds
     const leftFingerConfigs = [
-      { x: 0.0275, y: 0.079, r0: 0.0086, len1: 0.034, len2: 0.023, len3: 0.018 }, // Index
-      { x: 0.0092, y: 0.082, r0: 0.009, len1: 0.038, len2: 0.026, len3: 0.019 }, // Middle
-      { x: -0.0092, y: 0.08, r0: 0.0084, len1: 0.035, len2: 0.024, len3: 0.018 }, // Ring
-      { x: -0.0275, y: 0.075, r0: 0.0074, len1: 0.027, len2: 0.019, len3: 0.016 }, // Pinky
+      { x: 0.0275, y: 0.08, r0: 0.0085, len1: 0.036, len2: 0.024, len3: 0.0185 }, // Index (Lead)
+      { x: 0.0092, y: 0.083, r0: 0.0088, len1: 0.04, len2: 0.027, len3: 0.0195 }, // Middle (Longest)
+      { x: -0.0092, y: 0.08, r0: 0.0082, len1: 0.036, len2: 0.025, len3: 0.0185 }, // Ring
+      { x: -0.0275, y: 0.074, r0: 0.0072, len1: 0.028, len2: 0.02, len3: 0.016 }, // Pinky
     ];
 
     leftFingerConfigs.forEach((fc) => {
@@ -649,20 +1391,339 @@ export class WeaponAndEffects {
       mcp.position.set(fc.x, fc.y, 0);
       this.leftPalm.add(mcp);
 
+      // Bare proximal phalanx
+      const proxMesh = new THREE.Mesh(
+        trackGeo(createChamferedPhalanxGeo(fc.r0 * 1.02, fc.r0 * 0.88, fc.len1)),
+        leftSkinMat,
+      );
+      mcp.add(proxMesh);
+
+      // PIP knuckle dome
+      const pip = new THREE.Group();
+      pip.position.set(0, fc.len1, 0);
+      mcp.add(pip);
+
+      const pipJoint = new THREE.Mesh(
+        applyLeftBareSkinShading(trackGeo(smoothGeo(new THREE.SphereGeometry(fc.r0 * 0.88, 8, 6))), 'phalanx'),
+        leftSkinMat,
+      );
+      pipJoint.scale.set(1.0, 0.88, 0.92);
+      pip.add(pipJoint);
+
+      // Bare middle phalanx
+      const midMesh = new THREE.Mesh(
+        trackGeo(createChamferedPhalanxGeo(fc.r0 * 0.84, fc.r0 * 0.72, fc.len2)),
+        leftSkinMat,
+      );
+      pip.add(midMesh);
+
+      const dip = new THREE.Group();
+      dip.position.set(0, fc.len2, 0);
+      pip.add(dip);
+
+      const dipJoint = new THREE.Mesh(
+        applyLeftBareSkinShading(trackGeo(smoothGeo(new THREE.SphereGeometry(fc.r0 * 0.74, 8, 6))), 'phalanx'),
+        leftSkinMat,
+      );
+      dipJoint.scale.set(1.0, 0.88, 0.92);
+      dip.add(dipJoint);
+
+      // Bare distal phalanx + inset muted keratin fingernail bed on dorsal tip
+      const distMesh = new THREE.Mesh(
+        trackGeo(createChamferedPhalanxGeo(fc.r0 * 0.72, fc.r0 * 0.56, fc.len3)),
+        leftSkinMat,
+      );
+      dip.add(distMesh);
+
+      const nailBed = new THREE.Mesh(
+        trackGeo(smoothGeo(new THREE.BoxGeometry(fc.r0 * 1.02, fc.len3 * 0.44, fc.r0 * 0.3))),
+        leftNailMat,
+      );
+      nailBed.position.set(0, fc.len3 * 0.68, fc.r0 * 0.5);
+      dip.add(nailBed);
+
+      this.leftFingers.push({ mcp, pip, dip });
+    });
+
+    // Bare Opposable Left Thumb (CMC -> MCP -> IP) positioned low/forward on radial (+X) palm side
+    const lThumbCmc = new THREE.Group();
+    lThumbCmc.position.set(0.032, 0.023, -0.003);
+    this.leftPalm.add(lThumbCmc);
+
+    const lThumbBaseMesh = new THREE.Mesh(
+      trackGeo(createChamferedPhalanxGeo(0.0112, 0.0096, 0.028)),
+      leftSkinMat,
+    );
+    lThumbCmc.add(lThumbBaseMesh);
+
+    const lThumbMcp = new THREE.Group();
+    lThumbMcp.position.set(0, 0.028, 0);
+    lThumbCmc.add(lThumbMcp);
+
+    const lThumbMidMesh = new THREE.Mesh(
+      trackGeo(createChamferedPhalanxGeo(0.0094, 0.0082, 0.025)),
+      leftSkinMat,
+    );
+    lThumbMcp.add(lThumbMidMesh);
+
+    const lThumbIp = new THREE.Group();
+    lThumbIp.position.set(0, 0.025, 0);
+    lThumbMcp.add(lThumbIp);
+
+    const lThumbTipMesh = new THREE.Mesh(
+      trackGeo(createChamferedPhalanxGeo(0.0082, 0.0064, 0.021)),
+      leftSkinMat,
+    );
+    lThumbIp.add(lThumbTipMesh);
+
+    const lThumbNail = new THREE.Mesh(
+      trackGeo(smoothGeo(new THREE.BoxGeometry(0.0088, 0.0095, 0.0024))),
+      leftNailMat,
+    );
+    lThumbNail.position.set(0, 0.014, 0.0056);
+    lThumbIp.add(lThumbNail);
+
+    this.leftThumb = { cmc: lThumbCmc, mcp: lThumbMcp, ip: lThumbIp };
+
+    // =========================================================================
+    // 2. RIGHT ARM SKELETAL RIG (Tactical Runner Forearm + Fingerless Glove + 5-Finger Rig)
+    // =========================================================================
+    this.rightShoulder.position.set(0.38, -0.54, 0.08);
+    this.viewmodelGroup.add(this.rightShoulder);
+
+    // Upper Arm extending back toward bottom-right frustum (rolled sleeve #3A403D, closed end caps)
+    const rUpperGeo = trackGeo(createTaperedLimbGeo(0.058, 0.053, 0.046, this.upperArmLen, 12, 6));
+    const rUpperMesh = new THREE.Mesh(rUpperGeo, sleeveMat);
+    rUpperMesh.scale.set(1.04, 1.0, 0.92);
+    this.rightUpperArm.add(rUpperMesh);
+    this.rightShoulder.add(this.rightUpperArm);
+
+    // Athletic tapered forearm attached at elbow (0, upperArmLen, 0), tapering 0.044m -> 0.029m
+    this.rightForearm.position.set(0, this.upperArmLen, 0);
+    this.rightUpperArm.add(this.rightForearm);
+
+    // Rolled-up #3A403D shirt cuff at base of visible forearm
+    const rForearmSleeve = new THREE.Mesh(
+      trackGeo(createTaperedLimbGeo(0.048, 0.047, 0.045, 0.098, 12, 6)),
+      sleeveMat,
+    );
+    rForearmSleeve.scale.set(1.06, 1.0, 0.88);
+    this.rightForearm.add(rForearmSleeve);
+
+    const rRolledCuff = new THREE.Mesh(
+      trackGeo(smoothGeo(new THREE.TorusGeometry(0.044, 0.009, 8, 12))),
+      sleeveMat,
+    );
+    rRolledCuff.rotation.x = Math.PI / 2;
+    rRolledCuff.scale.set(1.06, 0.88, 1.0);
+    rRolledCuff.position.y = 0.096;
+    this.rightForearm.add(rRolledCuff);
+
+    // Muscular bare forearm skin with subtle sleeve/wrist-wrap crease AO
+    const rForearmSkin = new THREE.Mesh(
+      applySkinVertexAO(
+        trackGeo(createTaperedLimbGeo(0.043, 0.04, 0.0295, this.forearmLen - 0.086, 12, 6)),
+        0.74,
+        1.0,
+        0.76,
+      ),
+      skinMat,
+    );
+    rForearmSkin.scale.set(1.06, 1.0, 0.84);
+    rForearmSkin.position.y = 0.086;
+    this.rightForearm.add(rForearmSkin);
+
+    // Matte-charcoal athletic wrist wrap / compression tape band (#1E2024) with overlapping bevel rings
+    for (let w = 0; w < 4; w++) {
+      const rTop = 0.032 - w * 0.0006;
+      const rBot = 0.0334 - w * 0.0006;
+      const wrapBand = new THREE.Mesh(
+        trackGeo(smoothGeo(new THREE.CylinderGeometry(rTop, rBot, 0.022, 12))),
+        wristWrapMat,
+      );
+      wrapBand.scale.set(1.08, 1.0, 0.86);
+      wrapBand.position.y = 0.194 + w * 0.019;
+      wrapBand.rotation.z = w % 2 === 0 ? 0.038 : -0.038;
+      this.rightForearm.add(wrapBand);
+
+      const bevelEdge = new THREE.Mesh(
+        trackGeo(smoothGeo(new THREE.TorusGeometry(rTop * 1.01, 0.0018, 6, 12))),
+        wristWrapMat,
+      );
+      bevelEdge.rotation.x = Math.PI / 2;
+      bevelEdge.scale.set(1.08, 0.86, 1.0);
+      bevelEdge.position.y = 0.204 + w * 0.019;
+      this.rightForearm.add(bevelEdge);
+    }
+
+    // Secondary tactical nylon / paracord survival strap (#2D322B) + metallic buckle clasp on outer wrist
+    const rParacordGroup = new THREE.Group();
+    rParacordGroup.position.y = 0.226;
+    this.rightForearm.add(rParacordGroup);
+
+    const paracordBase = new THREE.Mesh(
+      trackGeo(smoothGeo(new THREE.CylinderGeometry(0.0332, 0.0338, 0.022, 12))),
+      watchStrapMat,
+    );
+    paracordBase.scale.set(1.09, 1.0, 0.88);
+    rParacordGroup.add(paracordBase);
+
+    [-0.006, 0.006].forEach((py) => {
+      const braid = new THREE.Mesh(
+        trackGeo(smoothGeo(new THREE.TorusGeometry(0.0336, 0.0024, 6, 12))),
+        watchStrapMat,
+      );
+      braid.rotation.x = Math.PI / 2;
+      braid.scale.set(1.09, 0.88, 1.0);
+      braid.position.y = py;
+      rParacordGroup.add(braid);
+    });
+
+    const claspHousing = new THREE.Mesh(
+      trackGeo(smoothGeo(new THREE.BoxGeometry(0.012, 0.024, 0.02))),
+      bezelMetalMat,
+    );
+    claspHousing.position.set(0.034, 0, 0.008);
+    rParacordGroup.add(claspHousing);
+
+    const claspPin = new THREE.Mesh(
+      trackGeo(smoothGeo(new THREE.CylinderGeometry(0.0022, 0.0022, 0.026, 8))),
+      carbonPadMat,
+    );
+    claspPin.position.set(0.039, 0, 0.008);
+    rParacordGroup.add(claspPin);
+
+    // Right Wrist Pivot + stitched tactical glove cuff
+    this.rightWrist.position.set(0, this.forearmLen, 0);
+    this.rightForearm.add(this.rightWrist);
+
+    const rWristJoint = new THREE.Mesh(
+      trackGeo(smoothGeo(new THREE.SphereGeometry(0.0295, 12, 8))),
+      gloveMat,
+    );
+    rWristJoint.scale.set(1.08, 0.78, 0.76);
+    this.rightWrist.add(rWristJoint);
+
+    const rGloveCuffSeam = new THREE.Mesh(
+      trackGeo(smoothGeo(new THREE.TorusGeometry(0.0305, 0.0032, 6, 12))),
+      palmGripMat,
+    );
+    rGloveCuffSeam.rotation.x = Math.PI / 2;
+    rGloveCuffSeam.scale.set(1.08, 0.78, 1.0);
+    rGloveCuffSeam.position.y = 0.006;
+    this.rightWrist.add(rGloveCuffSeam);
+
+    // Right Palm (unified anatomical space: +Y wrist->knuckles, +Z dorsal, -Z palm, -X thumb/index, +X pinky)
+    this.rightWrist.add(this.rightPalm);
+
+    // Tapered metacarpal palm block in fingerless charcoal tactical glove (#22252A), wider across knuckles
+    const rPalmGloveGeo = trackGeo(createTaperedLimbGeo(0.031, 0.0385, 0.04, 0.083, 12, 6));
+    const rPalmMesh = new THREE.Mesh(rPalmGloveGeo, gloveMat);
+    rPalmMesh.scale.set(1.0, 1.0, 0.31);
+    this.rightPalm.add(rPalmMesh);
+
+    // Subtle dorsal metacarpal arch dome
+    const rDorsalArch = new THREE.Mesh(
+      trackGeo(smoothGeo(new THREE.SphereGeometry(0.028, 10, 8))),
+      gloveMat,
+    );
+    rDorsalArch.scale.set(1.18, 1.25, 0.24);
+    rDorsalArch.position.set(0, 0.046, 0.0075);
+    this.rightPalm.add(rDorsalArch);
+
+    // Rubberized Velcro strap across dorsal wrist
+    const rVelcroStrap = new THREE.Mesh(
+      trackGeo(smoothGeo(new THREE.BoxGeometry(0.056, 0.017, 0.007))),
+      palmGripMat,
+    );
+    rVelcroStrap.position.set(0, 0.016, 0.0115);
+    this.rightPalm.add(rVelcroStrap);
+
+    // Perforated grip reinforcement panel on inner palm (-Z)
+    const rInnerGripPanel = new THREE.Mesh(
+      trackGeo(smoothGeo(new THREE.BoxGeometry(0.056, 0.052, 0.006))),
+      palmGripMat,
+    );
+    rInnerGripPanel.position.set(0, 0.044, -0.0108);
+    this.rightPalm.add(rInnerGripPanel);
+
+    // Reinforced padded thenar thumb heel on radial (-X) palm side
+    const rThenarPad = new THREE.Mesh(
+      trackGeo(smoothGeo(new THREE.CapsuleGeometry(0.014, 0.032, 6, 12))),
+      gloveMat,
+    );
+    rThenarPad.scale.set(1.0, 1.0, 0.65);
+    rThenarPad.position.set(-0.024, 0.026, -0.004);
+    rThenarPad.rotation.z = 0.35;
+    this.rightPalm.add(rThenarPad);
+
+    // Padded, beveled Carbon-Fiber / Hard-Shell Knuckle Guard across all 4 knuckles (#15171A)
+    [-0.027, -0.009, 0.009, 0.027].forEach((kx, idx) => {
+      const ky = 0.076 - Math.abs(idx - 1.5) * 0.0025;
+      const pad = new THREE.Mesh(
+        trackGeo(smoothGeo(new THREE.SphereGeometry(0.0098, 10, 8))),
+        carbonPadMat,
+      );
+      pad.scale.set(0.95, 0.85, 0.72);
+      pad.position.set(kx, ky, 0.0118);
+      this.rightPalm.add(pad);
+    });
+    const rKnuckleBridge = new THREE.Mesh(
+      trackGeo(smoothGeo(new THREE.CapsuleGeometry(0.007, 0.056, 6, 12))),
+      carbonPadMat,
+    );
+    rKnuckleBridge.rotation.z = Math.PI / 2;
+    rKnuckleBridge.scale.set(1.0, 1.0, 0.65);
+    rKnuckleBridge.position.set(0, 0.075, 0.0108);
+    this.rightPalm.add(rKnuckleBridge);
+
+    // Right Weapon Socket nestled cleanly against inner palm (-Z) tilted +70° toward thumb/index (-X)
+    this.rightWeaponSocket.position.set(0, 0.052, -0.028);
+    this.rightWeaponSocket.rotation.set(0, 0, 70 * DEG2RAD);
+    this.rightPalm.add(this.rightWeaponSocket);
+
+    // Articulated Right 4 Fingers (Index on -X -> Pinky on +X):
+    // Proximal phalanx in fingerless charcoal glove; Middle + Distal phalanges exposed skin with crease AO & nail caps
+    const rightFingerSpecs = [
+      { x: -0.0275, y: 0.08, r0: 0.0086, len1: 0.04, len2: 0.026, len3: 0.019 }, // Index
+      { x: -0.0092, y: 0.083, r0: 0.009, len1: 0.042, len2: 0.028, len3: 0.02 }, // Middle
+      { x: 0.0092, y: 0.08, r0: 0.0084, len1: 0.039, len2: 0.026, len3: 0.019 }, // Ring
+      { x: 0.0275, y: 0.074, r0: 0.0074, len1: 0.032, len2: 0.022, len3: 0.017 }, // Pinky
+    ];
+
+    rightFingerSpecs.forEach((fc) => {
+      const mcp = new THREE.Group();
+      mcp.position.set(fc.x, fc.y, 0);
+      this.rightPalm.add(mcp);
+
       // Proximal phalanx (fingerless glove sleeve)
       const proxMesh = new THREE.Mesh(
-        trackGeo(createTaperedLimbGeo(fc.r0 * 1.04, fc.r0 * 0.96, fc.r0 * 0.88, fc.len1, 16, 8)),
+        trackGeo(createTaperedLimbGeo(fc.r0 * 1.04, fc.r0 * 0.96, fc.r0 * 0.88, fc.len1, 12, 6)),
         gloveMat,
       );
       mcp.add(proxMesh);
+
+      // Stitched fingerless glove cuff trim at PIP opening
+      const cuffTrim = new THREE.Mesh(
+        trackGeo(smoothGeo(new THREE.TorusGeometry(fc.r0 * 0.86, 0.0014, 6, 10))),
+        palmGripMat,
+      );
+      cuffTrim.rotation.x = Math.PI / 2;
+      cuffTrim.position.y = fc.len1 * 0.94;
+      mcp.add(cuffTrim);
 
       const pip = new THREE.Group();
       pip.position.set(0, fc.len1, 0);
       mcp.add(pip);
 
-      // Middle phalanx (exposed human skin)
+      // Middle phalanx (exposed human skin with knuckle crease AO)
       const midMesh = new THREE.Mesh(
-        trackGeo(createTaperedLimbGeo(fc.r0 * 0.84, fc.r0 * 0.78, fc.r0 * 0.72, fc.len2, 16, 8)),
+        applySkinVertexAO(
+          trackGeo(createTaperedLimbGeo(fc.r0 * 0.84, fc.r0 * 0.78, fc.r0 * 0.72, fc.len2, 12, 6)),
+          0.74,
+          1.0,
+          0.84,
+        ),
         skinMat,
       );
       pip.add(midMesh);
@@ -671,294 +1732,66 @@ export class WeaponAndEffects {
       dip.position.set(0, fc.len2, 0);
       pip.add(dip);
 
-      // Distal phalanx (exposed human skin + subtle fingernail on dorsal +Z tip)
+      // Distal phalanx (exposed human skin + dorsal fingernail)
       const distMesh = new THREE.Mesh(
-        trackGeo(createTaperedLimbGeo(fc.r0 * 0.72, fc.r0 * 0.66, fc.r0 * 0.52, fc.len3, 16, 8)),
+        applySkinVertexAO(
+          trackGeo(createTaperedLimbGeo(fc.r0 * 0.72, fc.r0 * 0.66, fc.r0 * 0.52, fc.len3, 12, 6)),
+          0.8,
+          1.0,
+          0.9,
+        ),
         skinMat,
       );
       dip.add(distMesh);
 
       const nailMesh = new THREE.Mesh(
-        trackGeo(smoothGeo(new THREE.SphereGeometry(fc.r0 * 0.56, 12, 8))),
+        trackGeo(smoothGeo(new THREE.SphereGeometry(fc.r0 * 0.56, 10, 8))),
         nailMat,
       );
       nailMesh.scale.set(0.9, 1.35, 0.35);
       nailMesh.position.set(0, fc.len3 * 0.68, fc.r0 * 0.44);
       dip.add(nailMesh);
 
-      this.leftFingers.push({ mcp, pip, dip });
-    });
-
-    // Left Thumb (CMC -> MCP -> IP) with fingerless glove base and exposed skin tip + nail
-    const lThumbCmc = new THREE.Group();
-    lThumbCmc.position.set(0.034, 0.025, 0.001);
-    this.leftPalm.add(lThumbCmc);
-
-    const lThumbBaseMesh = new THREE.Mesh(
-      trackGeo(createTaperedLimbGeo(0.0112, 0.0104, 0.0094, 0.026, 16, 8)),
-      gloveMat,
-    );
-    lThumbCmc.add(lThumbBaseMesh);
-
-    const lThumbMcp = new THREE.Group();
-    lThumbMcp.position.set(0, 0.026, 0);
-    lThumbCmc.add(lThumbMcp);
-
-    const lThumbMidMesh = new THREE.Mesh(
-      trackGeo(createTaperedLimbGeo(0.0092, 0.0086, 0.008, 0.024, 16, 8)),
-      skinMat,
-    );
-    lThumbMcp.add(lThumbMidMesh);
-
-    const lThumbIp = new THREE.Group();
-    lThumbIp.position.set(0, 0.024, 0);
-    lThumbMcp.add(lThumbIp);
-
-    const lThumbTipMesh = new THREE.Mesh(
-      trackGeo(createTaperedLimbGeo(0.008, 0.0074, 0.0058, 0.021, 16, 8)),
-      skinMat,
-    );
-    lThumbIp.add(lThumbTipMesh);
-
-    const lThumbNail = new THREE.Mesh(
-      trackGeo(smoothGeo(new THREE.SphereGeometry(0.0062, 12, 8))),
-      nailMat,
-    );
-    lThumbNail.scale.set(0.95, 1.3, 0.35);
-    lThumbNail.position.set(0, 0.014, 0.0052);
-    lThumbIp.add(lThumbNail);
-
-    this.leftThumb = { cmc: lThumbCmc, mcp: lThumbMcp, ip: lThumbIp };
-
-    // =========================================================================
-    // 2. RIGHT ARM SKELETAL RIG (Bare Forearm + Wrist-Wrap Tape + Bat Grip)
-    // =========================================================================
-    this.rightShoulder.position.set(0.36, -0.5, 0.04);
-    this.viewmodelGroup.add(this.rightShoulder);
-
-    // Upper Arm (rolled sleeve)
-    const rUpperGeo = trackGeo(createTaperedLimbGeo(0.055, 0.052, 0.045, this.upperArmLen, 16, 8));
-    const rUpperMesh = new THREE.Mesh(rUpperGeo, sleeveMat);
-    rUpperMesh.scale.set(1.04, 1.0, 0.92);
-    this.rightUpperArm.add(rUpperMesh);
-    this.rightShoulder.add(this.rightUpperArm);
-
-    // Bare Forearm attached at elbow (0, upperArmLen, 0), tapering 0.042m -> 0.029m
-    this.rightForearm.position.set(0, this.upperArmLen, 0);
-    this.rightUpperArm.add(this.rightForearm);
-
-    const rForearmSleeve = new THREE.Mesh(
-      trackGeo(createTaperedLimbGeo(0.046, 0.046, 0.044, 0.065, 16, 8)),
-      sleeveMat,
-    );
-    rForearmSleeve.scale.set(1.06, 1.0, 0.88);
-    this.rightForearm.add(rForearmSleeve);
-
-    const rRolledCuff = new THREE.Mesh(
-      trackGeo(smoothGeo(new THREE.TorusGeometry(0.043, 0.0085, 10, 16))),
-      sleeveMat,
-    );
-    rRolledCuff.rotation.x = Math.PI / 2;
-    rRolledCuff.scale.set(1.06, 0.88, 1.0);
-    rRolledCuff.position.y = 0.064;
-    this.rightForearm.add(rRolledCuff);
-
-    const rForearmSkin = new THREE.Mesh(
-      trackGeo(createTaperedLimbGeo(0.042, 0.039, 0.029, this.forearmLen - 0.055, 16, 8)),
-      skinMat,
-    );
-    rForearmSkin.scale.set(1.06, 1.0, 0.84);
-    rForearmSkin.position.y = 0.055;
-    this.rightForearm.add(rForearmSkin);
-
-    // Athletic white/grey diagonal cloth wrist-wrap tape around distal forearm & wrist (y = 0.19 .. 0.27)
-    for (let w = 0; w < 4; w++) {
-      const wrapRing = new THREE.Mesh(
-        trackGeo(smoothGeo(new THREE.CylinderGeometry(0.0308 - w * 0.0005, 0.0322 - w * 0.0005, 0.024, 16))),
-        wristWrapMat,
-      );
-      wrapRing.scale.set(1.08, 1.0, 0.86);
-      wrapRing.position.y = 0.198 + w * 0.019;
-      wrapRing.rotation.z = w % 2 === 0 ? 0.045 : -0.045;
-      this.rightForearm.add(wrapRing);
-    }
-
-    // Right Wrist Pivot + wrapped joint sphere
-    this.rightWrist.position.set(0, this.forearmLen, 0);
-    this.rightForearm.add(this.rightWrist);
-
-    const rWristJoint = new THREE.Mesh(
-      trackGeo(smoothGeo(new THREE.SphereGeometry(0.0302, 16, 10))),
-      wristWrapMat,
-    );
-    rWristJoint.scale.set(1.06, 0.82, 0.82);
-    this.rightWrist.add(rWristJoint);
-
-    // Right Palm oriented so bat grip center sits cleanly in the palm cradle
-    // Palm heel connects to wrist at (0,0,0), palm body sits at +X/+Z side of the grip axis
-    this.rightWrist.add(this.rightPalm);
-
-    // Sculpted palm heel tape overlap + bare muscular palm (width 0.078m, thickness 0.024m, length 0.082m)
-    const rPalmTapeBase = new THREE.Mesh(
-      trackGeo(smoothGeo(new THREE.CylinderGeometry(0.026, 0.029, 0.022, 16))),
-      wristWrapMat,
-    );
-    rPalmTapeBase.scale.set(0.62, 1.0, 1.25);
-    rPalmTapeBase.position.set(0.016, -0.022, 0.038);
-    rPalmTapeBase.rotation.x = 0.35;
-    this.rightPalm.add(rPalmTapeBase);
-
-    const rPalmBody = new THREE.Mesh(
-      trackGeo(createTaperedLimbGeo(0.028, 0.0385, 0.039, 0.082, 16, 8)),
-      skinMat,
-    );
-    // Oriented from wrist (+Z) forward to knuckles (-Z), vertical height 0.078m along Y, thickness 0.024m along X
-    rPalmBody.rotation.x = -Math.PI / 2;
-    rPalmBody.scale.set(0.31, 1.0, 1.0);
-    rPalmBody.position.set(0.022, 0.0, 0.048);
-    this.rightPalm.add(rPalmBody);
-
-    // Thenar muscle pad (thumb heel) on upper-inner palm
-    const rThenarPad = new THREE.Mesh(
-      trackGeo(smoothGeo(new THREE.CapsuleGeometry(0.013, 0.032, 8, 16))),
-      skinMat,
-    );
-    rThenarPad.scale.set(0.72, 1.0, 1.0);
-    rThenarPad.position.set(0.014, 0.026, 0.026);
-    rThenarPad.rotation.set(1.15, 0.2, 0.15);
-    this.rightPalm.add(rThenarPad);
-
-    // Visible extensor tendons & knuckle domes on back (+X) of bare right hand
-    [-0.0285, -0.0095, 0.0095, 0.0285].forEach((ty) => {
-      const tendon = new THREE.Mesh(
-        trackGeo(smoothGeo(new THREE.CapsuleGeometry(0.0028, 0.046, 6, 12))),
-        skinMat,
-      );
-      tendon.rotation.x = Math.PI / 2;
-      tendon.position.set(0.032, ty, 0.014);
-      this.rightPalm.add(tendon);
-
-      const knuckle = new THREE.Mesh(
-        trackGeo(smoothGeo(new THREE.SphereGeometry(0.0072, 12, 8))),
-        skinMat,
-      );
-      knuckle.scale.set(0.75, 1.0, 1.0);
-      knuckle.position.set(0.028, ty, -0.016);
-      this.rightPalm.add(knuckle);
-    });
-
-    // Right Weapon Socket at exact prompt grip offset: [0, -0.015, 0.01], tilted forward 18°
-    this.rightWeaponSocket.position.set(0, -0.015, 0.01);
-    this.rightWeaponSocket.rotation.set(-18 * DEG2RAD, 0, 0);
-    this.rightPalm.add(this.rightWeaponSocket);
-
-    // Right 4 Fingers staggered vertically by 0.019m along the tilted handle axis (Index top -> Pinky bottom)
-    // Wrapping snugly around the 0.017m grip tape cylinder with ZERO intersection:
-    // MCP: 78°, PIP: 85°, DIP: 55°
-    const rightFingerFrame = new THREE.Group();
-    rightFingerFrame.position.copy(this.rightWeaponSocket.position);
-    rightFingerFrame.rotation.copy(this.rightWeaponSocket.rotation);
-    this.rightPalm.add(rightFingerFrame);
-
-    const rightFingerSpecs = [
-      { y: 0.0435, r0: 0.0086, len1: 0.044, len2: 0.028, len3: 0.02 }, // Index (top)
-      { y: 0.0245, r0: 0.009, len1: 0.046, len2: 0.029, len3: 0.021 }, // Middle
-      { y: 0.0055, r0: 0.0084, len1: 0.044, len2: 0.027, len3: 0.02 }, // Ring
-      { y: -0.0135, r0: 0.0075, len1: 0.039, len2: 0.024, len3: 0.018 }, // Pinky (bottom)
-    ];
-
-    rightFingerSpecs.forEach((fs) => {
-      // Knuckle sits just outside grip radius (0.017 + 0.009 = 0.026m) at right-front quadrant (+0.025, -0.021)
-      const mcp = new THREE.Group();
-      mcp.position.set(0.025, fs.y, -0.021);
-      // Local +Y points along tangent around bat; rotating around Z/Y wraps in (X, Z) plane around +Y bat!
-      // Orient mcp so its +Y points forward (-Z) tilted 14° out (+X), then rotate +78° around +Y toward -X!
-      mcp.rotation.order = 'YXZ';
-      mcp.rotation.x = -Math.PI / 2; // +Y becomes -Z forward
-      mcp.rotation.y = (78 - 12) * DEG2RAD; // curls inward across front of 0.017m grip cylinder
-      rightFingerFrame.add(mcp);
-
-      const prox = new THREE.Mesh(
-        trackGeo(createTaperedLimbGeo(fs.r0, fs.r0 * 0.92, fs.r0 * 0.85, fs.len1, 16, 8)),
-        skinMat,
-      );
-      mcp.add(prox);
-
-      const pip = new THREE.Group();
-      pip.position.set(0, fs.len1, 0);
-      pip.rotation.z = 85 * DEG2RAD; // bends inward around -X side of cylinder
-      mcp.add(pip);
-
-      const mid = new THREE.Mesh(
-        trackGeo(createTaperedLimbGeo(fs.r0 * 0.84, fs.r0 * 0.78, fs.r0 * 0.72, fs.len2, 16, 8)),
-        skinMat,
-      );
-      pip.add(mid);
-
-      const dip = new THREE.Group();
-      dip.position.set(0, fs.len2, 0);
-      dip.rotation.z = 55 * DEG2RAD; // tucks cleanly onto +Z/-X side of grip tape
-      pip.add(dip);
-
-      const dist = new THREE.Mesh(
-        trackGeo(createTaperedLimbGeo(fs.r0 * 0.71, fs.r0 * 0.64, fs.r0 * 0.52, fs.len3, 16, 8)),
-        skinMat,
-      );
-      dip.add(dist);
-
-      const nail = new THREE.Mesh(
-        trackGeo(smoothGeo(new THREE.SphereGeometry(fs.r0 * 0.54, 12, 8))),
-        nailMat,
-      );
-      nail.scale.set(0.45, 1.3, 0.9);
-      nail.position.set(fs.r0 * 0.42, fs.len3 * 0.68, 0);
-      dip.add(nail);
-
       this.rightFingers.push({ mcp, pip, dip });
     });
 
-    // Right Thumb: CMC rotated inward 55° around the outer handle perimeter above Index
+    // Opposable Right Thumb (CMC -> MCP -> IP) on radial (-X) palm side
     const rThumbCmc = new THREE.Group();
-    rThumbCmc.position.set(0.022, 0.054, 0.018);
-    rThumbCmc.rotation.order = 'YXZ';
-    rThumbCmc.rotation.x = -Math.PI * 0.44;
-    rThumbCmc.rotation.y = (180 - 55) * DEG2RAD;
-    rightFingerFrame.add(rThumbCmc);
+    rThumbCmc.position.set(-0.034, 0.025, -0.002);
+    this.rightPalm.add(rThumbCmc);
 
-    const rThumbProx = new THREE.Mesh(
-      trackGeo(createTaperedLimbGeo(0.011, 0.01, 0.0092, 0.028, 16, 8)),
-      skinMat,
+    const rThumbBaseMesh = new THREE.Mesh(
+      trackGeo(createTaperedLimbGeo(0.0112, 0.0104, 0.0094, 0.027, 12, 6)),
+      gloveMat,
     );
-    rThumbCmc.add(rThumbProx);
+    rThumbCmc.add(rThumbBaseMesh);
 
     const rThumbMcp = new THREE.Group();
-    rThumbMcp.position.set(0, 0.028, 0);
-    rThumbMcp.rotation.z = -52 * DEG2RAD;
+    rThumbMcp.position.set(0, 0.027, 0);
     rThumbCmc.add(rThumbMcp);
 
-    const rThumbMid = new THREE.Mesh(
-      trackGeo(createTaperedLimbGeo(0.0092, 0.0086, 0.0078, 0.024, 16, 8)),
+    const rThumbMidMesh = new THREE.Mesh(
+      applySkinVertexAO(trackGeo(createTaperedLimbGeo(0.0092, 0.0086, 0.008, 0.025, 12, 6)), 0.75, 1.0, 0.86),
       skinMat,
     );
-    rThumbMcp.add(rThumbMid);
+    rThumbMcp.add(rThumbMidMesh);
 
     const rThumbIp = new THREE.Group();
-    rThumbIp.position.set(0, 0.024, 0);
-    rThumbIp.rotation.z = -46 * DEG2RAD;
+    rThumbIp.position.set(0, 0.025, 0);
     rThumbMcp.add(rThumbIp);
 
-    const rThumbDist = new THREE.Mesh(
-      trackGeo(createTaperedLimbGeo(0.0078, 0.0072, 0.0056, 0.021, 16, 8)),
+    const rThumbTipMesh = new THREE.Mesh(
+      applySkinVertexAO(trackGeo(createTaperedLimbGeo(0.008, 0.0074, 0.0058, 0.021, 12, 6)), 0.82, 1.0, 0.9),
       skinMat,
     );
-    rThumbIp.add(rThumbDist);
+    rThumbIp.add(rThumbTipMesh);
 
     const rThumbNail = new THREE.Mesh(
-      trackGeo(smoothGeo(new THREE.SphereGeometry(0.0058, 12, 8))),
+      trackGeo(smoothGeo(new THREE.SphereGeometry(0.0062, 10, 8))),
       nailMat,
     );
-    rThumbNail.scale.set(0.45, 1.3, 0.9);
-    rThumbNail.position.set(-0.0046, 0.014, 0);
+    rThumbNail.scale.set(0.95, 1.3, 0.35);
+    rThumbNail.position.set(0, 0.014, 0.0052);
     rThumbIp.add(rThumbNail);
 
     this.rightThumb = { cmc: rThumbCmc, mcp: rThumbMcp, ip: rThumbIp };
@@ -1008,86 +1841,145 @@ export class WeaponAndEffects {
       new THREE.Vector2(0.014, 0.684),
       new THREE.Vector2(0.001, 0.685),
     ];
-    const batBarrel = new THREE.Mesh(trackGeo(smoothGeo(new THREE.LatheGeometry(barrelProfile, 16))), batWoodMat);
+    const batBarrelGeo = trackGeo(smoothGeo(new THREE.LatheGeometry(barrelProfile, 16)));
+    const batBarrel = new THREE.Mesh(batBarrelGeo, batWoodMat);
     this.batGroup.add(batBarrel);
 
-    // Markers for procedural swing motion-trail ribbon
+    // Awakening Pumped-Up translucent crimson-gold aura shell on bat barrel (1.05x scale, 0xFF3B14)
+    this.batAuraMat = trackMat(
+      new THREE.MeshBasicMaterial({
+        color: 0xff3b14,
+        transparent: true,
+        opacity: 0,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+        side: THREE.FrontSide,
+      }),
+    );
+    this.batAuraMesh = new THREE.Mesh(batBarrelGeo, this.batAuraMat);
+    this.batAuraMesh.scale.set(1.05, 1.02, 1.05);
+    this.batAuraMesh.visible = false;
+    this.batGroup.add(this.batAuraMesh);
+
+    // Markers for procedural swing motion-trail ribbon (attached to rightWeaponSocket so all weapons share it)
     this.batThroatMarker.position.set(0, 0.26, 0);
     this.batTipMarker.position.set(0, 0.67, 0);
-    this.batGroup.add(this.batThroatMarker);
-    this.batGroup.add(this.batTipMarker);
+    this.rightWeaponSocket.add(this.batThroatMarker);
+    this.rightWeaponSocket.add(this.batTipMarker);
 
-    // --- Swappable Weapon 1: Serrated Post-Apocalyptic Scrap Machete ---
-    this.macheteGroup.rotation.set(0.32, -0.1, 0.05);
-    this.macheteGroup.position.set(0, 0.0, 0);
-    this.macheteGroup.visible = false;
-    this.rightWeaponSocket.add(this.macheteGroup);
+    // --- Swappable Weapon 1: Scavenger Short Blade / Stylized Dagger (Left Wheel Slot) ---
+    // Rotated -90° around Y so cutting edge (-Z) faces forward along palm knuckles (+Y_palm)
+    this.daggerGroup.rotation.set(0, -Math.PI / 2, 0);
+    this.daggerGroup.position.set(0, 0.0, 0);
+    this.daggerGroup.visible = false;
+    this.rightWeaponSocket.add(this.daggerGroup);
 
-    const hilt = new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.017, 0.017, 0.2, 12)), leatherMat);
-    hilt.position.y = 0.01;
-    this.macheteGroup.add(hilt);
+    const daggerGrip = new THREE.Mesh(
+      trackGeo(new THREE.CylinderGeometry(0.0155, 0.0165, 0.145, 8)),
+      leatherMat,
+    );
+    daggerGrip.position.y = 0.005;
+    this.daggerGroup.add(daggerGrip);
 
-    const guard = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.034, 0.022, 0.092)), darkIronMat);
-    guard.position.y = 0.11;
-    this.macheteGroup.add(guard);
+    const daggerPommel = new THREE.Mesh(
+      trackGeo(new THREE.OctahedronGeometry(0.022, 0)),
+      copperWireMat,
+    );
+    daggerPommel.scale.set(0.9, 1.15, 0.9);
+    daggerPommel.position.y = -0.075;
+    this.daggerGroup.add(daggerPommel);
 
-    const bladeBody = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.011, 0.56, 0.056)), forgedBladeMat);
-    bladeBody.position.set(0, 0.4, -0.01);
-    bladeBody.rotation.x = 0.04;
-    this.macheteGroup.add(bladeBody);
+    const daggerGuard = new THREE.Mesh(
+      trackGeo(new THREE.BoxGeometry(0.028, 0.018, 0.088)),
+      darkIronMat,
+    );
+    daggerGuard.position.y = 0.084;
+    this.daggerGroup.add(daggerGuard);
 
-    const cuttingEdge = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.005, 0.56, 0.016)), edgeSteelMat);
-    cuttingEdge.position.set(0, 0.4, -0.042);
-    cuttingEdge.rotation.x = 0.04;
-    this.macheteGroup.add(cuttingEdge);
+    const daggerBladeCore = new THREE.Mesh(
+      trackGeo(new THREE.BoxGeometry(0.008, 0.24, 0.034)),
+      forgedBladeMat,
+    );
+    daggerBladeCore.position.set(0, 0.21, -0.003);
+    this.daggerGroup.add(daggerBladeCore);
 
-    const bladeTip = new THREE.Mesh(trackGeo(new THREE.ConeGeometry(0.03, 0.12, 4)), edgeSteelMat);
-    bladeTip.position.set(0, 0.72, -0.03);
-    bladeTip.rotation.y = Math.PI / 4;
-    bladeTip.rotation.x = -0.18;
-    this.macheteGroup.add(bladeTip);
+    const daggerBladeEdge = new THREE.Mesh(
+      trackGeo(new THREE.BoxGeometry(0.004, 0.24, 0.012)),
+      edgeSteelMat,
+    );
+    daggerBladeEdge.position.set(0, 0.21, -0.022);
+    this.daggerGroup.add(daggerBladeEdge);
 
-    const sawToothGeo = trackGeo(new THREE.ConeGeometry(0.014, 0.032, 4));
-    for (let s = 0; s < 5; s++) {
-      const tooth = new THREE.Mesh(sawToothGeo, darkIronMat);
-      tooth.position.set(0, 0.18 + s * 0.072, 0.024 - s * 0.002);
-      tooth.rotation.x = Math.PI / 2 - 0.35;
-      this.macheteGroup.add(tooth);
-    }
+    const daggerTip = new THREE.Mesh(
+      trackGeo(new THREE.ConeGeometry(0.021, 0.095, 4)),
+      edgeSteelMat,
+    );
+    daggerTip.scale.set(0.32, 1.0, 1.0);
+    daggerTip.position.set(0, 0.375, -0.008);
+    this.daggerGroup.add(daggerTip);
 
-    // --- Swappable Weapon 2: Rusted Cloth-Wrapped & Wired Lead Pipe ---
-    this.pipeGroup.rotation.set(0.08, 0, 0);
-    this.pipeGroup.visible = false;
-    this.rightWeaponSocket.add(this.pipeGroup);
+    // --- Swappable Weapon 2: Heavy Stylized Cleaver / Machete (Right Wheel Slot) ---
+    this.cleaverGroup.rotation.set(0, -Math.PI / 2, 0);
+    this.cleaverGroup.position.set(0, 0.0, 0);
+    this.cleaverGroup.visible = false;
+    this.rightWeaponSocket.add(this.cleaverGroup);
 
-    const shaft = new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.017, 0.018, 0.66, 12)), rustPipeMat);
-    shaft.position.y = 0.22;
-    this.pipeGroup.add(shaft);
+    const cleaverGrip = new THREE.Mesh(
+      trackGeo(new THREE.CylinderGeometry(0.0175, 0.0185, 0.21, 8)),
+      leatherMat,
+    );
+    cleaverGrip.position.y = 0.005;
+    this.cleaverGroup.add(cleaverGrip);
 
-    const pipePommel = new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.024, 0.024, 0.036, 10)), darkIronMat);
-    pipePommel.position.y = -0.12;
-    this.pipeGroup.add(pipePommel);
-
-    const collar = new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.028, 0.028, 0.052, 8)), darkIronMat);
-    collar.position.y = 0.44;
-    this.pipeGroup.add(collar);
-
-    [0.34, 0.38, 0.49].forEach((cy) => {
-      const coil = new THREE.Mesh(trackGeo(new THREE.TorusGeometry(0.022, 0.0045, 6, 14)), copperWireMat);
-      coil.rotation.x = Math.PI / 2 + 0.15;
-      coil.position.y = cy;
-      this.pipeGroup.add(coil);
+    [0.04, -0.02, -0.07].forEach((cy) => {
+      const wrap = new THREE.Mesh(
+        trackGeo(new THREE.TorusGeometry(0.0188, 0.0035, 6, 10)),
+        copperWireMat,
+      );
+      wrap.rotation.x = Math.PI / 2;
+      wrap.position.y = cy;
+      this.cleaverGroup.add(wrap);
     });
 
-    const pipeHead = new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.032, 0.032, 0.12, 12)), darkIronMat);
-    pipeHead.rotation.z = Math.PI / 2;
-    pipeHead.position.set(0.02, 0.56, 0);
-    this.pipeGroup.add(pipeHead);
+    const cleaverBolster = new THREE.Mesh(
+      trackGeo(new THREE.BoxGeometry(0.032, 0.024, 0.072)),
+      darkIronMat,
+    );
+    cleaverBolster.position.set(0, 0.115, -0.012);
+    this.cleaverGroup.add(cleaverBolster);
 
-    const flange = new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.038, 0.038, 0.026, 12)), bloodRustMat);
-    flange.rotation.z = Math.PI / 2;
-    flange.position.set(-0.042, 0.56, 0);
-    this.pipeGroup.add(flange);
+    const cleaverBlade = new THREE.Mesh(
+      trackGeo(new THREE.BoxGeometry(0.012, 0.44, 0.084)),
+      forgedBladeMat,
+    );
+    cleaverBlade.position.set(0, 0.34, -0.024);
+    cleaverBlade.rotation.x = 0.03;
+    this.cleaverGroup.add(cleaverBlade);
+
+    const cleaverEdge = new THREE.Mesh(
+      trackGeo(new THREE.BoxGeometry(0.005, 0.44, 0.022)),
+      edgeSteelMat,
+    );
+    cleaverEdge.position.set(0, 0.34, -0.072);
+    cleaverEdge.rotation.x = 0.03;
+    this.cleaverGroup.add(cleaverEdge);
+
+    // Broad angled cleaver head nose + reinforced spine bar
+    const cleaverNose = new THREE.Mesh(
+      trackGeo(new THREE.BoxGeometry(0.011, 0.13, 0.098)),
+      edgeSteelMat,
+    );
+    cleaverNose.position.set(0, 0.56, -0.036);
+    cleaverNose.rotation.x = -0.22;
+    this.cleaverGroup.add(cleaverNose);
+
+    const cleaverSpine = new THREE.Mesh(
+      trackGeo(new THREE.BoxGeometry(0.015, 0.48, 0.018)),
+      bloodRustMat,
+    );
+    cleaverSpine.position.set(0, 0.35, 0.018);
+    cleaverSpine.rotation.x = 0.03;
+    this.cleaverGroup.add(cleaverSpine);
 
     // =========================================================================
     // 4. PROCEDURAL MOTION-TRAIL MESH (attached inside viewmodelGroup)
@@ -1299,22 +2191,32 @@ export class WeaponAndEffects {
     this.firecrackerLight.castShadow = false;
     scene.add(this.firecrackerLight);
 
-    // Prevent floating shadows from viewmodel onto close walls
-    this.viewmodelGroup.traverse((obj) => {
-      if ((obj as THREE.Mesh).isMesh) {
-        obj.castShadow = false;
-        obj.receiveShadow = false;
-      }
-    });
+    // Assign Layer 2 (isolated depth-cleared viewmodel pass) & shadow integrity on left arm/watch/hand
+    const assignViewmodelLayer = (root: THREE.Object3D, castShadow: boolean) => {
+      root.traverse((obj) => {
+        obj.layers.set(2);
+        if ((obj as THREE.Mesh).isMesh) {
+          obj.castShadow = castShadow;
+          obj.receiveShadow = true;
+        }
+      });
+    };
+    assignViewmodelLayer(this.viewmodelGroup, false);
+    assignViewmodelLayer(this.leftShoulder, true);
+    assignViewmodelLayer(this.leftLegPivot, false);
+    assignViewmodelLayer(this.rightLegPivot, false);
+    assignViewmodelLayer(this.ziplineHookPivot, false);
+    assignViewmodelLayer(this.swingArcMesh, false);
 
     // Solve initial pose so first frame starts clean
     this.applyLeftFingerAngles(0, 1, 'RELAXED_IDLE');
+    this.applyRightFingerAngles(0, 1, 'WEAPON_GRIP', 0);
     this.solveArmPose(
       this.leftShoulder,
       this.leftUpperArm,
       this.leftForearm,
       this.leftWrist,
-      new THREE.Vector3(-0.36, -0.5, 0.04),
+      _shoulderBase.set(-0.28, -0.46, 0.02),
       this.curLeftPos,
       _leftTargetQuat.setFromEuler(this.curLeftEuler),
       _leftPole,
@@ -1324,11 +2226,28 @@ export class WeaponAndEffects {
       this.rightUpperArm,
       this.rightForearm,
       this.rightWrist,
-      new THREE.Vector3(0.36, -0.5, 0.04),
+      _shoulderBase.set(0.38, -0.54, 0.08),
       this.curRightPos,
       _rightTargetQuat.setFromEuler(this.curRightEuler),
       _rightPole,
     );
+  }
+
+  public setVisible(visible: boolean): void {
+    this.viewmodelGroup.visible = visible;
+    if (!visible) {
+      this.leftLegPivot.visible = false;
+      this.rightLegPivot.visible = false;
+      this.ziplineHookPivot.visible = false;
+      this.swingArcMesh.visible = false;
+    } else {
+      this.swingArcMesh.visible = true;
+    }
+  }
+
+  public triggerLandingImpact(fallDistanceMeters: number): void {
+    const severity = THREE.MathUtils.clamp(fallDistanceMeters / 5.0, 0.22, 1.0);
+    this.landingDipVel -= 0.45 + severity * 0.72;
   }
 
   /**
@@ -1447,16 +2366,51 @@ export class WeaponAndEffects {
     this.leftThumb.ip.rotation.set(-this.curThumbIp * DEG2RAD, 0, 0);
   }
 
-  private applyRightFingerExertion(targetStrainDeg: number, damp: number): void {
-    this.curRightExertion = THREE.MathUtils.lerp(this.curRightExertion, targetStrainDeg, damp);
-    for (let i = 0; i < this.rightFingers.length; i++) {
-      const f = this.rightFingers[i];
-      f.mcp.rotation.y = (66 + this.curRightExertion * 0.8) * DEG2RAD;
-      f.pip.rotation.z = (85 + this.curRightExertion) * DEG2RAD;
-      f.dip.rotation.z = (55 + this.curRightExertion * 0.7) * DEG2RAD;
+  private applyRightFingerAngles(
+    elapsed: number,
+    damp: number,
+    pose: RightHandPose,
+    exertionDeg: number,
+  ): void {
+    const spec = RIGHT_POSE_TABLE[pose];
+    this.curRightExertion = THREE.MathUtils.lerp(this.curRightExertion, exertionDeg, damp);
+
+    // Dynamic wrap adjustment from equipped weapon handle diameter
+    const gripRadius = WEAPONS_BY_ID[this.activeWeapon].gripRadius;
+    const gripRadiusAdj = pose === 'WEAPON_GRIP' && gripRadius > 0 ? (gripRadius - 0.017) * 2600 : 0;
+    const breathRipple = Math.sin(elapsed * 2.2 + 0.6) * 1.1;
+
+    for (let i = 0; i < 4; i++) {
+      const f = spec.fingers[i];
+      const ripple = pose === 'UNARMED_READY' ? breathRipple * (0.7 + i * 0.15) : 0;
+      const targetMcp = THREE.MathUtils.clamp(f.mcp + this.curRightExertion * 0.65 - gripRadiusAdj + ripple, -12, 95);
+      const targetPip = THREE.MathUtils.clamp(f.pip + this.curRightExertion * 0.85 - gripRadiusAdj, 4, 98);
+      const targetDip = THREE.MathUtils.clamp(f.dip + this.curRightExertion * 0.55 - gripRadiusAdj * 0.6, 4, 92);
+
+      this.curRightCurl[i] = THREE.MathUtils.lerp(this.curRightCurl[i], targetMcp, damp);
+      this.curRightPip[i] = THREE.MathUtils.lerp(this.curRightPip[i], targetPip, damp);
+      this.curRightDip[i] = THREE.MathUtils.lerp(this.curRightDip[i], targetDip, damp);
+      this.curRightSplay[i] = THREE.MathUtils.lerp(this.curRightSplay[i], f.splay, damp);
+
+      const joints = this.rightFingers[i];
+      joints.mcp.rotation.set(-this.curRightCurl[i] * DEG2RAD, 0, this.curRightSplay[i] * DEG2RAD);
+      joints.pip.rotation.set(-this.curRightPip[i] * DEG2RAD, 0, 0);
+      joints.dip.rotation.set(-this.curRightDip[i] * DEG2RAD, 0, 0);
     }
-    this.rightThumb.mcp.rotation.z = (-52 - this.curRightExertion * 0.6) * DEG2RAD;
-    this.rightThumb.ip.rotation.z = (-46 - this.curRightExertion * 0.5) * DEG2RAD;
+
+    this.curRThumbCmcX = THREE.MathUtils.lerp(this.curRThumbCmcX, spec.thumb.cmcX, damp);
+    this.curRThumbCmcY = THREE.MathUtils.lerp(this.curRThumbCmcY, spec.thumb.cmcY, damp);
+    this.curRThumbCmcZ = THREE.MathUtils.lerp(this.curRThumbCmcZ, spec.thumb.cmcZ, damp);
+    this.curRThumbMcp = THREE.MathUtils.lerp(this.curRThumbMcp, spec.thumb.mcp + this.curRightExertion * 0.35, damp);
+    this.curRThumbIp = THREE.MathUtils.lerp(this.curRThumbIp, spec.thumb.ip + this.curRightExertion * 0.35, damp);
+
+    this.rightThumb.cmc.rotation.set(
+      -this.curRThumbCmcX * DEG2RAD,
+      -this.curRThumbCmcY * DEG2RAD,
+      -this.curRThumbCmcZ * DEG2RAD,
+    );
+    this.rightThumb.mcp.rotation.set(-this.curRThumbMcp * DEG2RAD, 0, 0);
+    this.rightThumb.ip.rotation.set(-this.curRThumbIp * DEG2RAD, 0, 0);
   }
 
   private resetTrailHistory(): void {
@@ -1525,23 +2479,50 @@ export class WeaponAndEffects {
     this.trailMesh.visible = true;
   }
 
-  public setWeapon(weapon: 'bat' | 'machete' | 'pipe'): void {
+  private applyActiveWeaponMeshes(weapon: WeaponId): void {
     this.activeWeapon = weapon;
     this.batGroup.visible = weapon === 'bat';
-    this.macheteGroup.visible = weapon === 'machete';
-    this.pipeGroup.visible = weapon === 'pipe';
+    this.daggerGroup.visible = weapon === 'dagger';
+    this.cleaverGroup.visible = weapon === 'cleaver';
+
+    if (weapon === 'bat') {
+      this.batThroatMarker.position.set(0, 0.26, 0);
+      this.batTipMarker.position.set(0, 0.67, 0);
+    } else if (weapon === 'dagger') {
+      this.batThroatMarker.position.set(0, 0.14, 0);
+      this.batTipMarker.position.set(0, 0.42, -0.01);
+    } else if (weapon === 'cleaver') {
+      this.batThroatMarker.position.set(0, 0.22, -0.02);
+      this.batTipMarker.position.set(0, 0.62, -0.04);
+    }
+    this.resetTrailHistory();
   }
 
-  public getWeapon(): 'bat' | 'machete' | 'pipe' {
-    return this.activeWeapon;
+  public setWeapon(weapon: WeaponId, immediate = false): void {
+    if (immediate) {
+      this.pendingWeapon = null;
+      this.equipSwapTime = -1;
+      this.applyActiveWeaponMeshes(weapon);
+      return;
+    }
+    if (this.activeWeapon === weapon && this.pendingWeapon === null) return;
+    if (this.pendingWeapon === weapon) return;
+    this.pendingWeapon = weapon;
+    this.equipSwapTime = 0;
   }
 
-  public triggerSwing(): void {
+  public getWeapon(): WeaponId {
+    return this.pendingWeapon ?? this.activeWeapon;
+  }
+
+  public triggerSwing(duration = 0.44): void {
     this.swingToggle = !this.swingToggle;
     this.animState = this.swingToggle ? 'swing_left' : 'swing_right';
     this.animTime = 0;
-    this.animDuration = 0.44; // 0.10s windup + 0.12s slash + 0.22s follow-through
-    this.swingArcMat.color.setHex(0xfef08a);
+    this.animDuration = Math.max(0.2, duration);
+    this.swingArcMat.color.setHex(
+      this.activeWeapon === 'cleaver' ? 0xfbbf24 : this.activeWeapon === 'dagger' ? 0xe2e8f0 : 0xfef08a,
+    );
     this.swingArcMesh.rotation.z = this.swingToggle ? -0.5 : 2.6;
     this.resetTrailHistory();
   }
@@ -1747,33 +2728,54 @@ export class WeaponAndEffects {
     const scrambleSide = parkourDetail?.scrambleSide ?? 1;
     const leftGripWorld = parkourDetail?.leftGripWorld;
     const rightGripWorld = parkourDetail?.rightGripWorld;
+    const awakeningActive = parkourDetail?.awakeningActive ?? false;
+    const awakeningPose = parkourDetail?.awakeningPose;
+    const awakeningBatEmissive = parkourDetail?.awakeningBatEmissive ?? null;
+    const awakeningBatEmissiveIntensity = parkourDetail?.awakeningBatEmissiveIntensity ?? 1.0;
+
+    // Pumped-Up bat barrel fiery aura pulse (0.30..0.60 opacity)
+    if (awakeningActive && this.activeWeapon === 'bat') {
+      this.batAuraMesh.visible = true;
+      this.batAuraMat.opacity = 0.45 + Math.sin(elapsed * 10) * 0.15;
+    } else {
+      this.batAuraMesh.visible = false;
+      this.batAuraMat.opacity = 0;
+    }
+
+    // Crimson rim glint / fiery orange wind-up glow on bat barrel
+    if (awakeningBatEmissive && this.activeWeapon === 'bat') {
+      this.batWoodMat.emissive.copy(awakeningBatEmissive);
+      this.batWoodMat.emissiveIntensity = awakeningBatEmissiveIntensity;
+    } else {
+      this.batWoodMat.emissive.setRGB(0, 0, 0);
+      this.batWoodMat.emissiveIntensity = 1.0;
+    }
 
     // -------------------------------------------------------------------------
-    // A. Biomarker LED State (#00f0ff Day/Safe Zone, Pulsing #ff3b1f Night)
+    // A. Watch Dial / Biomarker LED State (Pale Cyan Day/Safe, Crimson Night — zero bloom blowout)
     // -------------------------------------------------------------------------
     if (this.animState === 'intro_ready') {
-      // Two bright cyan pulses synced with the 2 electronic chirps at animTime ~0.55s & ~1.05s
       const p1 = Math.exp(-Math.pow((this.animTime - 0.55) / 0.14, 2));
       const p2 = Math.exp(-Math.pow((this.animTime - 1.05) / 0.14, 2));
-      this.biomarkerLedMat.color.setHex(0x00f0ff);
-      this.biomarkerLedMat.emissive.setHex(0x00f0ff);
-      this.biomarkerLedMat.emissiveIntensity = 1.9 + Math.max(p1, p2) * 3.2;
+      this.biomarkerLedMat.color.setHex(0x7eeeff);
+      this.biomarkerLedMat.emissive.setHex(0x5ce1ff);
+      this.biomarkerLedMat.emissiveIntensity = 0.78 + Math.max(p1, p2) * 1.1;
     } else if (isNight && !inSafeZone) {
       const pulse = 0.5 + 0.5 * Math.sin(elapsed * Math.PI * 5.2);
-      this.biomarkerLedMat.color.setHex(0xff3b1f);
+      this.biomarkerLedMat.color.setHex(0xff5238);
       this.biomarkerLedMat.emissive.setHex(0xff3b1f);
-      this.biomarkerLedMat.emissiveIntensity = 1.2 + pulse * 2.4;
+      this.biomarkerLedMat.emissiveIntensity = 0.6 + pulse * 0.65;
     } else {
       const steadyBreath = 0.5 + 0.5 * Math.sin(elapsed * Math.PI * 1.4);
-      this.biomarkerLedMat.color.setHex(0x00f0ff);
-      this.biomarkerLedMat.emissive.setHex(0x00f0ff);
-      this.biomarkerLedMat.emissiveIntensity = 1.85 + steadyBreath * 0.45;
+      this.biomarkerLedMat.color.setHex(0x7eeeff);
+      this.biomarkerLedMat.emissive.setHex(0x5ce1ff);
+      this.biomarkerLedMat.emissiveIntensity = 0.66 + steadyBreath * 0.16;
     }
 
     // -------------------------------------------------------------------------
     // B. Mouse-look Rotational Spring Lag (±0.08 rad max) + Anti-Wall Pullback
     // -------------------------------------------------------------------------
-    if (climbState === 'MUSCLE_UP') {
+    if (climbState === 'MUSCLE_UP' || awakeningPose?.active) {
       this.swayYawLag = 0;
       this.swayPitchLag = 0;
       this.curVmRoll = THREE.MathUtils.lerp(this.curVmRoll, 0, 1 - Math.exp(-20 * dt));
@@ -1792,42 +2794,58 @@ export class WeaponAndEffects {
         0.08,
       );
 
+      // Spring-damped landing impact dip & recovery
+      const springForce = -220 * this.landingDipPos - 24 * this.landingDipVel;
+      this.landingDipVel += springForce * dt;
+      this.landingDipPos = THREE.MathUtils.clamp(this.landingDipPos + this.landingDipVel * dt, -0.14, 0.04);
+
       const targetVmRoll = isSliding ? -6 * DEG2RAD : -strafeInput * 0.028;
       this.curVmRoll = THREE.MathUtils.lerp(this.curVmRoll, targetVmRoll, 1 - Math.exp(-14 * dt));
       this.curVmPullback = THREE.MathUtils.lerp(this.curVmPullback, wallPullback, 1 - Math.exp(-16 * dt));
 
-      this.viewmodelGroup.position.set(0, -this.curVmPullback * 0.04, this.curVmPullback * 0.16);
-      this.viewmodelGroup.rotation.set(this.swayPitchLag * 0.45, this.swayYawLag * 0.55, this.curVmRoll);
+      this.viewmodelGroup.position.set(0, -this.curVmPullback * 0.04 + this.landingDipPos, this.curVmPullback * 0.16);
+      this.viewmodelGroup.rotation.set(
+        this.swayPitchLag * 0.45 + this.landingDipPos * 1.15,
+        this.swayYawLag * 0.55,
+        this.curVmRoll,
+      );
     }
 
     // -------------------------------------------------------------------------
-    // C. Dual-Frequency Breathing (0.38 Hz + 0.76 Hz) & Locomotion Offsets
+    // C. Idle Figure-8 Breathing Sway (0.004 amp) & Locomotion Offsets
     // -------------------------------------------------------------------------
     const breathPrimary = Math.sin(elapsed * Math.PI * 2 * 0.38);
     const breathWrist = Math.sin(elapsed * Math.PI * 2 * 0.76 + 0.4);
+    const fig8X = Math.sin(elapsed * 1.9) * 0.004;
+    const fig8Y = Math.sin(elapsed * 3.8) * 0.0026;
     const isMoving = horizSpeed >= 0.5;
 
-    // 1. Default Idle & Breathing Target Poses (Exact Prompt Coordinates)
-    let rPosX = 0.28 + breathWrist * 0.002 + this.swayYawLag * 0.16;
-    let rPosY = -0.26 + breathPrimary * 0.005 + breathWrist * 0.0018 - this.swayPitchLag * 0.14;
-    let rPosZ = -0.4 + breathPrimary * 0.002;
-    let rRotX = 0.25 + breathPrimary * 0.015 + this.swayPitchLag * 0.65;
-    let rRotY = -0.35 + breathWrist * 0.014 + this.swayYawLag * 0.65;
-    let rRotZ = 0.22 - strafeInput * 0.055;
+    // 1. Default Idle & Breathing Target Poses
+    const isUnarmed = this.activeWeapon === 'unarmed';
+    const isDagger = this.activeWeapon === 'dagger';
+    const isCleaver = this.activeWeapon === 'cleaver';
 
-    let lPosX = -0.26 - breathWrist * 0.002 + this.swayYawLag * 0.12;
-    let lPosY = -0.24 + breathPrimary * 0.0055 - breathWrist * 0.0015 - this.swayPitchLag * 0.12;
-    let lPosZ = -0.38 + breathPrimary * 0.002;
-    // Left palm local +Y forward (-Z), +Z dorsal up (+Y): rotX = -1.12 aims hand forward with biomarker/knuckles visible
-    let lRotX = -1.12 + breathPrimary * 0.018 + this.swayPitchLag * 0.5;
-    let lRotY = 0.24 + breathWrist * 0.012 + this.swayYawLag * 0.5;
-    let lRotZ = -0.18 - strafeInput * 0.06;
+    // Right Arm Idle Pose (State A Unarmed Guard vs State C Bat/Cleaver/Dagger Ready)
+    let rPosX = (isUnarmed ? 0.34 : isDagger ? 0.27 : isCleaver ? 0.31 : 0.29) + fig8X + this.swayYawLag * 0.16;
+    let rPosY = (isUnarmed ? -0.28 : isDagger ? -0.25 : isCleaver ? -0.28 : -0.26) + fig8Y + breathPrimary * 0.0035 - this.swayPitchLag * 0.14;
+    let rPosZ = (isUnarmed ? -0.52 : isDagger ? -0.47 : isCleaver ? -0.45 : -0.44) + breathPrimary * 0.002;
+    let rRotX = (isUnarmed ? -1.08 : isDagger ? -0.72 : isCleaver ? -0.34 : -0.38) + breathPrimary * 0.014 + this.swayPitchLag * 0.65;
+    let rRotY = (isUnarmed ? -0.22 : isDagger ? 0.78 : isCleaver ? 0.98 : 0.95) + breathWrist * 0.012 + this.swayYawLag * 0.65;
+    let rRotZ = (isUnarmed ? 0.25 : isDagger ? -0.96 : isCleaver ? -1.02 : -1.05) - strafeInput * 0.055;
 
-    let leftFingerPose: LeftHandPose = 'RELAXED_IDLE';
+    let lPosX = (isUnarmed ? -0.3 : -0.34) - fig8X * 0.6 + this.swayYawLag * 0.12;
+    let lPosY = (isUnarmed ? -0.21 : -0.24) + fig8Y * 0.8 + breathPrimary * 0.004 - this.swayPitchLag * 0.12;
+    let lPosZ = (isUnarmed ? -0.48 : -0.5) + breathPrimary * 0.002;
+    let lRotX = -1.08 + breathPrimary * 0.018 + this.swayPitchLag * 0.5;
+    let lRotY = (isUnarmed ? 0.38 : 0.36) + breathWrist * 0.012 + this.swayYawLag * 0.5;
+    let lRotZ = (isUnarmed ? -0.38 : -0.42) - strafeInput * 0.06;
+
+    let leftFingerPose: LeftHandPose = isUnarmed ? 'FIST_CLENCH' : 'RELAXED_IDLE';
+    let rightFingerPose: RightHandPose = isUnarmed ? 'UNARMED_READY' : 'WEAPON_GRIP';
     let rightExertionStrain = 0;
     let dampHz = 14;
 
-    // 2. Walking & Sprinting
+    // 2. Walking & Sprinting (Figure-8 rhythm & cross-body sprint pump)
     if (
       isMoving &&
       !isSliding &&
@@ -1839,7 +2857,6 @@ export class WeaponAndEffects {
       !isRolling
     ) {
       if (isSprinting) {
-        // Sprinting: 14 Hz left-arm pump across lower FOV, right arm pulls bat high-ready across chest/shoulder
         const pumpSin = Math.sin(elapsed * 14);
         const pumpCos = Math.cos(elapsed * 14);
         lPosX = -0.24 - camBobX * 0.4 + pumpSin * 0.042;
@@ -1849,23 +2866,36 @@ export class WeaponAndEffects {
         lRotY = 0.34 + pumpCos * 0.08;
         lRotZ = -0.24;
 
-        rPosX = 0.22 - camBobX * 0.35 + pumpCos * 0.016;
-        rPosY = -0.2 - camBobY * 0.35 + Math.abs(pumpSin) * -0.018;
-        rPosZ = -0.34 - pumpCos * 0.02;
-        rRotX = 0.55 + pumpSin * 0.045;
-        rRotY = -0.65 + pumpCos * 0.035;
-        rRotZ = 0.45 - strafeInput * 0.05;
+        if (isUnarmed) {
+          // State B Unarmed Sprint: rhythmic cross-body tight-fist pump opposite left arm
+          rightFingerPose = 'TIGHT_FIST';
+          rPosX = 0.26 - camBobX * 0.35 - pumpSin * 0.044;
+          rPosY = -0.24 - camBobY * 0.35 - pumpCos * 0.044;
+          rPosZ = -0.46 + pumpSin * 0.074;
+          rRotX = -1.1 + pumpSin * 0.2;
+          rRotY = -0.28 + pumpCos * 0.08;
+          rRotZ = 0.34;
+        } else {
+          // Weapon Sprint: tuck bat/blade diagonally across chest with crisp stride cadence
+          rPosX = 0.24 - camBobX * 0.35 + pumpCos * 0.018;
+          rPosY = -0.21 - camBobY * 0.35 - Math.abs(pumpSin) * 0.02;
+          rPosZ = -0.37 - pumpCos * 0.022;
+          rRotX = -0.22 + pumpSin * 0.06;
+          rRotY = 0.72 + pumpCos * 0.045;
+          rRotZ = -0.82 - strafeInput * 0.05;
+        }
       } else {
-        // Walking: 1:1 counter-swing synced to camera head-bob
+        // Walking: figure-eight counter-swing synced to camera head-bob
         const walkFactor = THREE.MathUtils.clamp(moveSpeedRatio, 0, 1);
         const walkPhase = elapsed * 9;
-        rPosX += -camBobX * 0.5 + Math.cos(walkPhase * 0.5) * 0.012 * walkFactor;
-        rPosY += -camBobY * 0.5 - Math.abs(Math.sin(walkPhase)) * 0.012 * walkFactor;
-        rPosZ += Math.sin(walkPhase) * 0.016 * walkFactor;
-        rRotX += Math.sin(walkPhase) * 0.03 * walkFactor;
+        rPosX += -camBobX * 0.5 + Math.cos(walkPhase * 0.5) * 0.016 * walkFactor;
+        rPosY += -camBobY * 0.5 - Math.abs(Math.sin(walkPhase)) * 0.015 * walkFactor;
+        rPosZ += Math.sin(walkPhase) * 0.02 * walkFactor;
+        rRotX += Math.sin(walkPhase) * 0.04 * walkFactor;
+        rRotZ += Math.cos(walkPhase * 0.5) * 0.025 * walkFactor;
 
-        lPosX += -camBobX * 0.5 - Math.cos(walkPhase * 0.5) * 0.012 * walkFactor;
-        lPosY += -camBobY * 0.5 + Math.abs(Math.sin(walkPhase)) * 0.012 * walkFactor;
+        lPosX += -camBobX * 0.5 - Math.cos(walkPhase * 0.5) * 0.014 * walkFactor;
+        lPosY += -camBobY * 0.5 + Math.abs(Math.sin(walkPhase)) * 0.014 * walkFactor;
         lPosZ += -Math.sin(walkPhase) * 0.022 * walkFactor;
         lRotX += -Math.sin(walkPhase) * 0.055 * walkFactor;
       }
@@ -1883,10 +2913,11 @@ export class WeaponAndEffects {
 
       rPosX = 0.32;
       rPosY = -0.34;
-      rPosZ = -0.28;
-      rRotX = -0.3;
-      rRotY = -0.4;
-      rRotZ = 0.6;
+      rPosZ = -0.3;
+      rRotX = -0.95;
+      rRotY = 0.16;
+      rRotZ = isUnarmed ? 0.36 : -0.65;
+      if (isUnarmed) rightFingerPose = 'PARKOUR_OPEN';
       dampHz = 16;
     }
 
@@ -1901,10 +2932,11 @@ export class WeaponAndEffects {
 
       rPosX = 0.2;
       rPosY = -0.36;
-      rPosZ = -0.32;
-      rRotX = -0.55;
-      rRotY = -0.45;
-      rRotZ = 0.65;
+      rPosZ = -0.34;
+      rRotX = -1.42;
+      rRotY = -0.15;
+      rRotZ = isUnarmed ? 0.18 : -0.6;
+      if (isUnarmed) rightFingerPose = 'TIGHT_FIST';
       dampHz = 18;
     } else if (wallRunSide !== 0) {
       if (wallRunSide === -1) {
@@ -1917,23 +2949,24 @@ export class WeaponAndEffects {
         lRotZ = 0.55;
         leftFingerPose = 'OPEN_REACH';
 
-        rPosX = 0.28;
+        rPosX = 0.3;
         rPosY = -0.24 + Math.cos(elapsed * 16) * 0.022;
-        rPosZ = -0.36;
-        rRotX = 0.38;
-        rRotY = -0.45;
-        rRotZ = 0.32;
+        rPosZ = -0.42;
+        rRotX = isUnarmed ? -1.02 : -0.28;
+        rRotY = isUnarmed ? -0.18 : 0.85;
+        rRotZ = isUnarmed ? 0.22 : -0.95;
       } else {
         lPosX = -0.26;
         lPosY = -0.22 + Math.cos(elapsed * 16) * 0.026;
         lPosZ = -0.42;
         lRotX = -1.05;
-        rPosX = 0.26;
-        rPosY = -0.2 + Math.sin(elapsed * 16) * 0.022;
-        rPosZ = -0.35;
-        rRotX = 0.45;
-        rRotY = -0.55;
-        rRotZ = 0.38;
+        rPosX = 0.36;
+        rPosY = -0.16 + Math.sin(elapsed * 16) * 0.024;
+        rPosZ = -0.46;
+        rRotX = -1.22;
+        rRotY = isUnarmed ? -0.12 : 0.55;
+        rRotZ = isUnarmed ? -0.45 : -0.78;
+        if (isUnarmed) rightFingerPose = 'PARKOUR_OPEN';
       }
       dampHz = 16;
     } else if (isZiplining) {
@@ -1951,34 +2984,34 @@ export class WeaponAndEffects {
       lRotZ = -0.05 - zipSway * 1.4;
       leftFingerPose = 'FIST_CLENCH';
 
-      rPosX = 0.16 + zipSway;
+      rPosX = 0.15 + zipSway;
       rPosY = 0.13 + zipBuzz;
       rPosZ = -0.42;
-      rRotX = -0.45;
-      rRotY = 0.12;
-      rRotZ = 0.18 - zipSway * 1.4;
+      rRotX = -1.25;
+      rRotY = -0.06;
+      rRotZ = 0.05 - zipSway * 1.4;
+      if (isUnarmed) rightFingerPose = 'TIGHT_FIST';
       dampHz = 18;
     } else if (isVaulting) {
-      // Speed Vault: Left hand plants flat (70° wrist extension!) onto obstacle top surface; right tucks bat by hip
+      // Speed Vault: Left hand plants flat; Right hand braces forward with splayed fingers
       const plantArc = Math.sin(vaultProgress * Math.PI);
       lPosX = -0.18;
       lPosY = -0.22 - plantArc * 0.09;
       lPosZ = -0.5 - plantArc * 0.06;
-      // 70 deg wrist extension tilts hand upward from downward-reaching forearm so palm lands flat on obstacle
       lRotX = -1.45 + 70 * DEG2RAD * plantArc;
       lRotY = 0.12;
       lRotZ = 0.05;
       leftFingerPose = 'OPEN_REACH';
 
-      rPosX = 0.34;
-      rPosY = -0.36;
-      rPosZ = -0.3;
-      rRotX = -0.25;
-      rRotY = -0.35;
-      rRotZ = 0.48;
+      rPosX = 0.32;
+      rPosY = -0.26 - plantArc * 0.05;
+      rPosZ = -0.48 - plantArc * 0.06;
+      rRotX = isUnarmed ? -1.32 + 0.35 * plantArc : -0.35;
+      rRotY = isUnarmed ? -0.15 : 0.85;
+      rRotZ = isUnarmed ? 0.16 : -0.78;
+      if (isUnarmed) rightFingerPose = 'PARKOUR_OPEN';
       dampHz = 18;
     } else if (climbState === 'WALL_SCRAMBLE') {
-      // Rapid 1-step upward wall-scramble reach with splayed fingers + bat angled safely outside wall
       const wave = Math.sin(climbPhaseTime * 24) * scrambleSide;
       lPosX = -0.22;
       lPosY = -0.05 + wave * 0.11;
@@ -1988,19 +3021,18 @@ export class WeaponAndEffects {
       lRotZ = -0.1;
       leftFingerPose = 'OPEN_REACH';
 
-      rPosX = 0.27;
-      rPosY = -0.11 - wave * 0.1;
-      rPosZ = -0.41;
-      rRotX = 0.12;
-      rRotY = -0.86;
-      rRotZ = 0.78;
+      rPosX = 0.24;
+      rPosY = -0.08 - wave * 0.1;
+      rPosZ = -0.46;
+      rRotX = -1.38;
+      rRotY = isUnarmed ? -0.12 : 0.45;
+      rRotZ = isUnarmed ? 0.12 : -0.65;
+      rightFingerPose = 'PARKOUR_OPEN';
       rightExertionStrain = -4;
       dampHz = 24;
     } else if (climbState === 'MUSCLE_UP' || isMantling) {
-      // 3-Phase World-Space IK Ledge Catch, Pull-Up & Rooftop Mantle
       if (climbState === 'MUSCLE_UP' && leftGripWorld && rightGripWorld) {
         if (climbPhaseTime < 0.42) {
-          // Convert world-space ledge grip anchors into viewmodelGroup space for rock-steady IK lock
           this.camera.updateMatrixWorld(true);
           this.viewmodelGroup.updateMatrixWorld(true);
           _ikLeftLocal.copy(leftGripWorld);
@@ -2008,7 +3040,6 @@ export class WeaponAndEffects {
           _ikRightLocal.copy(rightGripWorld);
           this.viewmodelGroup.worldToLocal(_ikRightLocal);
 
-          // Offset palm heel slightly back toward camera (+0.025z, +0.015y) and clamp safely within arm reach (0.72m)
           _ikLeftLocal.z = Math.min(-0.18, _ikLeftLocal.z + 0.025);
           _ikLeftLocal.y = THREE.MathUtils.clamp(_ikLeftLocal.y + 0.015, -0.68, 0.16);
           _ikReachVec.subVectors(_ikLeftLocal, _ikLeftShoulder);
@@ -2031,7 +3062,6 @@ export class WeaponAndEffects {
           lPosX = _ikLeftLocal.x + tremor;
           lPosY = _ikLeftLocal.y + tremor * 0.7;
           lPosZ = _ikLeftLocal.z;
-          // 0.00s–0.06s OPEN_REACH splayed fingers slap lip -> 0.06s–0.42s LEDGE_CLAMP crimp hook
           if (climbPhaseTime < 0.06) {
             const reachU = climbPhaseTime / 0.06;
             lRotX = THREE.MathUtils.lerp(-1.12, -1.52, reachU);
@@ -2045,17 +3075,16 @@ export class WeaponAndEffects {
             leftFingerPose = 'LEDGE_CLAMP';
           }
 
-          // Right hand holds bat angled outward/parallel along the ledge edge so barrel never clips wall
           rPosX = _ikRightLocal.x - tremor;
           rPosY = _ikRightLocal.y + tremor * 0.7;
           rPosZ = _ikRightLocal.z;
-          rRotX = -0.34 + pullU * 0.18;
-          rRotY = -1.16;
-          rRotZ = 0.96;
+          rRotX = isUnarmed ? -1.48 + pullU * 0.32 : -0.45 + pullU * 0.18;
+          rRotY = isUnarmed ? -0.08 : 0.78;
+          rRotZ = isUnarmed ? 0.06 : -0.82;
+          rightFingerPose = isUnarmed ? (climbPhaseTime < 0.06 ? 'PARKOUR_OPEN' : 'TIGHT_FIST') : 'WEAPON_GRIP';
           rightExertionStrain = climbPhaseTime >= 0.14 ? 8 * Math.sin(pullU * Math.PI) : -3;
           dampHz = 30;
         } else {
-          // Phase 3 (0.42s - 0.62s): Hip-heave PALM_PRESS push-off transitioning smoothly into ready carry pose
           const u3 = THREE.MathUtils.clamp((climbPhaseTime - 0.42) / 0.2, 0, 1);
           if (u3 < 0.55) {
             const press = u3 / 0.55;
@@ -2069,10 +3098,11 @@ export class WeaponAndEffects {
 
             rPosX = THREE.MathUtils.lerp(0.24, 0.28, press);
             rPosY = THREE.MathUtils.lerp(-0.32, -0.36, press);
-            rPosZ = THREE.MathUtils.lerp(-0.4, -0.35, press);
-            rRotX = -0.24;
-            rRotY = -0.82;
-            rRotZ = 0.72;
+            rPosZ = THREE.MathUtils.lerp(-0.42, -0.36, press);
+            rRotX = isUnarmed ? -1.74 : -0.5;
+            rRotY = isUnarmed ? -0.1 : 0.78;
+            rRotZ = isUnarmed ? -0.12 : -0.82;
+            if (isUnarmed) rightFingerPose = 'PARKOUR_OPEN';
             rightExertionStrain = 5 * (1 - press);
           } else {
             const rec = (u3 - 0.55) / 0.45;
@@ -2085,18 +3115,17 @@ export class WeaponAndEffects {
             lRotZ = THREE.MathUtils.lerp(0.14, -0.18, sRec);
             leftFingerPose = 'RELAXED_IDLE';
 
-            rPosX = THREE.MathUtils.lerp(0.28, 0.26, sRec);
-            rPosY = THREE.MathUtils.lerp(-0.36, -0.24, sRec);
-            rPosZ = THREE.MathUtils.lerp(-0.35, -0.38, sRec);
-            rRotX = THREE.MathUtils.lerp(-0.24, 0.3, sRec);
-            rRotY = THREE.MathUtils.lerp(-0.82, -0.4, sRec);
-            rRotZ = THREE.MathUtils.lerp(0.72, 0.26, sRec);
+            rPosX = THREE.MathUtils.lerp(0.28, 0.29, sRec);
+            rPosY = THREE.MathUtils.lerp(-0.36, -0.26, sRec);
+            rPosZ = THREE.MathUtils.lerp(-0.36, -0.44, sRec);
+            rRotX = THREE.MathUtils.lerp(-1.2, isUnarmed ? -1.08 : -0.38, sRec);
+            rRotY = THREE.MathUtils.lerp(0.4, isUnarmed ? -0.22 : 0.95, sRec);
+            rRotZ = THREE.MathUtils.lerp(-0.4, isUnarmed ? 0.25 : -1.05, sRec);
             rightExertionStrain = 0;
           }
           dampHz = 22;
         }
       } else {
-        // Legacy fallback mantle curve
         if (mantleProgress < 0.24) {
           const reach = mantleProgress / 0.24;
           lPosX = THREE.MathUtils.lerp(-0.26, -0.2, reach);
@@ -2105,12 +3134,13 @@ export class WeaponAndEffects {
           lRotX = THREE.MathUtils.lerp(-1.1, -1.55, reach);
           leftFingerPose = reach > 0.65 ? 'LEDGE_CLAMP' : 'OPEN_REACH';
 
-          rPosX = THREE.MathUtils.lerp(0.28, 0.22, reach);
+          rPosX = THREE.MathUtils.lerp(0.29, 0.22, reach);
           rPosY = THREE.MathUtils.lerp(-0.24, -0.06, reach);
-          rPosZ = THREE.MathUtils.lerp(-0.4, -0.54, reach);
-          rRotX = THREE.MathUtils.lerp(0.25, -0.35, reach);
-          rRotY = -1.1;
-          rRotZ = 0.9;
+          rPosZ = THREE.MathUtils.lerp(-0.44, -0.56, reach);
+          rRotX = THREE.MathUtils.lerp(isUnarmed ? -1.08 : -0.38, -1.48, reach);
+          rRotY = isUnarmed ? -0.1 : 0.72;
+          rRotZ = isUnarmed ? 0.08 : -0.78;
+          if (isUnarmed) rightFingerPose = 'PARKOUR_OPEN';
         } else {
           const pull = (mantleProgress - 0.24) / 0.76;
           lPosX = THREE.MathUtils.lerp(-0.2, -0.28, pull);
@@ -2121,10 +3151,11 @@ export class WeaponAndEffects {
 
           rPosX = THREE.MathUtils.lerp(0.22, 0.3, pull);
           rPosY = THREE.MathUtils.lerp(-0.06, -0.36, pull);
-          rPosZ = THREE.MathUtils.lerp(-0.54, -0.35, pull);
-          rRotX = THREE.MathUtils.lerp(-0.35, 0.15, pull);
-          rRotY = -0.45;
-          rRotZ = 0.34;
+          rPosZ = THREE.MathUtils.lerp(-0.56, -0.38, pull);
+          rRotX = THREE.MathUtils.lerp(-1.48, isUnarmed ? -1.1 : -0.45, pull);
+          rRotY = isUnarmed ? -0.12 : 0.82;
+          rRotZ = isUnarmed ? 0.14 : -0.88;
+          if (isUnarmed) rightFingerPose = 'PARKOUR_OPEN';
         }
         dampHz = 18;
       }
@@ -2136,12 +3167,14 @@ export class WeaponAndEffects {
       leftFingerPose = 'OPEN_REACH';
 
       rPosX = 0.34;
-      rPosY = -0.22;
-      rPosZ = -0.42;
-      rRotZ = 0.45;
+      rPosY = -0.2;
+      rPosZ = -0.44;
+      rRotX = isUnarmed ? -0.95 : -0.34;
+      rRotZ = isUnarmed ? 0.32 : -0.82;
+      if (isUnarmed) rightFingerPose = 'PARKOUR_OPEN';
       dampHz = 16;
     } else if (isAirborne && !isSliding) {
-      // Jumping / Airborne: flare arms subtly for balance, splayed OPEN_REACH fingers
+      // Jumping / Airborne: flare arms subtly for balance, splayed fingers when unarmed
       const airFloat = Math.sin(elapsed * 6.5) * 0.018;
       lPosX = -0.31;
       lPosY = -0.19 + airFloat;
@@ -2151,12 +3184,13 @@ export class WeaponAndEffects {
       lRotZ = -0.28;
       leftFingerPose = 'OPEN_REACH';
 
-      rPosX = 0.32;
-      rPosY = -0.21 - airFloat * 0.6;
-      rPosZ = -0.41;
-      rRotX = 0.18;
-      rRotY = -0.28;
-      rRotZ = 0.34;
+      rPosX = 0.34;
+      rPosY = -0.22 - airFloat * 0.6;
+      rPosZ = -0.46;
+      rRotX = isUnarmed ? -1.04 : -0.34;
+      rRotY = isUnarmed ? -0.16 : 0.88;
+      rRotZ = isUnarmed ? 0.28 : -0.92;
+      if (isUnarmed) rightFingerPose = 'PARKOUR_OPEN';
       dampHz = 14;
     } else if (canMantle && !isSliding) {
       // Pre-reach cue near climbable ledge
@@ -2165,6 +3199,14 @@ export class WeaponAndEffects {
       lPosZ = -0.46;
       lRotX = -1.2;
       leftFingerPose = 'OPEN_REACH';
+
+      if (isUnarmed) {
+        rPosX = 0.32;
+        rPosY = -0.21;
+        rPosZ = -0.5;
+        rRotX = -1.24;
+        rightFingerPose = 'PARKOUR_OPEN';
+      }
     }
 
     if (!isZiplining) {
@@ -2176,7 +3218,6 @@ export class WeaponAndEffects {
     // -------------------------------------------------------------------------
     let trailActive = false;
     if (this.animState !== 'idle' && !isZiplining && !isMantling && climbState === 'NONE' && !isVaulting) {
-      // Cancel inspect immediately if player moves into combat or parkour slide
       if (this.animState === 'inspect' && (isSliding || isAirborne)) {
         this.animState = 'idle';
       } else {
@@ -2186,61 +3227,102 @@ export class WeaponAndEffects {
         if (this.animState === 'swing_left' || this.animState === 'swing_right') {
           const isForehand = this.animState === 'swing_left';
           const dirSign = isForehand ? 1 : -1;
-          dampHz = 22;
+          dampHz = this.activeWeapon === 'dagger' ? 28 : this.activeWeapon === 'cleaver' ? 18 : 24;
 
-          // Phase 1: 0.00s -> 0.10s Wind-up over right shoulder + left forearm guard
-          if (this.animTime < 0.1) {
-            const w = this.animTime / 0.1;
-            const easeW = Math.sin(w * Math.PI * 0.5);
-            rPosX = THREE.MathUtils.lerp(rPosX, isForehand ? 0.38 : -0.05, easeW);
-            rPosY = THREE.MathUtils.lerp(rPosY, -0.06, easeW);
-            rPosZ = THREE.MathUtils.lerp(rPosZ, -0.32, easeW);
-            rRotX = THREE.MathUtils.lerp(rRotX, 0.65, easeW);
-            rRotY = THREE.MathUtils.lerp(rRotY, isForehand ? -0.85 : 0.72, easeW);
-            rRotZ = THREE.MathUtils.lerp(rRotZ, isForehand ? -0.52 : 0.68, easeW);
-
-            lPosX = THREE.MathUtils.lerp(lPosX, -0.18, easeW);
-            lPosY = THREE.MathUtils.lerp(lPosY, -0.18, easeW);
-            lPosZ = THREE.MathUtils.lerp(lPosZ, -0.44, easeW);
-            lRotX = THREE.MathUtils.lerp(lRotX, -1.25, easeW);
-            lRotZ = THREE.MathUtils.lerp(lRotZ, 0.32, easeW);
+          if (this.activeWeapon === 'unarmed') {
+            // Unarmed 3-phase punch: wind-up -> crisp jab/cross with inward forearm pronation -> recovery
+            const punch = Math.sin(t * Math.PI);
+            const wind = t < 0.2 ? Math.sin((t / 0.2) * Math.PI * 0.5) : 0;
             leftFingerPose = 'FIST_CLENCH';
-          } else if (this.animTime < 0.22) {
-            // Phase 2: 0.10s -> 0.22s Explosive Diagonal Slash + Motion-Trail Mesh
-            const s = (this.animTime - 0.1) / 0.12;
-            const slash = s * s * (3 - 2 * s);
-            trailActive = true;
+            rightFingerPose = 'TIGHT_FIST';
+            rightExertionStrain = 6 * punch;
+            if (isForehand) {
+              // Fast Right Cross with pronation twist (thumb rotates downward/inward at strike peak)
+              rPosX = THREE.MathUtils.lerp(rPosX, 0.05 + wind * 0.08, punch || wind * 0.5);
+              rPosY = THREE.MathUtils.lerp(rPosY, -0.14 - wind * 0.03, punch || wind * 0.5);
+              rPosZ = THREE.MathUtils.lerp(rPosZ, -0.74 + wind * 0.08, punch || wind * 0.5);
+              rRotX = THREE.MathUtils.lerp(rRotX, -1.46, punch);
+              rRotY = THREE.MathUtils.lerp(rRotY, -0.14, punch);
+              rRotZ = THREE.MathUtils.lerp(rRotZ, 0.94, punch);
 
-            rPosX = THREE.MathUtils.lerp(isForehand ? 0.38 : -0.05, isForehand ? -0.26 : 0.34, slash);
-            rPosY = THREE.MathUtils.lerp(-0.06, -0.26, slash);
-            rPosZ = -0.48 - Math.sin(slash * Math.PI) * 0.1;
-            rRotX = THREE.MathUtils.lerp(0.65, -0.85, slash);
-            rRotY = THREE.MathUtils.lerp(isForehand ? -0.85 : 0.72, isForehand ? 1.15 : -0.95, slash);
-            rRotZ = THREE.MathUtils.lerp(isForehand ? -0.52 : 0.68, dirSign * 1.12, slash);
+              lPosX = -0.22;
+              lPosY = -0.21;
+              lPosZ = -0.36;
+            } else {
+              // Fast Left Jab while Right Hand tightens guard
+              lPosX = THREE.MathUtils.lerp(lPosX, -0.05, punch);
+              lPosY = THREE.MathUtils.lerp(lPosY, -0.12, punch);
+              lPosZ = THREE.MathUtils.lerp(lPosZ, -0.72, punch);
+              lRotX = THREE.MathUtils.lerp(lRotX, -1.52, punch);
+              lRotY = THREE.MathUtils.lerp(lRotY, 0.14, punch);
+              lRotZ = THREE.MathUtils.lerp(lRotZ, -0.52, punch);
 
-            lPosX = -0.22 - slash * 0.08;
-            lPosY = -0.22;
-            lPosZ = -0.38;
-            lRotX = -1.1;
-            lRotZ = 0.25;
-            leftFingerPose = 'FIST_CLENCH';
+              rPosX = 0.27;
+              rPosY = -0.24;
+              rPosZ = -0.44;
+            }
           } else {
-            // Phase 3: 0.22s -> 0.44s Follow-through & smooth recovery
-            const rec = (this.animTime - 0.22) / 0.22;
-            const easeR = 1 - Math.pow(1 - rec, 2);
-            dampHz = 14;
-            rPosX = THREE.MathUtils.lerp(isForehand ? -0.26 : 0.34, rPosX, easeR);
-            rPosY = THREE.MathUtils.lerp(-0.26, rPosY, easeR);
-            rPosZ = THREE.MathUtils.lerp(-0.48, rPosZ, easeR);
-            rRotX = THREE.MathUtils.lerp(-0.85, rRotX, easeR);
-            rRotY = THREE.MathUtils.lerp(isForehand ? 1.15 : -0.95, rRotY, easeR);
-            rRotZ = THREE.MathUtils.lerp(dirSign * 1.12, rRotZ, easeR);
+            const windEnd = this.animDuration * 0.22;
+            const slashEnd = this.animDuration * 0.5;
+            const recDur = Math.max(0.01, this.animDuration - slashEnd);
+
+            // Phase 1: Wind-up over shoulder + left forearm guard
+            if (this.animTime < windEnd) {
+              const w = this.animTime / Math.max(0.01, windEnd);
+              const easeW = Math.sin(w * Math.PI * 0.5);
+              rightExertionStrain = 6 * easeW;
+              rPosX = THREE.MathUtils.lerp(rPosX, isForehand ? 0.4 : -0.04, easeW);
+              rPosY = THREE.MathUtils.lerp(rPosY, -0.1, easeW);
+              rPosZ = THREE.MathUtils.lerp(rPosZ, -0.36, easeW);
+              rRotX = THREE.MathUtils.lerp(rRotX, -0.12, easeW);
+              rRotY = THREE.MathUtils.lerp(rRotY, isForehand ? 1.18 : -0.65, easeW);
+              rRotZ = THREE.MathUtils.lerp(rRotZ, isForehand ? -1.42 : -0.45, easeW);
+
+              lPosX = THREE.MathUtils.lerp(lPosX, -0.18, easeW);
+              lPosY = THREE.MathUtils.lerp(lPosY, -0.18, easeW);
+              lPosZ = THREE.MathUtils.lerp(lPosZ, -0.44, easeW);
+              lRotX = THREE.MathUtils.lerp(lRotX, -1.25, easeW);
+              lRotZ = THREE.MathUtils.lerp(lRotZ, 0.32, easeW);
+              leftFingerPose = 'FIST_CLENCH';
+            } else if (this.animTime < slashEnd) {
+              // Phase 2: Fast Diagonal Strike Arc + Forearm Pronation + Motion-Trail Mesh
+              const s = (this.animTime - windEnd) / Math.max(0.01, slashEnd - windEnd);
+              const slash = s * s * (3 - 2 * s);
+              trailActive = true;
+              rightExertionStrain = 9;
+
+              rPosX = THREE.MathUtils.lerp(isForehand ? 0.4 : -0.04, isForehand ? -0.24 : 0.34, slash);
+              rPosY = THREE.MathUtils.lerp(-0.1, -0.26, slash);
+              rPosZ = -0.5 - Math.sin(slash * Math.PI) * 0.12;
+              rRotX = THREE.MathUtils.lerp(-0.12, -1.32, slash);
+              rRotY = THREE.MathUtils.lerp(isForehand ? 1.18 : -0.65, isForehand ? -0.48 : 1.12, slash);
+              rRotZ = THREE.MathUtils.lerp(isForehand ? -1.42 : -0.45, dirSign * 0.42 - 0.72, slash);
+
+              lPosX = -0.22 - slash * 0.08;
+              lPosY = -0.22;
+              lPosZ = -0.38;
+              lRotX = -1.1;
+              lRotZ = 0.25;
+              leftFingerPose = 'FIST_CLENCH';
+            } else {
+              // Phase 3: Follow-through & smooth recovery
+              const rec = (this.animTime - slashEnd) / recDur;
+              const easeR = 1 - Math.pow(1 - rec, 2);
+              dampHz = 14;
+              rightExertionStrain = 9 * (1 - easeR);
+              rPosX = THREE.MathUtils.lerp(isForehand ? -0.24 : 0.34, rPosX, easeR);
+              rPosY = THREE.MathUtils.lerp(-0.26, rPosY, easeR);
+              rPosZ = THREE.MathUtils.lerp(-0.5, rPosZ, easeR);
+              rRotX = THREE.MathUtils.lerp(-1.32, rRotX, easeR);
+              rRotY = THREE.MathUtils.lerp(isForehand ? -0.48 : 1.12, rRotY, easeR);
+              rRotZ = THREE.MathUtils.lerp(dirSign * 0.42 - 0.72, rRotZ, easeR);
+            }
           }
           this.swingArcMat.opacity = 0;
         } else if (this.animState === 'parry') {
-          // Arkham Counter: Left forearm snaps horizontally across chest (FIST_CLENCH) + upward bat-pommel/elbow strike
           dampHz = 20;
           leftFingerPose = 'FIST_CLENCH';
+          if (isUnarmed) rightFingerPose = 'TIGHT_FIST';
           if (t < 0.42) {
             const p = Math.sin((t / 0.42) * Math.PI * 0.5);
             lPosX = THREE.MathUtils.lerp(lPosX, -0.06, p);
@@ -2248,16 +3330,15 @@ export class WeaponAndEffects {
             lPosZ = THREE.MathUtils.lerp(lPosZ, -0.44, p);
             lRotX = -1.25;
             lRotY = 0.65;
-            lRotZ = 1.18; // horizontal chest guard
+            lRotZ = 1.18;
 
             rPosX = 0.32;
             rPosY = -0.28;
-            rPosZ = -0.34;
-            rRotX = 0.4;
-            rRotY = -0.45;
-            rRotZ = 0.35;
+            rPosZ = -0.38;
+            rRotX = isUnarmed ? -1.12 : -0.25;
+            rRotY = isUnarmed ? -0.2 : 0.85;
+            rRotZ = isUnarmed ? 0.32 : -0.95;
           } else {
-            // Upward bat-pommel / elbow strike follow-up
             const strike = (t - 0.42) / 0.58;
             const punch = Math.sin(strike * Math.PI);
             lPosX = THREE.MathUtils.lerp(-0.06, lPosX, strike);
@@ -2266,24 +3347,25 @@ export class WeaponAndEffects {
             lRotZ = THREE.MathUtils.lerp(1.18, lRotZ, strike);
 
             rPosX = 0.22 - punch * 0.14;
-            rPosY = -0.22 + punch * 0.16;
-            rPosZ = -0.42 - punch * 0.14;
-            rRotX = -0.35 - punch * 0.85;
-            rRotY = 0.45;
-            rRotZ = 0.72;
+            rPosY = -0.22 + punch * 0.14;
+            rPosZ = -0.46 - punch * 0.18;
+            rRotX = isUnarmed ? -1.25 - punch * 0.35 : -0.65 - punch * 0.65;
+            rRotY = isUnarmed ? -0.18 : 0.45;
+            rRotZ = isUnarmed ? 0.72 : -0.78;
           }
           this.swingArcMat.opacity = Math.sin(t * Math.PI) * 0.85;
         } else if (this.animState === 'takedown') {
           dampHz = 20;
           leftFingerPose = 'FIST_CLENCH';
+          if (isUnarmed) rightFingerPose = 'TIGHT_FIST';
           if (t < 0.35) {
             const up = t / 0.35;
-            rPosX = 0.16;
-            rPosY = -0.1 + up * 0.24;
-            rPosZ = -0.38;
-            rRotX = 0.55 * up;
-            rRotY = -0.2;
-            rRotZ = 0.1;
+            rPosX = 0.18;
+            rPosY = -0.12 + up * 0.24;
+            rPosZ = -0.42;
+            rRotX = isUnarmed ? -0.8 - up * 0.3 : -0.15;
+            rRotY = isUnarmed ? -0.15 : 0.82;
+            rRotZ = isUnarmed ? 0.25 : -1.1;
             lPosX = -0.18;
             lPosY = -0.14;
             lPosZ = -0.44;
@@ -2291,35 +3373,35 @@ export class WeaponAndEffects {
             const slam = (t - 0.35) / 0.65;
             trailActive = slam < 0.55;
             rPosX = 0.12;
-            rPosY = 0.14 - Math.sin(slam * Math.PI * 0.5) * 0.48;
-            rPosZ = -0.48 - Math.sin(slam * Math.PI) * 0.16;
-            rRotX = -1.45 * Math.sin(slam * Math.PI * 0.65);
+            rPosY = 0.12 - Math.sin(slam * Math.PI * 0.5) * 0.48;
+            rPosZ = -0.5 - Math.sin(slam * Math.PI) * 0.18;
+            rRotX = -1.35 * Math.sin(slam * Math.PI * 0.65) - 0.35;
           }
           this.swingArcMat.opacity = Math.sin(t * Math.PI) * 0.85;
         } else if (this.animState === 'blocked') {
           const ease = Math.sin(t * Math.PI);
           dampHz = 18;
           leftFingerPose = 'FIST_CLENCH';
-          rPosX = 0.34 + ease * 0.14;
+          if (isUnarmed) rightFingerPose = 'TIGHT_FIST';
+          rPosX = 0.35 + ease * 0.14;
           rPosY = -0.28 - ease * 0.08;
-          rRotX = 0.55 * ease;
-          rRotZ = 0.5 * ease;
+          rRotX += ease * 0.48;
+          rRotZ -= ease * 0.35;
           this.swingArcMat.opacity = 0;
         } else if (this.animState === 'inspect') {
-          // [B] / [I] Inspect: Tilt bat across right-center FOV to admire grain & raise left wrist to glance at Biomarker LED
           dampHz = 9;
           const fadeIn = Math.min(1, t / 0.22);
           const fadeOut = Math.min(1, (1 - t) / 0.25);
           const blend = Math.min(fadeIn, fadeOut);
           const smoothB = blend * blend * (3 - 2 * blend);
-          const rollLook = Math.sin(t * Math.PI * 2) * 0.24;
+          const rollLook = Math.sin(t * Math.PI * 2) * 0.26;
 
-          rPosX = THREE.MathUtils.lerp(rPosX, 0.16, smoothB);
-          rPosY = THREE.MathUtils.lerp(rPosY, -0.14, smoothB);
-          rPosZ = THREE.MathUtils.lerp(rPosZ, -0.42, smoothB);
-          rRotX = THREE.MathUtils.lerp(rRotX, 0.52, smoothB);
-          rRotY = THREE.MathUtils.lerp(rRotY, -0.78 + rollLook, smoothB);
-          rRotZ = THREE.MathUtils.lerp(rRotZ, 0.68 + rollLook * 0.4, smoothB);
+          rPosX = THREE.MathUtils.lerp(rPosX, 0.19, smoothB);
+          rPosY = THREE.MathUtils.lerp(rPosY, -0.16, smoothB);
+          rPosZ = THREE.MathUtils.lerp(rPosZ, -0.45, smoothB);
+          rRotX = THREE.MathUtils.lerp(rRotX, isUnarmed ? -0.82 : -0.52, smoothB);
+          rRotY = THREE.MathUtils.lerp(rRotY, isUnarmed ? 0.32 + rollLook : 0.42 + rollLook, smoothB);
+          rRotZ = THREE.MathUtils.lerp(rRotZ, isUnarmed ? 0.18 : -0.78 + rollLook * 0.4, smoothB);
 
           lPosX = THREE.MathUtils.lerp(lPosX, -0.15, smoothB);
           lPosY = THREE.MathUtils.lerp(lPosY, -0.11, smoothB);
@@ -2330,8 +3412,6 @@ export class WeaponAndEffects {
           leftFingerPose = 'RELAXED_IDLE';
           this.swingArcMat.opacity = 0;
         } else if (this.animState === 'intro_ready') {
-          // Dying Light intro: Left wrist raises 0.5s -> holds 1.4s displaying Biomarker LED -> lowers 0.3s;
-          // Right hand gives the bat a weight-check twirl before settling into RELAXED_IDLE
           dampHz = 12;
           const raiseEnd = 0.5;
           const holdEnd = 1.9;
@@ -2354,12 +3434,12 @@ export class WeaponAndEffects {
 
           const twirl = Math.sin(t * Math.PI * 2);
           const liftR = Math.sin(t * Math.PI);
-          rPosX = THREE.MathUtils.lerp(rPosX, 0.21, liftR);
-          rPosY = THREE.MathUtils.lerp(rPosY, -0.19, liftR);
-          rPosZ = THREE.MathUtils.lerp(rPosZ, -0.41, liftR);
-          rRotX = THREE.MathUtils.lerp(rRotX, 0.44, liftR);
-          rRotY = THREE.MathUtils.lerp(rRotY, -0.52 + twirl * 0.36, liftR);
-          rRotZ = THREE.MathUtils.lerp(rRotZ, 0.48 + twirl * 0.24, liftR);
+          rPosX = THREE.MathUtils.lerp(rPosX, 0.24, liftR);
+          rPosY = THREE.MathUtils.lerp(rPosY, -0.21, liftR);
+          rPosZ = THREE.MathUtils.lerp(rPosZ, -0.44, liftR);
+          rRotX = THREE.MathUtils.lerp(rRotX, -0.48, liftR);
+          rRotY = THREE.MathUtils.lerp(rRotY, 0.75 + twirl * 0.28, liftR);
+          rRotZ = THREE.MathUtils.lerp(rRotZ, -0.92 + twirl * 0.22, liftR);
           this.swingArcMat.opacity = 0;
         }
 
@@ -2372,8 +3452,50 @@ export class WeaponAndEffects {
       this.swingArcMat.opacity = 0;
     }
 
-    // Apply anti-wall-clipping pullback tuck toward chest (disabled during world-space climb IK)
-    if (this.curVmPullback > 0.01 && climbState === 'NONE') {
+    // Smooth lower/raise equip swap animation on right arm
+    if (this.equipSwapTime >= 0) {
+      this.equipSwapTime += dt;
+      const p = Math.min(1, this.equipSwapTime / this.equipSwapDuration);
+      if (p >= 0.5 && this.pendingWeapon !== null) {
+        this.applyActiveWeaponMeshes(this.pendingWeapon);
+        this.pendingWeapon = null;
+      }
+      const dip = Math.sin(p * Math.PI);
+      rPosY -= dip * 0.34;
+      rPosZ += dip * 0.08;
+      rRotX -= dip * 0.35;
+      dampHz = Math.max(dampHz, 24);
+      if (p >= 1) {
+        this.equipSwapTime = -1;
+      }
+    }
+
+    // -------------------------------------------------------------------------
+    // 5B. Awakening Cinematic Build-Up Override (locks swing/pullback during cutscene)
+    // -------------------------------------------------------------------------
+    if (awakeningPose?.active) {
+      this.animState = 'idle';
+      this.swingArcMat.opacity = 0;
+      rPosX = awakeningPose.rightPosX;
+      rPosY = awakeningPose.rightPosY;
+      rPosZ = awakeningPose.rightPosZ;
+      rRotX = awakeningPose.rightRotX;
+      rRotY = awakeningPose.rightRotY;
+      rRotZ = awakeningPose.rightRotZ;
+      lPosX = awakeningPose.leftPosX;
+      lPosY = awakeningPose.leftPosY;
+      lPosZ = awakeningPose.leftPosZ;
+      lRotX = awakeningPose.leftRotX;
+      lRotY = awakeningPose.leftRotY;
+      lRotZ = awakeningPose.leftRotZ;
+      leftFingerPose = awakeningPose.leftPose;
+      rightFingerPose = awakeningPose.rightPose;
+      rightExertionStrain = awakeningPose.exertion;
+      dampHz = 28;
+    }
+
+    // Apply anti-wall-clipping pullback tuck toward chest (disabled during world-space climb IK & Activation Smack)
+    if (this.curVmPullback > 0.01 && climbState === 'NONE' && !awakeningPose?.active) {
       const pb = this.curVmPullback;
       rPosZ += pb * 0.09;
       rPosX -= pb * 0.04;
@@ -2415,7 +3537,7 @@ export class WeaponAndEffects {
       this.leftUpperArm,
       this.leftForearm,
       this.leftWrist,
-      _shoulderBase.set(-0.36, -0.5, 0.04),
+      _shoulderBase.set(-0.28, -0.46, 0.02),
       _leftTargetPos,
       _leftTargetQuat,
       _leftPole,
@@ -2425,19 +3547,37 @@ export class WeaponAndEffects {
       this.rightUpperArm,
       this.rightForearm,
       this.rightWrist,
-      _shoulderBase.set(0.36, -0.5, 0.04),
+      _shoulderBase.set(0.38, -0.54, 0.08),
       _rightTargetPos,
       _rightTargetQuat,
       _rightPole,
     );
 
-    // Smoothly articulate all 15 left-hand finger joints & right-hand grip exertion
+    // Smoothly articulate all 15 left-hand & 15 right-hand finger joints
     const fingerDamp = 1 - Math.exp(-15 * dt);
     this.applyLeftFingerAngles(elapsed, fingerDamp, leftFingerPose);
-    this.applyRightFingerExertion(rightExertionStrain, fingerDamp);
+    this.applyRightFingerAngles(elapsed, fingerDamp, rightFingerPose, rightExertionStrain);
 
     // Update procedural bat motion-trail ribbon
     this.updateMotionTrail(trailActive, dt);
+
+    // Pumped-Up Mode: trail fiery ember sparks off the bat tip while moving or swinging
+    if (
+      awakeningActive &&
+      this.activeWeapon === 'bat' &&
+      (horizSpeed > 1.2 || this.animState === 'swing_left' || this.animState === 'swing_right')
+    ) {
+      this.batEmberTimer -= dt;
+      const interval = this.animState === 'swing_left' || this.animState === 'swing_right' ? 0.022 : 0.055;
+      if (this.batEmberTimer <= 0) {
+        this.batEmberTimer = interval;
+        this.viewmodelGroup.updateWorldMatrix(true, true);
+        this.batTipMarker.getWorldPosition(_tipWorld);
+        this.spawnSparks(_tipWorld, Math.random() < 0.5 ? 0xff4500 : 0xffc800, 1);
+      }
+    } else {
+      this.batEmberTimer = 0;
+    }
 
     // -------------------------------------------------------------------------
     // E. Dual Parkour Legs & Boots (preserved)

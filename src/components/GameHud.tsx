@@ -20,7 +20,9 @@ import {
   X,
 } from 'lucide-react';
 import type { HudSnapshot, MinimapTelemetry, RadioMessage } from '../types/game';
+import { WEAPONS_BY_ID, type WeaponSlot } from '../game/weapons';
 import { DualMinimaps } from './DualMinimaps';
+import { WeaponWheel } from './WeaponWheel';
 
 const COMPASS_POINTS = [
   { label: 'N', angle: 0, major: true },
@@ -60,6 +62,8 @@ interface GameHudProps {
   onToggleMute: () => void;
   onSendRadioMessage: (text: string) => void;
   onCloseRadio: (relockPointer?: boolean) => void;
+  onWheelHoverSlot?: (slot: WeaponSlot) => void;
+  onWheelSelectSlot?: (slot: WeaponSlot) => void;
   getLiveMinimapTelemetry?: () => MinimapTelemetry | null;
 }
 
@@ -75,6 +79,12 @@ const RunningPersonIcon: React.FC<{ className?: string }> = ({ className }) => (
   </svg>
 );
 
+const AwakeningFlameIcon: React.FC<{ className?: string }> = ({ className }) => (
+  <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" className={className}>
+    <path d="M13.6 2.2 7.1 12.1h4.6l-1.9 9.7 7.6-10.8h-4.7l.9-8.8Z" />
+  </svg>
+);
+
 export const GameHud: React.FC<GameHudProps> = ({
   hud,
   muted,
@@ -87,6 +97,8 @@ export const GameHud: React.FC<GameHudProps> = ({
   onToggleMute,
   onSendRadioMessage,
   onCloseRadio,
+  onWheelHoverSlot,
+  onWheelSelectSlot,
   getLiveMinimapTelemetry,
 }) => {
   const [showControls, setShowControls] = useState(false);
@@ -144,6 +156,22 @@ export const GameHud: React.FC<GameHudProps> = ({
 
   const hudTextShadow = '[text-shadow:0_2px_6px_rgba(0,0,0,0.9)]';
   const hudIconShadow = 'drop-shadow-[0_2px_5px_rgba(0,0,0,0.92)]';
+  const awakeningCinematic = Boolean(hud.awakening?.cinematicActive);
+  const hudDim = hud.awakening?.hudDimOpacity ?? (awakeningCinematic ? 0.15 : 1);
+  const effectiveHudOpacity = Math.min(hud.hudOpacity ?? 1, hudDim);
+  const letterboxPct = hud.awakening?.letterboxProgress ?? 0;
+  const darkVignetteOpacity = hud.awakening?.vignetteDarkOpacity ?? 0;
+  const subtitleVisible = hud.phase === 'playing' && Boolean(hud.awakening?.subtitleVisible);
+  const subtitleElapsed = hud.awakening?.subtitleElapsed ?? 0;
+  const subtitleFlash = hud.awakening?.subtitleFlashProgress ?? 0;
+  const subtitleExit = hud.awakening?.subtitleExitProgress ?? 0;
+  const subtitleEntranceU = Math.min(1, subtitleElapsed / 0.45);
+  const subtitleEase = 1 - Math.pow(1 - subtitleEntranceU, 3);
+  const subtitleOpacity = subtitleEase * (1 - subtitleExit);
+  const subtitleScale = (1.12 - 0.12 * subtitleEase) * (1 + subtitleExit * 0.22);
+  const subtitleTracking = 4 - 2.5 * subtitleEase;
+  const impactOverlayMode = hud.awakening?.impactOverlayMode ?? 'none';
+  const impactOverlayOpacity = hud.awakening?.impactOverlayOpacity ?? 0;
 
   return (
     <div className="pointer-events-none fixed inset-0 z-10 flex flex-col justify-between">
@@ -159,6 +187,177 @@ export const GameHud: React.FC<GameHudProps> = ({
           className="pointer-events-none fixed inset-0 border-[12px] border-amber-400/60 transition-opacity duration-75"
           style={{ opacity: Math.min(0.75, hud.parryFlash) }}
         />
+      )}
+
+      {/* Awakening Pumped-Up Crimson-Amber Edge Vignette */}
+      {hud.phase === 'playing' && (hud.awakening?.vignetteOpacity ?? 0) > 0.01 && (
+        <div
+          className="pointer-events-none fixed inset-0"
+          style={{
+            opacity: hud.awakening?.vignetteOpacity ?? 0,
+            boxShadow: 'inset 0 0 90px rgba(255, 60, 20, 0.45)',
+          }}
+          aria-hidden="true"
+        />
+      )}
+
+      {/* Awakening Anime Cutscene Dark Vignette & Cinematic Letterbox Bars */}
+      {hud.phase === 'playing' && darkVignetteOpacity > 0.005 && (
+        <div
+          className="pointer-events-none fixed inset-0 z-30"
+          style={{
+            opacity: darkVignetteOpacity,
+            boxShadow: 'inset 0 0 140px rgba(0, 0, 0, 0.85)',
+          }}
+          aria-hidden="true"
+        />
+      )}
+      {hud.phase === 'playing' && letterboxPct > 0.005 && (
+        <>
+          <div
+            className="pointer-events-none fixed inset-x-0 top-0 z-40 bg-black"
+            style={{ height: `${(letterboxPct * 7).toFixed(3)}vh` }}
+            aria-hidden="true"
+          />
+          <div
+            className="pointer-events-none fixed inset-x-0 bottom-0 z-40 bg-black"
+            style={{ height: `${(letterboxPct * 7).toFixed(3)}vh` }}
+            aria-hidden="true"
+          />
+        </>
+      )}
+
+      {/* Hidden Inline SVG Bloody Organic Drip Filter */}
+      <svg style={{ display: 'none' }} aria-hidden="true">
+        <defs>
+          <filter id="bloody-drip-filter" x="-10%" y="-15%" width="120%" height="165%">
+            <feTurbulence
+              type="fractalNoise"
+              baseFrequency="0.02 0.18"
+              numOctaves="2"
+              seed="7"
+              result="dripNoise"
+            />
+            <feDisplacementMap
+              in="SourceGraphic"
+              in2="dripNoise"
+              scale="3.2"
+              xChannelSelector="R"
+              yChannelSelector="G"
+              result="warpedText"
+            />
+            <feDropShadow dx="0" dy="4" stdDeviation="3" floodColor="#2A0000" floodOpacity="0.92" />
+          </filter>
+        </defs>
+      </svg>
+
+      {/* Beat 3 Dripping Blood-Red Anime Subtitle Reveal */}
+      {subtitleVisible && (
+        <div
+          className="pointer-events-none fixed inset-x-0 flex justify-center px-6"
+          style={{
+            bottom: '15vh',
+            zIndex: 9999,
+            opacity: subtitleOpacity,
+            transform: `scale(${subtitleScale.toFixed(4)})`,
+          }}
+          aria-live="assertive"
+        >
+          <div className="relative inline-block text-center">
+            {/* Back crimson edge stroke & deep dark-blood glow (flashes #FFF5CC white-gold at 4.60s) */}
+            <span
+              className="font-bloody relative block select-none whitespace-nowrap font-bold"
+              style={{
+                fontSize: 'clamp(1.22rem, 2.65vw, 2.35rem)',
+                lineHeight: 1.4,
+                letterSpacing: `${subtitleTracking.toFixed(2)}px`,
+                color: subtitleFlash > 0.15 ? '#FFF5CC' : '#D90404',
+                WebkitTextStroke: subtitleFlash > 0.15 ? '1.5px #FFE89E' : '1.5px #1A0000',
+                textShadow:
+                  subtitleFlash > 0.15
+                    ? '0 0 26px rgba(255, 245, 204, 0.98), 0 0 42px rgba(255, 200, 90, 0.85)'
+                    : '0 3px 0 #2B0000, 0 0 18px rgba(220, 0, 0, 0.75)',
+                filter: subtitleFlash > 0.15 ? 'none' : 'url(#bloody-drip-filter)',
+              }}
+            >
+              Why am i not Strong Enough
+            </span>
+            {/* Top vertical blood-gradient overlay (flashes bright white-gold during shatter trigger) */}
+            <span
+              aria-hidden="true"
+              className="font-bloody pointer-events-none absolute inset-0 block select-none whitespace-nowrap font-bold"
+              style={{
+                fontSize: 'clamp(1.22rem, 2.65vw, 2.35rem)',
+                lineHeight: 1.4,
+                letterSpacing: `${subtitleTracking.toFixed(2)}px`,
+                backgroundImage:
+                  subtitleFlash > 0.15
+                    ? 'linear-gradient(180deg, #FFFFFF 0%, #FFF5CC 60%, #FFD670 100%)'
+                    : 'linear-gradient(180deg, #FF1E1E 0%, #B80000 65%, #590000 100%)',
+                WebkitBackgroundClip: 'text',
+                backgroundClip: 'text',
+                color: 'transparent',
+                WebkitTextStroke: subtitleFlash > 0.15 ? '1.5px #FFF5CC' : '1.5px #1A0000',
+                filter: subtitleFlash > 0.15 ? 'none' : 'url(#bloody-drip-filter)',
+              }}
+            >
+              Why am i not Strong Enough
+            </span>
+
+            {/* 8 Procedural Animated Crimson Blood Teardrops */}
+            {[
+              { left: '4.5%', width: 4.5, delay: '0.04s' },
+              { left: '14%', width: 3.5, delay: '0.18s' },
+              { left: '28.5%', width: 4, delay: '0.09s' },
+              { left: '39%', width: 3.2, delay: '0.28s' },
+              { left: '53.5%', width: 4.8, delay: '0.12s' },
+              { left: '65.5%', width: 3.6, delay: '0.35s' },
+              { left: '78.5%', width: 4.2, delay: '0.07s' },
+              { left: '92.5%', width: 3.8, delay: '0.24s' },
+            ].map((drip, idx) => (
+              <span
+                key={idx}
+                aria-hidden="true"
+                className="bloody-drip-drop pointer-events-none absolute"
+                style={{
+                  left: drip.left,
+                  top: '76%',
+                  width: `${drip.width}px`,
+                  animationDelay: drip.delay,
+                  opacity: 1 - subtitleExit,
+                }}
+              />
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Activation Smack Impact Flash (0.05s white-gold -> fiery crimson-orange radial burst) */}
+      {hud.phase === 'playing' && impactOverlayMode !== 'none' && impactOverlayOpacity > 0.005 && (
+        <div
+          className="pointer-events-none fixed inset-0"
+          style={{
+            zIndex: 9998,
+            opacity: impactOverlayOpacity,
+            background:
+              impactOverlayMode === 'whiteGold'
+                ? 'rgba(255, 248, 220, 0.85)'
+                : 'radial-gradient(circle, transparent 35%, rgba(255, 60, 0, 0.65) 100%)',
+          }}
+          aria-hidden="true"
+        >
+          {impactOverlayMode === 'crimsonBurst' && (
+            <div
+              className="absolute inset-0 opacity-65"
+              style={{
+                background:
+                  'repeating-conic-gradient(from 0deg at 50% 50%, rgba(255, 240, 180, 0.55) 0deg 2deg, transparent 2deg 14deg)',
+                maskImage: 'radial-gradient(circle at center, transparent 28%, black 78%)',
+                WebkitMaskImage: 'radial-gradient(circle at center, transparent 28%, black 78%)',
+              }}
+            />
+          )}
+        </div>
       )}
 
       {/* Subtle Red Curved Directional Damage Indicators for Side/Rear Hits */}
@@ -247,11 +446,33 @@ export const GameHud: React.FC<GameHudProps> = ({
         />
       )}
 
-      {/* Center Minimal Reticle during active gameplay (hidden during intro) */}
+      {/* Radial Weapon Selector Wheel Overlay */}
+      {hud.phase === 'playing' &&
+        hud.weaponWheelOpen &&
+        !hud.radioOpen &&
+        !hud.isIntroPlaying && (
+          <WeaponWheel
+            hoveredSlot={hud.wheelHoveredSlot}
+            activeWeapon={hud.activeWeapon}
+            cratesCollected={hud.cratesCollected}
+            totalCrates={hud.totalCrates}
+            scrapParts={hud.scrapParts}
+            weaponDurability={hud.weaponDurability}
+            cursorX={hud.wheelCursorX}
+            cursorY={hud.wheelCursorY}
+            pointerLocked={hud.pointerLocked}
+            onHoverSlot={onWheelHoverSlot}
+            onSelectSlot={onWheelSelectSlot}
+          />
+        )}
+
+      {/* Center Minimal Reticle during active gameplay (hidden during intro, cutscene & weapon wheel) */}
       {hud.phase === 'playing' &&
         !hud.radioOpen &&
         !hud.isIntroPlaying &&
-        (hud.hudOpacity ?? 1) > 0.1 && (
+        !awakeningCinematic &&
+        !hud.weaponWheelOpen &&
+        effectiveHudOpacity > 0.1 && (
           <div className="pointer-events-none fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2">
             <div className="h-1.5 w-1.5 rounded-full bg-white/90 ring-2 ring-black/65" />
           </div>
@@ -262,10 +483,10 @@ export const GameHud: React.FC<GameHudProps> = ({
       {/* ===================================================================== */}
       {hud.phase === 'playing' && (
         <div
-          className={`flex items-start justify-between gap-4 px-6 pt-5 transition-opacity duration-150 ${
-            hud.isIntroPlaying ? 'pointer-events-none' : ''
+          className={`flex items-start justify-between gap-4 px-6 pt-5 transition-opacity duration-300 ${
+            hud.isIntroPlaying || awakeningCinematic ? 'pointer-events-none' : ''
           }`}
-          style={{ opacity: hud.hudOpacity ?? 1 }}
+          style={{ opacity: effectiveHudOpacity }}
         >
           {/* Top-Left: Floating White Health Bar & Golden-Yellow Stamina Bar */}
           <div className="flex flex-col gap-2.5">
@@ -294,6 +515,73 @@ export const GameHud: React.FC<GameHudProps> = ({
                 />
               </div>
             </div>
+
+            {/* Awakening / Pumped-Up Meter directly beneath Stamina Bar */}
+            {(() => {
+              const awk = hud.awakening;
+              const chargePct = Math.max(0, Math.min(100, awk?.charge ?? 0));
+              const isReady = Boolean(awk?.isReady);
+              const isActive = Boolean(awk?.isActive);
+              return (
+                <div className="flex items-center gap-3 pl-9">
+                  <div
+                    className={`flex h-6 w-6 items-center justify-center rounded-full border shadow-[0_2px_6px_rgba(0,0,0,0.75)] transition-colors ${
+                      isActive
+                        ? 'border-amber-300 bg-red-600/80 text-amber-200 shadow-[0_0_12px_rgba(255,90,20,0.9)]'
+                        : isReady
+                          ? 'border-[#FFD700] bg-amber-500/35 text-[#FFD700] shadow-[0_0_12px_rgba(255,180,0,0.85)]'
+                          : 'border-orange-300/45 bg-black/40 text-amber-400'
+                    }`}
+                  >
+                    <AwakeningFlameIcon className={`h-3.5 w-3.5 shrink-0 ${hudIconShadow}`} />
+                  </div>
+                  <div className="flex items-center gap-2.5">
+                    <div
+                      className={`h-[10px] w-[220px] overflow-hidden rounded-full bg-[rgba(15,17,22,0.78)] ${
+                        isReady
+                          ? 'awakening-ready-pill border-[1.5px] border-[#FFD700]'
+                          : isActive
+                            ? 'border-[1.5px] border-amber-300/90 shadow-[0_0_14px_rgba(255,90,20,0.75)]'
+                            : 'border-[1.5px] border-[rgba(255,255,255,0.18)]'
+                      }`}
+                    >
+                      <div
+                        className={`h-full rounded-full ${
+                          isActive
+                            ? 'awakening-plasma-bar transition-[width] duration-75 ease-linear'
+                            : 'transition-[width] duration-150 ease-out'
+                        }`}
+                        style={{
+                          width: `${chargePct}%`,
+                          ...(isActive
+                            ? {}
+                            : {
+                                background:
+                                  'linear-gradient(90deg, #D92626 0%, #FF6B1A 60%, #FFC400 100%)',
+                              }),
+                        }}
+                      />
+                    </div>
+                    {isActive ? (
+                      <span
+                        className={`font-display text-xs font-black italic tracking-wider text-amber-300 uppercase ${hudTextShadow}`}
+                      >
+                        PUMPED UP{' '}
+                        <span className="font-mono-num text-[11px] not-italic text-white/90">
+                          {(awk?.remainingSeconds ?? 0).toFixed(1)}s
+                        </span>
+                      </span>
+                    ) : isReady ? (
+                      <span
+                        className={`font-display text-[11px] font-bold tracking-wider text-[#FFD700] uppercase animate-pulse ${hudTextShadow}`}
+                      >
+                        READY [G]
+                      </span>
+                    ) : null}
+                  </div>
+                </div>
+              );
+            })()}
           </div>
 
           {/* Top-Center: Minimal Transparent Dying Light Compass, Combo & Pointer Lock */}
@@ -409,7 +697,7 @@ export const GameHud: React.FC<GameHudProps> = ({
               </div>
             )}
 
-            {!hud.pointerLocked && !hud.radioOpen && (
+            {!hud.pointerLocked && !hud.radioOpen && !hud.weaponWheelOpen && !awakeningCinematic && (
               <button
                 type="button"
                 onClick={onLockPointer}
@@ -477,10 +765,10 @@ export const GameHud: React.FC<GameHudProps> = ({
         <div className="relative flex w-full items-end justify-between px-6 pb-5">
           {/* Bottom-Left: Dual 3D & 2D Minimaps + Minimal Unboxed Gadget Labels */}
           <div
-            className={`flex flex-col items-start gap-2.5 text-white transition-opacity duration-150 ${
-              hud.isIntroPlaying ? 'pointer-events-none' : ''
+            className={`flex flex-col items-start gap-2.5 text-white transition-opacity duration-300 ${
+              hud.isIntroPlaying || awakeningCinematic ? 'pointer-events-none' : ''
             }`}
-            style={{ opacity: hud.hudOpacity ?? 1 }}
+            style={{ opacity: effectiveHudOpacity }}
           >
             {showMinimaps && (
               <DualMinimaps
@@ -499,10 +787,30 @@ export const GameHud: React.FC<GameHudProps> = ({
               </span>
               <span
                 className={`text-sm font-medium tracking-wide font-mono-num ${
-                  hud.firecrackerCooldown > 0 ? 'text-white/55' : 'text-white'
+                  hud.weaponWheelOpen ? 'text-amber-300' : 'text-white'
                 } ${hudTextShadow}`}
+                title="Hold Q / Tab / Middle Mouse for Weapon Wheel, Tap Q to Quick-Swap"
               >
-                [Q] {hud.firecrackerCooldown > 0 ? `${hud.firecrackerCooldown}s` : 'Ready'}
+                [Q] {hud.weaponWheelOpen
+                  ? 'Select'
+                  : `Wheel / Swap (${WEAPONS_BY_ID[hud.activeWeapon]?.shortLabel ?? 'Bat'})`}
+              </span>
+              <span
+                className={`text-sm font-medium tracking-wide font-mono-num ${
+                  hud.awakening?.isReady
+                    ? 'font-bold text-[#FFD700]'
+                    : hud.firecrackerCooldown > 0
+                      ? 'text-white/55'
+                      : 'text-white'
+                } ${hudTextShadow}`}
+                title="Activate Awakening Smack when full, or throw Firecracker Lure"
+              >
+                [G]{' '}
+                {hud.awakening?.isReady
+                  ? 'Smack!'
+                  : hud.firecrackerCooldown > 0
+                    ? `${hud.firecrackerCooldown}s`
+                    : 'Lure'}
               </span>
               <span
                 className={`text-sm font-medium tracking-wide font-mono-num ${
@@ -538,7 +846,7 @@ export const GameHud: React.FC<GameHudProps> = ({
               </div>
             )}
 
-            {!hud.isIntroPlaying && (hud.tutorialHintOpacity ?? 0) > 0.01 && (
+            {!hud.isIntroPlaying && !awakeningCinematic && (hud.tutorialHintOpacity ?? 0) > 0.01 && (
               <div
                 className="rounded-md border border-white/15 bg-zinc-950/78 px-4 py-1.5 text-center text-xs font-semibold tracking-wide text-zinc-100 shadow-lg backdrop-blur-xs"
                 style={{ opacity: hud.tutorialHintOpacity }}
@@ -551,20 +859,28 @@ export const GameHud: React.FC<GameHudProps> = ({
               </div>
             )}
 
-            {hud.parkourMove && (
+            {hud.awakening?.isReady && !hud.awakening.isActivating && !hud.weaponWheelOpen && (
+              <div
+                className={`animate-pulse rounded-full border border-[#FFD700]/75 bg-black/70 px-4 py-1 font-display text-xs font-extrabold tracking-[0.14em] text-[#FFD700] uppercase shadow-[0_0_16px_rgba(255,180,0,0.55)] ${hudTextShadow}`}
+              >
+                [G] ACTIVATION SMACK — PUMPED UP!
+              </div>
+            )}
+
+            {!awakeningCinematic && hud.parkourMove && (
               <div className={`text-xs font-bold tracking-[0.22em] text-amber-300 uppercase ${hudTextShadow}`}>
                 {hud.parkourMove}
                 {hud.parkourFlow && hud.parkourFlow >= 0.6 ? ' · FLOW BOOST' : ''}
               </div>
             )}
 
-            {hud.interactionPrompt && (
+            {!awakeningCinematic && hud.interactionPrompt && (
               <div className={`text-base font-bold tracking-wide text-amber-200 ${hudTextShadow}`}>
                 {hud.interactionPrompt}
               </div>
             )}
 
-            {hud.subtitleText && !hud.introRadioVisible && (
+            {!awakeningCinematic && hud.subtitleText && !hud.introRadioVisible && (
               <div className="w-full rounded-lg border border-white/15 bg-zinc-950/88 px-5 py-2.5 text-center shadow-2xl">
                 <div className="text-[11px] font-semibold tracking-wider text-amber-400 uppercase">
                   {hud.subtitleSpeaker}
@@ -1024,12 +1340,16 @@ export const GameHud: React.FC<GameHudProps> = ({
                         <span className="font-mono-num text-zinc-100">C / V (Air = Dropkick)</span>
                       </li>
                       <li className="flex justify-between">
-                        <span>Heavy Takedown / Swap Weapon</span>
-                        <span className="font-mono-num text-zinc-100">R / 1, 2, 3</span>
+                        <span>Weapon Wheel / Quick-Swap</span>
+                        <span className="font-mono-num text-zinc-100">Hold Q (or Tab) / Tap Q</span>
+                      </li>
+                      <li className="flex justify-between">
+                        <span>Heavy Takedown / Quick Loadout</span>
+                        <span className="font-mono-num text-zinc-100">R / 1–4</span>
                       </li>
                       <li className="flex justify-between">
                         <span>Throw Lure Firecracker</span>
-                        <span className="font-mono-num text-zinc-100">Q</span>
+                        <span className="font-mono-num text-zinc-100">G</span>
                       </li>
                     </ul>
                   </div>
@@ -1055,7 +1375,7 @@ export const GameHud: React.FC<GameHudProps> = ({
                   <strong className="font-mono-num text-zinc-100">C/V</strong> Kick / Dropkick
                 </span>
                 <span>
-                  <strong className="font-mono-num text-zinc-100">1/2/3</strong> Bat / Machete / Pipe
+                  <strong className="font-mono-num text-zinc-100">Hold Q</strong> Weapon Wheel
                 </span>
                 <span>
                   <strong className="font-mono-num text-zinc-100">E</strong> Loot / Zipline

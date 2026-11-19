@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { Pass } from 'three/addons/postprocessing/Pass.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
@@ -14,13 +15,29 @@ import type {
   MinimapTelemetry,
   ZiplineRoute,
 } from '../types/game';
+import { AwakeningSystem } from './awakening';
 import { SoundEngine } from './audio';
 import { IntroSequenceController } from './intro';
 import { TimeOfDayLightingSystem } from './lighting';
 import { createProceduralTextures, type ProceduralTextureSet } from './textures';
 import { WeaponAndEffects } from './viewmodel';
+import {
+  createInitialDurability,
+  getSlotFromVector,
+  WEAPONS_BY_ID,
+  WEAPONS_BY_SLOT,
+  type WeaponId,
+  type WeaponSlot,
+} from './weapons';
 import { buildAgraWorld, type WorldBuildResult } from './world';
 import { ZombieManager, type ZombieActor } from './zombies';
+
+declare global {
+  interface Window {
+    devImmortal?: boolean;
+    devInfStamina?: boolean;
+  }
+}
 
 // Pre-allocated math helpers (zero GC inside animation loop)
 const _forward = new THREE.Vector3();
@@ -31,6 +48,49 @@ const _tmpVecA = new THREE.Vector3();
 const _tmpVecB = new THREE.Vector3();
 
 const FULL_CYCLE_SECONDS = 180; // 3 minutes per full 24h cycle so Golden Dusk lingers warmly
+
+/**
+ * Renders the isolated viewmodel layer (Layer 2) on top of the main world buffer
+ * with depth cleared AFTER binding readBuffer so arms/weapons never clip into walls
+ * while still receiving world shadows, bloom, and ACES Filmic tone mapping.
+ */
+class ViewmodelRenderPass extends Pass {
+  private readonly scene: THREE.Scene;
+  private readonly camera: THREE.PerspectiveCamera;
+
+  constructor(scene: THREE.Scene, camera: THREE.PerspectiveCamera) {
+    super();
+    this.scene = scene;
+    this.camera = camera;
+    this.needsSwap = false;
+  }
+
+  override render(
+    renderer: THREE.WebGLRenderer,
+    _writeBuffer: THREE.WebGLRenderTarget,
+    readBuffer: THREE.WebGLRenderTarget,
+  ): void {
+    const oldAutoClear = renderer.autoClear;
+    const oldAutoShadow = renderer.shadowMap.autoUpdate;
+    const prevBackground = this.scene.background;
+
+    renderer.autoClear = false;
+    renderer.shadowMap.autoUpdate = false;
+    this.scene.background = null;
+
+    this.camera.layers.set(2);
+    renderer.setRenderTarget(this.renderToScreen ? null : readBuffer);
+    renderer.clearDepth();
+    renderer.render(this.scene, this.camera);
+
+    this.camera.layers.enable(0);
+    this.camera.layers.enable(1);
+    this.camera.layers.disable(2);
+    this.scene.background = prevBackground;
+    renderer.shadowMap.autoUpdate = oldAutoShadow;
+    renderer.autoClear = oldAutoClear;
+  }
+}
 
 export const MOVEMENT_CONFIG = {
   // Ground & Air Speeds / Acceleration Curves
@@ -134,6 +194,7 @@ export class AgraSurvivalEngine {
 
   private readonly renderer: THREE.WebGLRenderer;
   private readonly composer: EffectComposer | null = null;
+  private readonly viewmodelPass: ViewmodelRenderPass | null = null;
   private readonly bloomPass: UnrealBloomPass | null = null;
   private readonly scene: THREE.Scene;
   private readonly camera: THREE.PerspectiveCamera;
@@ -142,6 +203,7 @@ export class AgraSurvivalEngine {
   private readonly world: WorldBuildResult;
   private readonly viewmodel: WeaponAndEffects;
   private readonly zombies: ZombieManager;
+  private readonly awakening = new AwakeningSystem();
   public readonly sound = new SoundEngine();
 
   // SkyDome Shader, Atmospheric Lighting & Intro Sequence rig
@@ -240,6 +302,7 @@ export class AgraSurvivalEngine {
   private activeLadder: LadderVolume | null = null;
   private ladderStepTimer = 0;
   private radioOpen = false;
+  private devOverlayOpen = false;
 
   // Player stats, combat & camera feedback
   private health = 100;
@@ -266,7 +329,19 @@ export class AgraSurvivalEngine {
   private directionalHits: DirectionalDamageIndicator[] = [];
   private nextHitId = 1;
 
-  // Gadgets & Day/Night
+  // Gadgets, Weapon Selector Wheel & Day/Night
+  private activeWeapon: WeaponId = 'bat';
+  private previousWeapon: WeaponId = 'unarmed';
+  private scrapParts = 25;
+  private weaponDurability: Record<WeaponId, number> = createInitialDurability();
+  private weaponWheelOpen = false;
+  private wheelHoveredSlot: WeaponSlot = 'bottom';
+  private wheelCursorX = 0;
+  private wheelCursorY = 0;
+  private wheelTimeScale = 1.0;
+  private wheelTriggerSource: 'KeyQ' | 'Tab' | 'MMB' | null = null;
+  private qHoldPending = false;
+  private qPressTimeMs = 0;
   private flashlightOn = false;
   private firecrackerCooldown = 0;
   private timeOfDay = 0.0; // Starts at 17:15 warm golden sunset
@@ -326,7 +401,9 @@ export class AgraSurvivalEngine {
       0.05,
       1400,
     );
+    this.camera.layers.enable(0);
     this.camera.layers.enable(1); // Render Layer 1 instanced grass tufts while Reflector skips them
+    this.camera.layers.disable(2); // Viewmodel Layer 2 renders in dedicated depth-cleared pass
     this.scene.add(this.camera);
 
     // 3. Three-point / Outdoor Golden Dusk-Nightfall Lighting + Player Flashlight
@@ -344,6 +421,7 @@ export class AgraSurvivalEngine {
     this.textures = createProceduralTextures(this.renderer.capabilities.getMaxAnisotropy());
     this.world = buildAgraWorld(this.scene, this.textures, this.isSoftwareGl);
     this.viewmodel = new WeaponAndEffects(this.scene, this.camera, this.textures);
+    this.viewmodel.setVisible(false);
     this.zombies = new ZombieManager(this.scene, this.textures);
 
     this.playerPos.copy(this.world.spawnPos);
@@ -365,10 +443,15 @@ export class AgraSurvivalEngine {
       this.composer.setPixelRatio(this.renderer.getPixelRatio());
       this.composer.setSize(w, h);
       this.composer.addPass(new RenderPass(this.scene, this.camera));
+      this.viewmodelPass = new ViewmodelRenderPass(this.scene, this.camera);
+      this.viewmodelPass.enabled = false;
+      this.composer.addPass(this.viewmodelPass);
       this.bloomPass = new UnrealBloomPass(new THREE.Vector2(w, h), 0.35, 0.4, 0.85);
       this.composer.addPass(this.bloomPass);
       this.composer.addPass(new OutputPass());
+      this.camera.layers.enable(2);
       this.renderer.compile(this.scene, this.camera);
+      this.camera.layers.disable(2);
     }
 
     this.bindEvents();
@@ -382,6 +465,7 @@ export class AgraSurvivalEngine {
     this.sound.unlock();
     this.resetState();
     this.phase = 'playing';
+    this.viewmodel.setVisible(true);
     this.intro.start();
     this.pitch = -0.35;
     this.camera.fov = 60;
@@ -407,7 +491,7 @@ export class AgraSurvivalEngine {
 
   public lockPointer(): void {
     this.sound.unlock();
-    if (this.radioOpen || this.phase !== 'playing') return;
+    if (this.radioOpen || this.devOverlayOpen || this.phase !== 'playing') return;
     const canvas = this.renderer.domElement;
     if (document.pointerLockElement !== canvas) {
       try {
@@ -469,6 +553,105 @@ export class AgraSurvivalEngine {
     this.sound.playFlashlightClick();
     if (relockPointer) {
       this.lockPointer();
+    }
+    this.emitHud();
+  }
+
+  public setDevOverlayOpen(open: boolean, relockPointer = true): void {
+    this.devOverlayOpen = open;
+    if (open) {
+      for (const k of Object.keys(this.keys)) {
+        this.keys[k] = false;
+      }
+      this.qHoldPending = false;
+      if (this.weaponWheelOpen) {
+        this.closeWeaponWheel(false);
+      }
+      this.safeExitPointerLock();
+    } else if (relockPointer && this.phase === 'playing' && !this.radioOpen && !this.awakening.state.isActivating) {
+      this.lockPointer();
+    }
+  }
+
+  public setDevImmortal(enabled: boolean): void {
+    window.devImmortal = enabled;
+    if (enabled) {
+      this.health = this.maxHealth;
+      this.damageFlash = 0;
+    }
+    this.emitHud();
+  }
+
+  public setDevInfStamina(enabled: boolean): void {
+    window.devInfStamina = enabled;
+    if (enabled) {
+      this.stamina = this.maxStamina;
+      this.sprintExhausted = false;
+      this.staminaPauseTimer = 0;
+    }
+    this.emitHud();
+  }
+
+  public devFillAwakening(): void {
+    this.awakening.setDebugFullCharge();
+    this.emitHud();
+  }
+
+  public devFullHeal(): void {
+    this.health = this.maxHealth;
+    this.stamina = this.maxStamina;
+    this.sprintExhausted = false;
+    this.staminaPauseTimer = 0;
+    this.damageFlash = 0;
+    this.emitHud();
+  }
+
+  public devClearNearbyEnemies(radius = 26): number {
+    const cleared = this.zombies.clearNearbyZombies(this.playerPos, radius);
+    this.emitHud();
+    return cleared;
+  }
+
+  public takeDamage(amount: number, attackerPos?: THREE.Vector3): void {
+    if (window.devImmortal || this.awakening.state.isActivating) return;
+    if (this.phase !== 'playing' || amount <= 0) return;
+
+    this.health = Math.max(0, this.health - amount);
+    this.sound.playPlayerHurt();
+
+    if (attackerPos) {
+      this.awakening.addAwakeningCharge(8);
+      this.comboCount = 0;
+      this.comboTimer = 0;
+      this.damageFlash = 0.72;
+      this.cameraShake = 0.28;
+
+      // Directional damage indicator pointing toward side/rear attacker
+      const dx = attackerPos.x - this.playerPos.x;
+      const dz = attackerPos.z - this.playerPos.z;
+      const fwdX = -Math.sin(this.yaw);
+      const fwdZ = -Math.cos(this.yaw);
+      const rightX = Math.cos(this.yaw);
+      const rightZ = -Math.sin(this.yaw);
+      const relAngleRad = Math.atan2(dx * rightX + dz * rightZ, dx * fwdX + dz * fwdZ);
+      if (Math.abs(relAngleRad) > 0.35) {
+        this.directionalHits.push({
+          id: this.nextHitId++,
+          angleRad: relAngleRad,
+          intensity: 1.0,
+        });
+        if (this.directionalHits.length > 5) this.directionalHits.shift();
+      }
+    } else {
+      this.damageFlash = Math.max(this.damageFlash, 0.48);
+    }
+
+    if (this.health <= 0) {
+      this.phase = 'gameover';
+      this.intro.resetIdle();
+      this.sound.stopContinuousLoops();
+      this.sound.playGameOver();
+      this.safeExitPointerLock();
     }
     this.emitHud();
   }
@@ -562,6 +745,19 @@ export class AgraSurvivalEngine {
     this.preMantleSpeed = 0;
     this.directionalHits = [];
     this.firecrackerCooldown = 0;
+    this.activeWeapon = 'bat';
+    this.previousWeapon = 'unarmed';
+    this.scrapParts = 25;
+    this.weaponDurability = createInitialDurability();
+    this.weaponWheelOpen = false;
+    this.wheelHoveredSlot = 'bottom';
+    this.wheelCursorX = 0;
+    this.wheelCursorY = 0;
+    this.wheelTimeScale = 1.0;
+    this.wheelTriggerSource = null;
+    this.qHoldPending = false;
+    this.qPressTimeMs = 0;
+    this.viewmodel.setWeapon('bat', true);
     this.flashlightOn = false;
     this.flashlight.intensity = 0;
 
@@ -576,6 +772,7 @@ export class AgraSurvivalEngine {
     });
 
     this.zombies.resetAll();
+    this.awakening.reset(this.scene);
   }
 
   private setSubtitle(speaker: string, text: string, duration = 7.5): void {
@@ -588,6 +785,8 @@ export class AgraSurvivalEngine {
     window.addEventListener('resize', this.onResize);
     window.addEventListener('keydown', this.onKeyDown);
     window.addEventListener('keyup', this.onKeyUp);
+    window.addEventListener('mouseup', this.onMouseUp);
+    window.addEventListener('blur', this.onWindowBlur);
     document.addEventListener('pointerlockchange', this.onPointerLockChange);
     document.addEventListener('pointerlockerror', this.onPointerLockError);
     document.addEventListener('mousemove', this.onMouseMove);
@@ -600,6 +799,8 @@ export class AgraSurvivalEngine {
     window.removeEventListener('resize', this.onResize);
     window.removeEventListener('keydown', this.onKeyDown);
     window.removeEventListener('keyup', this.onKeyUp);
+    window.removeEventListener('mouseup', this.onMouseUp);
+    window.removeEventListener('blur', this.onWindowBlur);
     document.removeEventListener('pointerlockchange', this.onPointerLockChange);
     document.removeEventListener('pointerlockerror', this.onPointerLockError);
     document.removeEventListener('mousemove', this.onMouseMove);
@@ -640,8 +841,198 @@ export class AgraSurvivalEngine {
     this.emitHud();
   };
 
+  private onWindowBlur = () => {
+    for (const k of Object.keys(this.keys)) {
+      this.keys[k] = false;
+    }
+    this.qHoldPending = false;
+    if (this.weaponWheelOpen) {
+      this.closeWeaponWheel(false);
+    }
+  };
+
+  private equipWeapon(nextWeapon: WeaponId, immediate = false): void {
+    if (this.awakening.state.isActivating) return;
+    if (nextWeapon !== this.activeWeapon) {
+      this.previousWeapon = this.activeWeapon;
+      this.activeWeapon = nextWeapon;
+      this.viewmodel.setWeapon(nextWeapon, immediate);
+      if (!immediate) {
+        this.sound.playWeaponEquip(nextWeapon);
+      }
+      this.emitHud();
+    } else if (!immediate) {
+      this.sound.playWeaponEquip(nextWeapon);
+    }
+  }
+
+  private tryTriggerActivationSmack(): void {
+    if (
+      this.phase !== 'playing' ||
+      this.radioOpen ||
+      this.intro.isIntroPlaying ||
+      !this.awakening.state.isReady ||
+      this.awakening.state.isActivating
+    ) {
+      return;
+    }
+
+    if (this.weaponWheelOpen) {
+      this.closeWeaponWheel(false);
+    }
+
+    // Force-equip Wooden Baseball Bat immediately on frame 0 (t = 0.00s)
+    if (this.activeWeapon !== 'bat') {
+      this.equipWeapon('bat', true);
+    }
+
+    // Clear active locomotion momentum/timers for clean cinematic lock
+    this.qHoldPending = false;
+    this.slideTimer = 0;
+    this.rollTimer = 0;
+    this.mantling = false;
+    this.vaulting = false;
+    this.wallRunSide = 0;
+    this.playerVel.x = 0;
+    this.playerVel.z = 0;
+    this.sound.updateSlideLoop(false, 0);
+
+    this.sound.unlock();
+    this.awakening.tryStartActivation(
+      this.pitch,
+      this.yaw,
+      this.camera.fov,
+      () => {
+        // Exact Impact Frame Events at t = 4.96s:
+        // 1. Symbolic 1 HP self-bonk (only if !window.devImmortal, strictly non-lethal)
+        if (!window.devImmortal) {
+          this.health = Math.max(1, this.health - 1);
+        }
+        // 2. Dramatic 65ms hit-stop freeze frame right on contact
+        this.hitstopTimer = Math.max(this.hitstopTimer, 0.065);
+        // 3. Radial 11.0m enemy knockback (18 m/s impulse, +6 m/s Y pop, 25 dmg, 2.0s stun)
+        const { killCount } = this.zombies.applyAwakeningShockwave(
+          this.playerPos,
+          11.0,
+          18.0,
+          6.0,
+          25,
+          2.0,
+        );
+        if (killCount > 0) {
+          this.killCount += killCount;
+        }
+        this.emitHud();
+      },
+      () => {
+        // t = 5.55s: Smoothly return camera pitch/yaw/roll/FOV (80 deg) to active Pumped-Up gameplay
+        this.pitch = this.awakening.savedCameraPitch;
+        this.yaw = this.awakening.savedCameraYaw;
+        this.camera.fov = this.awakening.savedFov + this.awakening.getFovOffset();
+        this.camera.rotation.z = 0;
+        this.camera.updateProjectionMatrix();
+        this.emitHud();
+      },
+    );
+    this.emitHud();
+  }
+
+  private quickSwapWeapon(): void {
+    if (this.awakening.state.isActivating) return;
+    const target =
+      this.previousWeapon && this.previousWeapon !== this.activeWeapon
+        ? this.previousWeapon
+        : this.activeWeapon === 'bat'
+          ? 'unarmed'
+          : 'bat';
+    this.equipWeapon(target);
+  }
+
+  private openWeaponWheel(source: 'KeyQ' | 'Tab' | 'MMB'): void {
+    if (
+      this.phase !== 'playing' ||
+      this.radioOpen ||
+      this.intro.isIntroPlaying ||
+      this.weaponWheelOpen ||
+      this.awakening.state.isActivating
+    ) {
+      return;
+    }
+    this.weaponWheelOpen = true;
+    this.wheelTriggerSource = source;
+    this.wheelHoveredSlot = WEAPONS_BY_ID[this.activeWeapon].slot;
+    this.wheelCursorX = 0;
+    this.wheelCursorY = 0;
+    this.sound.playWheelOpen();
+    this.emitHud();
+  }
+
+  private closeWeaponWheel(applySelection: boolean): void {
+    if (!this.weaponWheelOpen) return;
+    const chosenSlot = this.wheelHoveredSlot;
+    this.weaponWheelOpen = false;
+    this.wheelTriggerSource = null;
+    this.wheelCursorX = 0;
+    this.wheelCursorY = 0;
+    if (applySelection) {
+      const targetWeapon = WEAPONS_BY_SLOT[chosenSlot].id;
+      this.equipWeapon(targetWeapon);
+    } else {
+      this.emitHud();
+    }
+  }
+
+  public hoverWheelSlot(slot: WeaponSlot): void {
+    if (!this.weaponWheelOpen || this.wheelHoveredSlot === slot) return;
+    this.wheelHoveredSlot = slot;
+    this.sound.playWheelTick();
+    this.emitHud();
+  }
+
+  public selectWheelSlot(slot: WeaponSlot): void {
+    if (!this.weaponWheelOpen) return;
+    this.wheelHoveredSlot = slot;
+    this.closeWeaponWheel(true);
+    this.lockPointer();
+  }
+
   private onMouseMove = (e: MouseEvent) => {
-    if (!this.pointerLocked || this.phase !== 'playing' || this.intro.isIntroPlaying) return;
+    if (
+      this.devOverlayOpen ||
+      this.phase !== 'playing' ||
+      this.intro.isIntroPlaying ||
+      this.awakening.state.isActivating
+    ) {
+      return;
+    }
+
+    if (this.weaponWheelOpen) {
+      if (this.pointerLocked) {
+        this.wheelCursorX += e.movementX;
+        this.wheelCursorY += e.movementY;
+        const maxR = 148;
+        const mag = Math.hypot(this.wheelCursorX, this.wheelCursorY);
+        if (mag > maxR) {
+          this.wheelCursorX = (this.wheelCursorX / mag) * maxR;
+          this.wheelCursorY = (this.wheelCursorY / mag) * maxR;
+        }
+      } else {
+        const w = this.mountEl.clientWidth || window.innerWidth;
+        const h = this.mountEl.clientHeight || window.innerHeight;
+        this.wheelCursorX = e.clientX - w * 0.5;
+        this.wheelCursorY = e.clientY - h * 0.5;
+      }
+
+      const nextSlot = getSlotFromVector(this.wheelCursorX, this.wheelCursorY);
+      if (nextSlot && nextSlot !== this.wheelHoveredSlot) {
+        this.wheelHoveredSlot = nextSlot;
+        this.sound.playWheelTick();
+      }
+      this.emitHud();
+      return;
+    }
+
+    if (!this.pointerLocked) return;
     const baseSens = 0.0022;
     const steerScale = this.slideTimer > 0 ? MOVEMENT_CONFIG.SLIDE_STEER_RATE : 1.0;
     const deltaYaw = -e.movementX * baseSens * steerScale;
@@ -654,13 +1045,29 @@ export class AgraSurvivalEngine {
   };
 
   private onMouseDown = (e: MouseEvent) => {
-    if (this.phase !== 'playing' || this.radioOpen) return;
+    if (this.devOverlayOpen || this.phase !== 'playing' || this.radioOpen) return;
     this.sound.unlock();
+    if (this.intro.isIntroPlaying || this.awakening.state.isActivating) return;
+
+    if (e.button === 1) {
+      e.preventDefault();
+      this.openWeaponWheel('MMB');
+      return;
+    }
+
+    if (this.weaponWheelOpen) {
+      if (e.button === 0) {
+        this.closeWeaponWheel(true);
+      } else if (e.button === 2) {
+        this.closeWeaponWheel(false);
+      }
+      return;
+    }
+
     if (!this.pointerLocked) {
       this.lockPointer();
       return;
     }
-    if (this.intro.isIntroPlaying) return;
 
     if (e.button === 0) {
       this.performMeleeAttack();
@@ -669,7 +1076,14 @@ export class AgraSurvivalEngine {
     }
   };
 
+  private onMouseUp = (e: MouseEvent) => {
+    if (e.button === 1 && this.weaponWheelOpen && this.wheelTriggerSource === 'MMB') {
+      this.closeWeaponWheel(true);
+    }
+  };
+
   private onKeyDown = (e: KeyboardEvent) => {
+    if (this.devOverlayOpen) return;
     this.sound.unlock();
     if (this.radioOpen) {
       if (e.code === 'Escape' && !e.repeat) {
@@ -688,6 +1102,9 @@ export class AgraSurvivalEngine {
         this.camera.updateProjectionMatrix();
         this.emitHud();
       }
+      return;
+    }
+    if (this.phase === 'playing' && this.awakening.state.isActivating) {
       return;
     }
     this.keys[e.code] = true;
@@ -711,6 +1128,28 @@ export class AgraSurvivalEngine {
       return;
     }
     if (this.phase !== 'playing') return;
+
+    if (e.code === 'Tab') {
+      e.preventDefault();
+      if (!e.repeat) {
+        this.openWeaponWheel('Tab');
+      }
+      return;
+    }
+
+    if (e.code === 'KeyQ') {
+      e.preventDefault();
+      if (!e.repeat && !this.weaponWheelOpen) {
+        this.qHoldPending = true;
+        this.qPressTimeMs = performance.now();
+      }
+      return;
+    }
+
+    if (e.code === 'Escape' && this.weaponWheelOpen && !e.repeat) {
+      this.closeWeaponWheel(false);
+      return;
+    }
 
     if (e.code === 'Space') {
       e.preventDefault();
@@ -755,8 +1194,15 @@ export class AgraSurvivalEngine {
       }
     } else if (e.code === 'KeyF' && !e.repeat) {
       this.toggleFlashlight();
-    } else if (e.code === 'KeyQ' && !e.repeat) {
-      this.throwFirecracker();
+    } else if (e.code === 'KeyG' && !e.repeat) {
+      if (this.awakening.state.isReady && !this.awakening.state.isActivating) {
+        this.tryTriggerActivationSmack();
+      } else {
+        this.throwFirecracker();
+      }
+    } else if (e.code === 'BracketRight' && !e.repeat) {
+      this.awakening.setDebugFullCharge();
+      this.emitHud();
     } else if (e.code === 'KeyE' && !e.repeat) {
       this.tryInteract();
     } else if (e.code === 'KeyR' && !e.repeat) {
@@ -797,14 +1243,13 @@ export class AgraSurvivalEngine {
         }
       }
     } else if (e.code === 'Digit1' && !e.repeat) {
-      this.viewmodel.setWeapon('bat');
-      this.emitHud();
+      this.equipWeapon('bat');
     } else if (e.code === 'Digit2' && !e.repeat) {
-      this.viewmodel.setWeapon('machete');
-      this.emitHud();
+      this.equipWeapon('dagger');
     } else if (e.code === 'Digit3' && !e.repeat) {
-      this.viewmodel.setWeapon('pipe');
-      this.emitHud();
+      this.equipWeapon('cleaver');
+    } else if (e.code === 'Digit4' && !e.repeat) {
+      this.equipWeapon('unarmed');
     } else if ((e.code === 'KeyB' || e.code === 'KeyI') && !e.repeat) {
       this.viewmodel.triggerInspect();
     } else if (e.code === 'KeyT' && !e.repeat) {
@@ -814,6 +1259,22 @@ export class AgraSurvivalEngine {
 
   private onKeyUp = (e: KeyboardEvent) => {
     this.keys[e.code] = false;
+
+    if (e.code === 'KeyQ') {
+      if (this.qHoldPending) {
+        this.qHoldPending = false;
+        this.quickSwapWeapon();
+      } else if (this.weaponWheelOpen && this.wheelTriggerSource === 'KeyQ') {
+        this.closeWeaponWheel(true);
+      }
+      return;
+    }
+
+    if (e.code === 'Tab' && this.weaponWheelOpen && this.wheelTriggerSource === 'Tab') {
+      this.closeWeaponWheel(true);
+      return;
+    }
+
     if (
       e.code === 'Space' &&
       this.isVariableJump &&
@@ -940,19 +1401,20 @@ export class AgraSurvivalEngine {
       if (this.playerPos.distanceTo(c.position) < 3.6) {
         c.collected = true;
         c.group.visible = false;
+        this.scrapParts += 5;
         this.sound.playScavenge();
 
         const collectedCount = this.world.crates.filter((cr) => cr.collected).length;
         if (collectedCount === 1) {
           this.setSubtitle(
             'OVERWATCH RADIO',
-            'First Antizin crate secured! Two left — watch the alleys, armored Brutes guard the heavy caches.',
+            'First Antizin crate secured (+5 Scrap)! Two left — watch the alleys, armored Brutes guard the heavy caches.',
             7.5,
           );
         } else if (collectedCount === 2) {
           this.setSubtitle(
             'OVERWATCH RADIO',
-            'Two Antizin crates recovered! One remaining. Use rooftop ziplines if Night Hunters chase!',
+            'Two Antizin crates recovered (+5 Scrap)! One remaining. Use rooftop ziplines if Night Hunters chase!',
             7.5,
           );
         } else if (collectedCount === 3) {
@@ -1065,15 +1527,33 @@ export class AgraSurvivalEngine {
   // ARKHAM-STYLE FREEFLOW COMBAT: STRIKE + LUNGE, COUNTER, KICK, TAKEDOWN
   // =========================================================================
   private performMeleeAttack(): void {
-    if (this.attackCooldown > 0 || this.mantling) return;
-    this.attackCooldown = 0.34;
-    this.viewmodel.triggerSwing();
-    this.sound.playPipeSwing();
+    if (this.attackCooldown > 0 || this.mantling || this.awakening.state.isActivating) return;
+    const cfg = WEAPONS_BY_ID[this.activeWeapon];
+    const lowStamina = !window.devInfStamina && this.stamina < cfg.staminaCost;
+    if (!window.devInfStamina) {
+      this.stamina = Math.max(0, this.stamina - cfg.staminaCost);
+      this.staminaPauseTimer = 0.55;
+    } else {
+      this.stamina = this.maxStamina;
+      this.sprintExhausted = false;
+    }
+
+    const batAwakened = this.activeWeapon === 'bat' && this.awakening.state.isActive;
+    const swingSpeedMult = batAwakened ? this.awakening.getSwingSpeedMultiplier() : 1.0;
+    this.attackCooldown = (lowStamina ? cfg.attackCooldown * 1.25 : cfg.attackCooldown) / swingSpeedMult;
+    this.viewmodel.triggerSwing(cfg.swingDuration / swingSpeedMult);
+    this.sound.playWeaponSwing(this.activeWeapon);
 
     const lookX = -Math.sin(this.yaw);
     const lookZ = -Math.cos(this.yaw);
-    let bestTarget: ZombieActor | null = null;
-    let bestScore = Infinity;
+
+    interface TargetCandidate {
+      zombie: ZombieActor;
+      dist: number;
+      dot: number;
+      score: number;
+    }
+    const candidates: TargetCandidate[] = [];
 
     for (const z of this.zombies.zombies) {
       if (z.state === 'dead') continue;
@@ -1081,69 +1561,112 @@ export class AgraSurvivalEngine {
       const dz = z.pos.z - this.playerPos.z;
       const dy = Math.abs(z.pos.y - this.playerPos.y);
       const dist = Math.hypot(dx, dz);
-      if (dist > 4.6 || dy > 2.2) continue;
+      if (dist > cfg.reach || dy > 2.2) continue;
 
       const dot = (dx * lookX + dz * lookZ) / (dist || 1);
-      if (dot > 0.25) {
-        const score = dist - dot * 1.4;
-        if (score < bestScore) {
-          bestScore = score;
-          bestTarget = z;
-        }
+      if (dot > cfg.arcDot) {
+        candidates.push({ zombie: z, dist, dot, score: dist - dot * 1.4 });
       }
     }
 
-    if (bestTarget) {
-      const dx = bestTarget.pos.x - this.playerPos.x;
-      const dz = bestTarget.pos.z - this.playerPos.z;
+    if (candidates.length === 0) return;
+    candidates.sort((a, b) => a.score - b.score);
+
+    const primary = candidates[0].zombie;
+    const pdx = primary.pos.x - this.playerPos.x;
+    const pdz = primary.pos.z - this.playerPos.z;
+    const pDist = Math.hypot(pdx, pdz) || 1;
+    const pnx = pdx / pDist;
+    const pnz = pdz / pDist;
+
+    this.targetYawGoal = Math.atan2(-pnx, -pnz);
+    if (pDist > 1.65) {
+      this.lungeTimer = 0.14;
+      this.lungeVel.set(pnx * 14, 0, pnz * 14);
+    }
+
+    const targets = cfg.cleaveMultiTarget ? candidates.slice(0, 3).map((c) => c.zombie) : [primary];
+    const lureActive = this.viewmodel.getActiveLurePosition() !== null;
+    const durabilityScale =
+      cfg.maxDurability > 0 && (this.weaponDurability[this.activeWeapon] ?? 0) <= 0 ? 0.72 : 1.0;
+
+    let hitAny = false;
+    let blockedPrimary = false;
+
+    for (const target of targets) {
+      const dx = target.pos.x - this.playerPos.x;
+      const dz = target.pos.z - this.playerPos.z;
       const dist = Math.hypot(dx, dz) || 1;
       const nx = dx / dist;
       const nz = dz / dist;
 
-      this.targetYawGoal = Math.atan2(-nx, -nz);
-      if (dist > 1.65) {
-        this.lungeTimer = 0.14;
-        this.lungeVel.set(nx * 14, 0, nz * 14);
-      }
-
       const bruteToPlayerX = -nx;
       const bruteToPlayerZ = -nz;
-      const bruteForwardX = Math.sin(bestTarget.yaw);
-      const bruteForwardZ = Math.cos(bestTarget.yaw);
+      const bruteForwardX = Math.sin(target.yaw);
+      const bruteForwardZ = Math.cos(target.yaw);
       const facingPlayer = bruteToPlayerX * bruteForwardX + bruteToPlayerZ * bruteForwardZ;
-      const lureActive = this.viewmodel.getActiveLurePosition() !== null;
 
-      if (bestTarget.kind === 'brute' && bestTarget.state !== 'stunned' && facingPlayer > 0.2 && !lureActive) {
-        this.viewmodel.triggerBlocked();
-        this.sound.playPipeHit(false, true);
-        this.cameraShake = 0.22;
-        _tmpVecA.copy(bestTarget.pos).setY(bestTarget.pos.y + 1.3);
-        this.viewmodel.spawnSparks(_tmpVecA, 0x94a3b8, 12);
-        this.setSubtitle(
-          'COMBAT TIP',
-          'Brute blocked frontal strike! Counter [Right-Click], Kick [C], or lure with Firecracker [Q]!',
-          4.2,
-        );
-        return;
+      if (target.kind === 'brute' && target.state !== 'stunned' && facingPlayer > 0.2 && !lureActive) {
+        if (target === primary) {
+          blockedPrimary = true;
+        }
+        continue;
       }
 
-      const damage = 32 + Math.min(20, this.comboCount * 3);
+      hitAny = true;
+      if (this.activeWeapon === 'bat') {
+        this.awakening.addAwakeningCharge(14);
+      }
+      const awkDmgMult = this.activeWeapon === 'bat' ? this.awakening.getDamageMultiplier() : 1.0;
+      const awkKbMult = this.activeWeapon === 'bat' ? this.awakening.getKnockbackMultiplier() : 1.0;
+      const baseDmg = cfg.damage * durabilityScale * awkDmgMult + Math.min(20, this.comboCount * 3);
+      const damage = Math.round(target === primary ? baseDmg : baseDmg * 0.75);
       _tmpVecB.set(nx, 0, nz);
-      const killed = this.zombies.damageZombie(bestTarget, damage, _tmpVecB, 5.4, 0.45);
+      const killed = this.zombies.damageZombie(
+        target,
+        damage,
+        _tmpVecB,
+        cfg.knockback * awkKbMult,
+        cfg.stunDuration,
+      );
       if (killed) this.killCount++;
 
-      this.hitstopTimer = 0.04;
-      this.cameraShake = 0.18;
+      const sparkY = target.kind === 'dog' ? 0.65 : 1.35;
+      _tmpVecA.copy(target.pos).setY(target.pos.y + sparkY);
+      this.viewmodel.spawnBloodAndSparks(_tmpVecA, _tmpVecB, this.activeWeapon === 'cleaver' ? 14 : 10);
+    }
+
+    if (blockedPrimary && !hitAny) {
+      this.viewmodel.triggerBlocked();
+      this.sound.playWeaponHit(this.activeWeapon, true);
+      this.cameraShake = 0.22;
+      _tmpVecA.copy(primary.pos).setY(primary.pos.y + 1.3);
+      this.viewmodel.spawnSparks(_tmpVecA, 0x94a3b8, 12);
+      this.setSubtitle(
+        'COMBAT TIP',
+        'Brute blocked frontal strike! Counter [Right-Click], Kick [C], or lure with Firecracker [G]!',
+        4.2,
+      );
+      return;
+    }
+
+    if (hitAny) {
+      if (cfg.maxDurability > 0) {
+        this.weaponDurability[this.activeWeapon] = Math.max(
+          0,
+          (this.weaponDurability[this.activeWeapon] ?? cfg.maxDurability) - 2,
+        );
+      }
+      const awkHitstop = this.activeWeapon === 'bat' ? this.awakening.getHitstopBonus() : 0;
+      this.hitstopTimer = (this.activeWeapon === 'cleaver' ? 0.055 : 0.035) + awkHitstop;
+      this.cameraShake = (this.activeWeapon === 'cleaver' ? 0.24 : 0.16) + (batAwakened ? 0.08 : 0);
       this.registerComboHit(1);
-      this.sound.playPipeHit(false, false);
-      const sparkY = bestTarget.kind === 'dog' ? 0.65 : 1.35;
-      _tmpVecA.copy(bestTarget.pos).setY(bestTarget.pos.y + sparkY);
-      this.viewmodel.spawnBloodAndSparks(_tmpVecA, _tmpVecB, 11);
+      this.sound.playWeaponHit(this.activeWeapon, false);
     }
   }
 
   private performParkourKick(): void {
-    if (this.kickCooldown > 0 || this.mantling) return;
+    if (this.kickCooldown > 0 || this.mantling || this.awakening.state.isActivating) return;
     const airborne = !this.onGround;
     this.kickCooldown = airborne ? 1.05 : 0.85;
     this.viewmodel.triggerKick(airborne);
@@ -1195,7 +1718,7 @@ export class AgraSurvivalEngine {
   }
 
   private performCounterParry(): void {
-    if (this.mantling) return;
+    if (this.mantling || this.awakening.state.isActivating) return;
     let counteredAny = false;
 
     for (const z of this.zombies.zombies) {
@@ -1223,6 +1746,7 @@ export class AgraSurvivalEngine {
 
     this.viewmodel.triggerParry();
     if (counteredAny) {
+      this.awakening.addAwakeningCharge(10);
       this.parryFlash = 0.48;
       this.hitstopTimer = 0.045;
       this.cameraShake = 0.24;
@@ -1235,7 +1759,7 @@ export class AgraSurvivalEngine {
   }
 
   private performHeavyTakedown(): void {
-    if (this.comboCount < 5 || this.mantling) return;
+    if (this.comboCount < 5 || this.mantling || this.awakening.state.isActivating) return;
 
     this.comboCount = 0;
     this.comboTimer = 0;
@@ -1592,6 +2116,7 @@ export class AgraSurvivalEngine {
     this.playerVel.set(0, 0, 0);
     this.jumpBufferTimer = 0;
     this.awardParkourCombo(PARKOUR_CONFIG.LEDGE_STYLE_POINTS, 'LEDGE MANTLE', 0.32);
+    this.awakening.addAwakeningCharge(6);
     this.sound.playLedgeGrab(false);
   }
 
@@ -1617,6 +2142,7 @@ export class AgraSurvivalEngine {
     this.airPeakY = this.vaultEnd.y;
     this.jumpBufferTimer = 0;
     this.awardParkourCombo(PARKOUR_CONFIG.VAULT_STYLE_POINTS, 'SPEED VAULT', 0.36);
+    this.awakening.addAwakeningCharge(6);
     this.sound.playLedgeGrab(true);
   }
 
@@ -1626,22 +2152,18 @@ export class AgraSurvivalEngine {
     this.ziplineDetachCooldown = Math.max(0, this.ziplineDetachCooldown - dt);
     this.parkourMoveTimer = Math.max(0, this.parkourMoveTimer - dt);
 
+    if (window.devImmortal) {
+      this.health = this.maxHealth;
+      this.damageFlash = 0;
+    }
+
     if (this.postLandRollTimer > 0) {
       this.postLandRollTimer = Math.max(0, this.postLandRollTimer - dt);
       if (this.postLandRollTimer <= 0 && this.pendingHardFallDist > 4.8) {
         const fallDmg = Math.min(26, Math.round((this.pendingHardFallDist - 4.6) * 5));
         this.pendingHardFallDist = 0;
         if (fallDmg > 0) {
-          this.health = Math.max(0, this.health - fallDmg);
-          this.damageFlash = 0.48;
-          this.sound.playPlayerHurt();
-          if (this.health <= 0) {
-            this.phase = 'gameover';
-            this.intro.resetIdle();
-            this.sound.stopContinuousLoops();
-            this.sound.playGameOver();
-            this.safeExitPointerLock();
-          }
+          this.takeDamage(fallDmg);
         }
       } else if (this.postLandRollTimer <= 0) {
         this.pendingHardFallDist = 0;
@@ -1655,6 +2177,28 @@ export class AgraSurvivalEngine {
     }
 
     this.fovPunch = THREE.MathUtils.lerp(this.fovPunch, 0, 1 - Math.exp(-dt * 10));
+
+    // Lock WASD/sprint/jump locomotion cleanly during the 4.60s anime Awakening cutscene
+    if (this.awakening.state.isActivating) {
+      this.playerVel.x = 0;
+      this.playerVel.z = 0;
+      this.sprintMomentum = 0;
+      this.slideTimer = 0;
+      this.jumpBufferTimer = 0;
+      this.sound.updateSlideLoop(false, 0);
+      this.sound.updateZiplineLoop(false, 0);
+      if (!this.onGround) {
+        this.playerVel.y -= PARKOUR_CONFIG.GRAVITY * dt;
+        this.playerPos.y += this.playerVel.y * dt;
+        const groundY = this.sampleGroundHeight(this.playerPos.x, this.playerPos.z);
+        if (this.playerPos.y <= groundY) {
+          this.playerPos.y = groundY;
+          this.playerVel.y = 0;
+          this.onGround = true;
+        }
+      }
+      return;
+    }
 
     // 0A. Zipline aerial traversal across Agra rooftops (19.0 m/s with parabolic sag)
     if (this.activeZipline) {
@@ -1748,8 +2292,12 @@ export class AgraSurvivalEngine {
     }
 
     // 1A. Handle active Speed Vault (0.35s, 10 deg right camera tilt, left hand plants on top, full speed kept!)
+    const activeWeaponCfg = WEAPONS_BY_ID[this.activeWeapon];
+    const vaultSpeedMult = activeWeaponCfg.vaultSpeedMultiplier * (this.awakening.state.isActive ? 1.12 : 1.0);
+    const moveSpeedMult = activeWeaponCfg.moveSpeedMultiplier * this.awakening.getMoveSpeedMultiplier();
+
     if (this.vaulting) {
-      this.vaultTimer += dt;
+      this.vaultTimer += dt * vaultSpeedMult;
       const t = Math.min(1, this.vaultTimer / PARKOUR_CONFIG.VAULT_DURATION);
       this.playerPos.x = THREE.MathUtils.lerp(this.vaultStart.x, this.vaultEnd.x, t);
       this.playerPos.z = THREE.MathUtils.lerp(this.vaultStart.z, this.vaultEnd.z, t);
@@ -1769,7 +2317,7 @@ export class AgraSurvivalEngine {
         this.airPeakY = this.playerPos.y;
         this.mantlePitchOffset = 0;
         this.mantleRollOffset = 0;
-        const carrySpeed = Math.max(this.preVaultSpeed, MOVEMENT_CONFIG.SPRINT_SPEED * 0.92);
+        const carrySpeed = Math.max(this.preVaultSpeed, MOVEMENT_CONFIG.SPRINT_SPEED * 0.92 * moveSpeedMult);
         this.playerVel.x = -Math.sin(this.yaw) * carrySpeed;
         this.playerVel.z = -Math.cos(this.yaw) * carrySpeed;
       }
@@ -1778,7 +2326,7 @@ export class AgraSurvivalEngine {
 
     // 1B. Handle active Ledge Mantle (0.1s catch fall-arrest dip + 0.45s upward/forward climb)
     if (this.mantling) {
-      this.mantleTimer += dt;
+      this.mantleTimer += dt * vaultSpeedMult;
       const catchDur = PARKOUR_CONFIG.LEDGE_CATCH_DURATION;
       const climbDur = PARKOUR_CONFIG.LEDGE_CLIMB_DURATION;
       const totalDur = catchDur + climbDur;
@@ -1877,7 +2425,11 @@ export class AgraSurvivalEngine {
       this.slideTimer <= 0 &&
       this.stamina > 0;
 
-    if (isSprinting) {
+    if (window.devInfStamina) {
+      this.stamina = this.maxStamina;
+      this.sprintExhausted = false;
+      this.staminaPauseTimer = 0;
+    } else if (isSprinting) {
       this.stamina = Math.max(0, this.stamina - MOVEMENT_CONFIG.STAMINA_DRAIN_RATE * dt);
       this.staminaPauseTimer = 0.65;
       if (this.stamina <= 0) {
@@ -1927,7 +2479,7 @@ export class AgraSurvivalEngine {
             this.wallRunStepCount++;
             this.sound.playWallStep(this.wallRunStepCount);
           }
-          const wrSpeed = 12.2 + this.parkourFlow * 1.6;
+          const wrSpeed = (12.2 + this.parkourFlow * 1.6) * moveSpeedMult;
           this.playerVel.x = this.wallRunTangent.x * wrSpeed;
           this.playerVel.z = this.wallRunTangent.z * wrSpeed;
           this.playerVel.y = Math.max(-1.8, this.playerVel.y - 7.0 * dt);
@@ -1959,9 +2511,9 @@ export class AgraSurvivalEngine {
 
     // 3. Smooth Ground Acceleration/Deceleration, Air Momentum, and Physics-Driven Parkour Slide
     const smoothSprint = this.sprintMomentum * this.sprintMomentum * (3 - 2 * this.sprintMomentum);
-    const activeTopSpeed = this.isCrouching
+    const activeTopSpeed = (this.isCrouching
       ? MOVEMENT_CONFIG.CROUCH_SPEED
-      : THREE.MathUtils.lerp(MOVEMENT_CONFIG.WALK_SPEED, MOVEMENT_CONFIG.SPRINT_SPEED, smoothSprint);
+      : THREE.MathUtils.lerp(MOVEMENT_CONFIG.WALK_SPEED, MOVEMENT_CONFIG.SPRINT_SPEED, smoothSprint)) * moveSpeedMult;
 
     if (this.lungeTimer > 0) {
       this.lungeTimer -= dt;
@@ -2268,10 +2820,12 @@ export class AgraSurvivalEngine {
         if (isHardFall && (this.rollBufferTimer > 0 || landedCushion)) {
           this.preRollSpeed = Math.max(horizSpeed, MOVEMENT_CONFIG.SPRINT_SPEED);
           this.startSafetyRoll(fallDistance);
+          this.viewmodel.triggerLandingImpact(fallDistance);
           if (landedCushion) this.sound.playTarpLand();
         } else if (landedCushion) {
           this.sound.playTarpLand();
           this.landingDipOffset = -0.18;
+          this.viewmodel.triggerLandingImpact(Math.max(1.5, fallDistance));
         } else if (isHardFall) {
           // Hard landing (> 3.5m): downward compression dip, FOV punch, velocity-scaled 80Hz thud, & 0.25s Safety Roll window
           const severity = THREE.MathUtils.clamp((fallDistance - 3.5) / 5.0, 0.2, 1.0);
@@ -2279,6 +2833,7 @@ export class AgraSurvivalEngine {
           this.cameraShake = 0.16 + severity * 0.16;
           this.landingDipOffset = -(0.24 + severity * 0.2);
           this.fovPunch = -(4.5 + severity * 4.5);
+          this.viewmodel.triggerLandingImpact(fallDistance);
           this.viewmodel.spawnDustPuffs(this.playerPos, 9 + Math.round(severity * 4));
           this.postLandRollTimer = PARKOUR_CONFIG.ROLL_WINDOW;
           this.pendingHardFallDist = fallDistance;
@@ -2287,7 +2842,10 @@ export class AgraSurvivalEngine {
           this.sound.playLandingThud(false, absImpact);
           this.cameraShake = 0.08;
           this.landingDipOffset = -0.13;
+          this.viewmodel.triggerLandingImpact(Math.max(1.2, fallDistance));
           this.viewmodel.spawnDustPuffs(this.playerPos, 4);
+        } else if (impactVel < -2.4) {
+          this.viewmodel.triggerLandingImpact(0.8);
         }
       }
 
@@ -2329,7 +2887,9 @@ export class AgraSurvivalEngine {
         ? MOVEMENT_CONFIG.MAX_FOV
         : this.wallRunSide !== 0
           ? 87
-          : sprintTargetFov) + this.fovPunch;
+          : sprintTargetFov) +
+      this.fovPunch +
+      this.awakening.getFovOffset();
 
     if (Math.abs(this.camera.fov - targetFov) > 0.05) {
       this.camera.fov = THREE.MathUtils.lerp(this.camera.fov, targetFov, 1 - Math.exp(-dt * 11));
@@ -2342,6 +2902,24 @@ export class AgraSurvivalEngine {
 
   private syncCameraToPlayer(dt: number): void {
     const safeDt = dt > 0 ? dt : 0.016;
+    const cineCam = this.awakening.getCinematicCamera();
+    if (cineCam.active) {
+      this.camera.position.set(
+        this.playerPos.x + cineCam.shakeX,
+        this.playerPos.y + PLAYER_EYE_HEIGHT + cineCam.heightOffset + cineCam.shakeY,
+        this.playerPos.z,
+      );
+      this.camera.rotation.order = 'YXZ';
+      this.camera.rotation.y = cineCam.yaw;
+      this.camera.rotation.x = cineCam.pitch;
+      this.camera.rotation.z = cineCam.roll;
+      if (Math.abs(this.camera.fov - cineCam.fov) > 0.02) {
+        this.camera.fov = cineCam.fov;
+        this.camera.updateProjectionMatrix();
+      }
+      return;
+    }
+
     const moveMag = Math.hypot(this.playerVel.x, this.playerVel.z);
     const isBobbing =
       (this.onGround || this.wallRunSide !== 0) &&
@@ -2406,7 +2984,9 @@ export class AgraSurvivalEngine {
     );
     this.camera.rotation.order = 'YXZ';
     this.camera.rotation.y = this.yaw;
-    this.camera.rotation.x = THREE.MathUtils.clamp(this.pitch + this.mantlePitchOffset, -1.45, 1.45) + this.rollPitchOffset;
+    this.camera.rotation.x =
+      THREE.MathUtils.clamp(this.pitch + this.mantlePitchOffset, -1.45, 1.45) +
+      this.rollPitchOffset;
 
     // Strafe Roll (±2.5 deg), Sprint Turn Roll (±4.0 deg), Slide Roll (-6.0 deg), & Zip-line sway
     const strafe = (this.keys['KeyD'] ? 1 : 0) - (this.keys['KeyA'] ? 1 : 0);
@@ -2521,13 +3101,32 @@ export class AgraSurvivalEngine {
       const rawDt = Math.min(0.05, Math.max(0.001, (now - this.lastNow) / 1000));
       this.lastNow = now;
 
-      let timeScale = 1.0;
+      if (
+        this.qHoldPending &&
+        this.phase === 'playing' &&
+        !this.radioOpen &&
+        !this.intro.isIntroPlaying &&
+        !this.awakening.state.isActivating &&
+        now - this.qPressTimeMs >= 165
+      ) {
+        this.qHoldPending = false;
+        this.openWeaponWheel('KeyQ');
+      }
+
+      const targetWheelScale = this.weaponWheelOpen ? 0.25 : 1.0;
+      this.wheelTimeScale = THREE.MathUtils.lerp(
+        this.wheelTimeScale,
+        targetWheelScale,
+        1 - Math.exp(-rawDt * 18),
+      );
+
+      let timeScale = this.wheelTimeScale;
       if (this.hitstopTimer > 0) {
         this.hitstopTimer = Math.max(0, this.hitstopTimer - rawDt);
-        timeScale = 0.03;
+        timeScale = Math.min(timeScale, 0.03);
       } else if (this.slowMoTimer > 0) {
         this.slowMoTimer = Math.max(0, this.slowMoTimer - rawDt);
-        timeScale = 0.28;
+        timeScale = Math.min(timeScale, 0.28);
       }
       const dt = rawDt * timeScale;
       this.elapsed += dt;
@@ -2617,21 +3216,34 @@ export class AgraSurvivalEngine {
               this.subtitleTimer = Math.max(0, this.subtitleTimer - rawDt);
             }
 
-            this.updatePlayerPhysics(dt);
+            this.awakening.update(
+              rawDt,
+              dt,
+              this.scene,
+              this.playerPos,
+              this.sound.getAudioContext(),
+              this.sound.isMuted(),
+            );
+            const bonkHitstopPaused = this.awakening.state.isActivating && this.hitstopTimer > 0;
+            if (!bonkHitstopPaused) {
+              this.updatePlayerPhysics(dt);
+            }
             this.syncCameraToPlayer(dt);
 
-            const horizVelMag = Math.hypot(this.playerVel.x, this.playerVel.z);
+            const isCutsceneLocked = this.awakening.state.isActivating;
+            const horizVelMag = isCutsceneLocked ? 0 : Math.hypot(this.playerVel.x, this.playerVel.z);
             const moveSpeedRatio = Math.min(1, horizVelMag / MOVEMENT_CONFIG.WALK_SPEED);
             const isSprinting =
+              !isCutsceneLocked &&
               Boolean(this.keys['ShiftLeft'] || this.keys['ShiftRight']) &&
               !this.sprintExhausted &&
               !this.isCrouching &&
               this.sprintMomentum > 0.25 &&
               horizVelMag > MOVEMENT_CONFIG.WALK_SPEED + 0.5;
             this.intro.update(rawDt, isSprinting, this.introCamState);
-            const isLookingDown = this.onGround && this.pitch < -0.72;
+            const isLookingDown = !isCutsceneLocked && this.onGround && this.pitch < -0.72;
 
-            const strafeInput = (this.keys['KeyD'] ? 1 : 0) - (this.keys['KeyA'] ? 1 : 0);
+            const strafeInput = isCutsceneLocked ? 0 : (this.keys['KeyD'] ? 1 : 0) - (this.keys['KeyA'] ? 1 : 0);
             const mantleTotalDur = PARKOUR_CONFIG.LEDGE_CATCH_DURATION + PARKOUR_CONFIG.LEDGE_CLIMB_DURATION;
             const safeZone = this.world.tajSafeZone;
             const inSafeZone =
@@ -2657,8 +3269,8 @@ export class AgraSurvivalEngine {
                 this.sound.playFirecrackerBang();
               },
               {
-                bobX: this.bobX,
-                bobY: this.bobY,
+                bobX: isCutsceneLocked ? 0 : this.bobX,
+                bobY: isCutsceneLocked ? 0 : this.bobY,
                 strafeInput,
                 vaultProgress: this.vaulting ? Math.min(1, this.vaultTimer / PARKOUR_CONFIG.VAULT_DURATION) : 0,
                 mantleProgress: this.mantling ? Math.min(1, this.mantleTimer / mantleTotalDur) : 0,
@@ -2666,58 +3278,33 @@ export class AgraSurvivalEngine {
                 isNight: this.isNightTime(),
                 inSafeZone,
                 horizSpeed: horizVelMag,
-                yawDelta: this.viewmodelYawDelta,
-                pitchDelta: this.viewmodelPitchDelta,
-                wallPullback: this.computeViewmodelWallPullback(),
+                yawDelta: isCutsceneLocked ? 0 : this.viewmodelYawDelta,
+                pitchDelta: isCutsceneLocked ? 0 : this.viewmodelPitchDelta,
+                wallPullback: isCutsceneLocked ? 0 : this.computeViewmodelWallPullback(),
+                awakeningActive: this.awakening.state.isActive,
+                awakeningPose: this.awakening.getViewmodelPose(),
+                awakeningBatEmissive: this.awakening.getBatCrimsonEmissive(),
+                awakeningBatEmissiveIntensity: this.awakening.getBatEmissiveIntensity(),
               },
             );
             this.viewmodelYawDelta = 0;
             this.viewmodelPitchDelta = 0;
 
             const lurePos = this.viewmodel.getActiveLurePosition();
-            this.zombies.update(
-              dt,
-              this.playerPos,
-              this.isNightTime(),
-              lurePos,
-              this.world.colliders,
-              this.world.tajSafeZone,
-              (dmg, attackerPos) => {
-                this.health = Math.max(0, this.health - dmg);
-                this.comboCount = 0;
-                this.comboTimer = 0;
-                this.damageFlash = 0.72;
-                this.cameraShake = 0.28;
-                this.sound.playPlayerHurt();
-
-                // Directional damage indicator pointing toward side/rear attacker
-                const dx = attackerPos.x - this.playerPos.x;
-                const dz = attackerPos.z - this.playerPos.z;
-                const fwdX = -Math.sin(this.yaw);
-                const fwdZ = -Math.cos(this.yaw);
-                const rightX = Math.cos(this.yaw);
-                const rightZ = -Math.sin(this.yaw);
-                const relAngleRad = Math.atan2(dx * rightX + dz * rightZ, dx * fwdX + dz * fwdZ);
-                if (Math.abs(relAngleRad) > 0.35) {
-                  this.directionalHits.push({
-                    id: this.nextHitId++,
-                    angleRad: relAngleRad,
-                    intensity: 1.0,
-                  });
-                  if (this.directionalHits.length > 5) this.directionalHits.shift();
-                }
-
-                if (this.health <= 0) {
-                  this.phase = 'gameover';
-                  this.intro.resetIdle();
-                  this.sound.stopContinuousLoops();
-                  this.sound.playGameOver();
-                  this.safeExitPointerLock();
-                }
-                this.emitHud();
-              },
-              (kind) => this.sound.playZombieGroan(kind),
-            );
+            if (!bonkHitstopPaused) {
+              this.zombies.update(
+                dt,
+                this.playerPos,
+                this.isNightTime(),
+                lurePos,
+                this.world.colliders,
+                this.world.tajSafeZone,
+                (dmg, attackerPos) => {
+                  this.takeDamage(dmg, attackerPos);
+                },
+                (kind) => this.sound.playZombieGroan(kind),
+              );
+            }
 
             this.world.crates.forEach((c) => {
               if (!c.collected) {
@@ -2759,10 +3346,35 @@ export class AgraSurvivalEngine {
       }
 
       this.updateAtmosphere(this.radioOpen ? 0 : dt);
+      const showVm = this.phase === 'playing';
+      this.viewmodel.setVisible(showVm);
       if (this.composer) {
+        if (this.viewmodelPass) {
+          this.viewmodelPass.enabled = showVm;
+        }
         this.composer.render();
       } else {
+        this.camera.layers.enable(0);
+        this.camera.layers.enable(1);
+        this.camera.layers.disable(2);
+        this.renderer.autoClear = true;
         this.renderer.render(this.scene, this.camera);
+        if (showVm) {
+          const oldShadowAuto = this.renderer.shadowMap.autoUpdate;
+          const prevBg = this.scene.background;
+          this.renderer.shadowMap.autoUpdate = false;
+          this.scene.background = null;
+          this.camera.layers.set(2);
+          this.renderer.autoClear = false;
+          this.renderer.clearDepth();
+          this.renderer.render(this.scene, this.camera);
+          this.renderer.autoClear = true;
+          this.scene.background = prevBg;
+          this.renderer.shadowMap.autoUpdate = oldShadowAuto;
+          this.camera.layers.enable(0);
+          this.camera.layers.enable(1);
+          this.camera.layers.disable(2);
+        }
       }
 
       this.hudThrottle += rawDt;
@@ -2936,7 +3548,14 @@ export class AgraSurvivalEngine {
       firecrackerCooldown: Math.max(0, Number(this.firecrackerCooldown.toFixed(1))),
       kickCooldown: Math.max(0, Number(this.kickCooldown.toFixed(1))),
       canMantle: this.canMantle,
-      activeWeapon: this.viewmodel.getWeapon(),
+      activeWeapon: this.activeWeapon,
+      previousWeapon: this.previousWeapon,
+      scrapParts: this.scrapParts,
+      weaponDurability: { ...this.weaponDurability },
+      weaponWheelOpen: this.weaponWheelOpen,
+      wheelHoveredSlot: this.wheelHoveredSlot,
+      wheelCursorX: this.wheelCursorX,
+      wheelCursorY: this.wheelCursorY,
       timeLabel: this.getTimeLabel(),
       subtitleText: this.subtitleTimer > 0 ? this.subtitleText : '',
       subtitleSpeaker: this.subtitleSpeaker,
@@ -2946,7 +3565,7 @@ export class AgraSurvivalEngine {
       directionalHits: this.directionalHits.map((d) => ({ ...d })),
       damageFlash: this.damageFlash,
       parryFlash: this.parryFlash,
-      slowMoActive: this.slowMoTimer > 0,
+      slowMoActive: this.slowMoTimer > 0 || this.weaponWheelOpen,
       parkourFlow: Number(this.parkourFlow.toFixed(2)),
       parkourMove: this.parkourMoveTimer > 0 ? this.parkourMoveLabel : undefined,
       killCount: this.killCount,
@@ -2959,6 +3578,7 @@ export class AgraSurvivalEngine {
       introRadioVisible: this.intro.introRadioVisible,
       introRadioText: this.intro.introRadioText,
       tutorialHintOpacity: this.intro.tutorialHintOpacity,
+      awakening: this.awakening.getHudSnapshot(),
     });
   }
 
@@ -3004,6 +3624,8 @@ export class AgraSurvivalEngine {
     this.lighting.dispose();
     this.world.dispose();
     this.viewmodel.dispose();
+    this.awakening.stopTensionDrone();
+    this.awakening.clearEffects(this.scene);
     this.zombies.dispose();
     this.textures.dispose();
     this.composer?.dispose();

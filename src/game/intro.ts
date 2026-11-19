@@ -78,7 +78,10 @@ export class IntroSequenceController {
   }
 
   public resetIdle(): void {
-    this.hooks.onStopAmbience();
+    if (this.firedAmbience) {
+      this.firedAmbience = false;
+      this.hooks.onStopAmbience();
+    }
     this.isIntroPlaying = false;
     this.elapsed = 0;
     this.blackFadeOpacity = 0;
@@ -101,7 +104,10 @@ export class IntroSequenceController {
     this.tutorialTimer = TUTORIAL_HINT_DURATION;
     this.tutorialHintOpacity = 1;
     this.tutorialFadingOut = false;
-    this.hooks.onStopAmbience();
+    if (this.firedAmbience) {
+      this.firedAmbience = false;
+      this.hooks.onStopAmbience();
+    }
     this.hooks.onSkipCleanupViewmodel();
   }
 
@@ -170,7 +176,10 @@ export class IntroSequenceController {
         this.tutorialTimer = TUTORIAL_HINT_DURATION;
         this.tutorialHintOpacity = 1;
         this.tutorialFadingOut = false;
-        this.hooks.onStopAmbience();
+        if (this.firedAmbience) {
+          this.firedAmbience = false;
+          this.hooks.onStopAmbience();
+        }
       }
       return;
     }

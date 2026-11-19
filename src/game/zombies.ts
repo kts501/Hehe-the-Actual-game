@@ -1592,6 +1592,70 @@ export class ZombieManager {
     }
   }
 
+  public applyAwakeningShockwave(
+    origin: THREE.Vector3,
+    radius = 11.0,
+    baseKnockback = 18.0,
+    upwardPop = 6.0,
+    damage = 25,
+    stunDuration = 2.0,
+  ): { hitCount: number; killCount: number } {
+    let hitCount = 0;
+    let killCount = 0;
+    const dir = new THREE.Vector3();
+
+    for (const z of this.zombies) {
+      if (z.state === 'dead') continue;
+      const dx = z.pos.x - origin.x;
+      const dz = z.pos.z - origin.z;
+      const dy = Math.abs(z.pos.y - origin.y);
+      const dist = Math.hypot(dx, dz);
+      if (dist > radius || dy > 4.0) continue;
+
+      hitCount++;
+      if (dist > 0.001) {
+        dir.set(dx / dist, 0, dz / dist);
+      } else {
+        dir.set(0, 0, -1);
+      }
+
+      const proximityScale = Math.max(0.45, 1 - (dist / radius) * 0.55);
+      const pushForce = baseKnockback * proximityScale;
+      const killed = this.damageZombie(z, damage, dir, pushForce, stunDuration);
+      if (killed) {
+        killCount++;
+      } else {
+        z.vel.y = Math.max(z.vel.y, upwardPop);
+      }
+    }
+
+    return { hitCount, killCount };
+  }
+
+  public clearNearbyZombies(origin: THREE.Vector3, radius = 26): number {
+    const radiusSq = radius * radius;
+    let cleared = 0;
+    for (let i = 0; i < this.zombies.length; i++) {
+      const z = this.zombies[i];
+      if (z.state === 'dead') continue;
+      const dx = z.pos.x - origin.x;
+      const dz = z.pos.z - origin.z;
+      if (dx * dx + dz * dz <= radiusSq) {
+        z.hp = 0;
+        z.state = 'dead';
+        z.stateTimer = 1.0;
+        z.respawnTimer = 28;
+        z.vel.set(0, 0, 0);
+        z.group.visible = false;
+        for (let t = 0; t < z.trailMeshes.length; t++) {
+          z.trailMeshes[t].visible = false;
+        }
+        cleared++;
+      }
+    }
+    return cleared;
+  }
+
   public update(
     dt: number,
     playerPos: THREE.Vector3,

@@ -245,7 +245,7 @@ export function createSharedEntityAssets(textures: ProceduralTextureSet): Shared
       v.id,
       new THREE.MeshStandardMaterial({
         color: v.skinColor,
-        map: textures.necroticSkin,
+        map: textures.zombieSkin,
         roughness: 0.76,
         metalness: 0.06,
       }),
@@ -254,7 +254,7 @@ export function createSharedEntityAssets(textures: ProceduralTextureSet): Shared
       v.id,
       new THREE.MeshStandardMaterial({
         color: v.clothColor,
-        map: textures.tacticalCloth,
+        map: textures.zombieCloth,
         roughness: 0.86,
         metalness: v.hasHelmet || v.hasPads ? 0.34 : 0.08,
       }),
@@ -266,7 +266,7 @@ export function createSharedEntityAssets(textures: ProceduralTextureSet): Shared
 
   const houndSkinMat = new THREE.MeshStandardMaterial({
     color: 0x4a2528,
-    map: textures.necroticSkin,
+    map: textures.zombieSkin,
     roughness: 0.72,
     metalness: 0.1,
   });
@@ -691,18 +691,18 @@ export function buildVikramNpc(textures: ProceduralTextureSet): {
   });
   const shirtMat = new THREE.MeshStandardMaterial({
     color: 0x43484a,
-    map: textures.tacticalCloth,
+    map: textures.zombieCloth,
     roughness: 0.88,
   });
   const vestMat = new THREE.MeshStandardMaterial({
     color: 0x4b5637,
-    map: textures.tacticalCloth,
+    map: textures.zombieCloth,
     roughness: 0.84,
     metalness: 0.08,
   });
   const pantsMat = new THREE.MeshStandardMaterial({
     color: 0x3e4730,
-    map: textures.tacticalCloth,
+    map: textures.zombieCloth,
     roughness: 0.86,
   });
   const gearDarkMat = new THREE.MeshStandardMaterial({
@@ -1031,14 +1031,14 @@ export function buildFirstPersonRig(textures: ProceduralTextureSet): {
   const sleeveMat = tm(
     new THREE.MeshStandardMaterial({
       color: 0x3b443b,
-      map: textures.tacticalCloth,
+      map: textures.zombieCloth,
       roughness: 0.85,
     }),
   );
   const skinMat = tm(
     new THREE.MeshStandardMaterial({
       color: 0xe3b18c,
-      map: textures.weatheredHandSkin,
+      map: textures.skinDetail,
       roughness: 0.68,
       metalness: 0.04,
     }),
@@ -1061,7 +1061,7 @@ export function buildFirstPersonRig(textures: ProceduralTextureSet): {
   const gloveTanMat = tm(
     new THREE.MeshStandardMaterial({
       color: 0xd4c8ae,
-      map: textures.tanGloveFabric,
+      map: textures.wristWrapTape,
       roughness: 0.82,
       metalness: 0.04,
     }),
@@ -1082,8 +1082,8 @@ export function buildFirstPersonRig(textures: ProceduralTextureSet): {
   );
   const watchDialMat = tm(
     new THREE.MeshStandardMaterial({
-      map: textures.watchFace,
-      emissiveMap: textures.watchFace,
+      map: textures.tealWindow,
+      emissiveMap: textures.tealWindow,
       emissive: new THREE.Color(0x38bdf8),
       emissiveIntensity: 0.9,
       roughness: 0.25,
@@ -1093,7 +1093,7 @@ export function buildFirstPersonRig(textures: ProceduralTextureSet): {
   const bladeSteelMat = tm(
     new THREE.MeshStandardMaterial({
       color: 0xd1d7e0,
-      map: textures.brushedBladeSteel,
+      map: textures.diamondPlate,
       roughness: 0.28,
       metalness: 0.88,
     }),
@@ -1121,7 +1121,7 @@ export function buildFirstPersonRig(textures: ProceduralTextureSet): {
   const pistolFrameMat = tm(
     new THREE.MeshStandardMaterial({
       color: 0x22252a,
-      map: textures.polymerGrip,
+      map: textures.batGripTape,
       roughness: 0.78,
       metalness: 0.15,
     }),
@@ -1129,7 +1129,7 @@ export function buildFirstPersonRig(textures: ProceduralTextureSet): {
   const pistolSlideMat = tm(
     new THREE.MeshStandardMaterial({
       color: 0xd4d8de,
-      map: textures.brushedSilverSlide,
+      map: textures.rustedMetal,
       roughness: 0.28,
       metalness: 0.82,
     }),

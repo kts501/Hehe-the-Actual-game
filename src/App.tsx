@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { DevModMenu } from './components/DevModMenu';
 import { GameHud } from './components/GameHud';
 import { AgraSurvivalEngine } from './game/engine';
+import { createInitialDurability, type WeaponSlot } from './game/weapons';
 import type { HudSnapshot, MinimapTelemetry, RadioMessage } from './types/game';
 
 const INITIAL_HUD: HudSnapshot = {
@@ -24,6 +26,13 @@ const INITIAL_HUD: HudSnapshot = {
   kickCooldown: 0,
   canMantle: false,
   activeWeapon: 'bat',
+  previousWeapon: 'unarmed',
+  scrapParts: 25,
+  weaponDurability: createInitialDurability(),
+  weaponWheelOpen: false,
+  wheelHoveredSlot: 'bottom',
+  wheelCursorX: 0,
+  wheelCursorY: 0,
   timeLabel: 'Golden Dusk',
   subtitleText: '',
   subtitleSpeaker: 'OVERWATCH RADIO',
@@ -46,6 +55,27 @@ const INITIAL_HUD: HudSnapshot = {
   introRadioVisible: false,
   introRadioText: '',
   tutorialHintOpacity: 0,
+  awakening: {
+    charge: 0,
+    isReady: false,
+    isActivating: false,
+    isActive: false,
+    remainingSeconds: 0,
+    impactFlashOpacity: 0,
+    impactOverlayMode: 'none',
+    impactOverlayOpacity: 0,
+    vignetteOpacity: 0,
+    cinematicActive: false,
+    cutsceneTime: 0,
+    letterboxProgress: 0,
+    vignetteDarkOpacity: 0,
+    desaturateProgress: 0,
+    hudDimOpacity: 1,
+    subtitleVisible: false,
+    subtitleElapsed: 0,
+    subtitleFlashProgress: 0,
+    subtitleExitProgress: 0,
+  },
 };
 
 function buildVikramFallbackReply(userMessage: string, snapshot: HudSnapshot): string {
@@ -257,8 +287,40 @@ export default function App() {
     engineRef.current?.closeRadio(relockPointer);
   }, []);
 
+  const handleWheelHoverSlot = useCallback((slot: WeaponSlot) => {
+    engineRef.current?.hoverWheelSlot(slot);
+  }, []);
+
+  const handleWheelSelectSlot = useCallback((slot: WeaponSlot) => {
+    engineRef.current?.selectWheelSlot(slot);
+  }, []);
+
   const getLiveMinimapTelemetry = useCallback((): MinimapTelemetry | null => {
     return engineRef.current?.getLiveMinimapTelemetry() ?? null;
+  }, []);
+
+  const handleDevOverlayChange = useCallback((open: boolean, relockPointer = true) => {
+    engineRef.current?.setDevOverlayOpen(open, relockPointer);
+  }, []);
+
+  const handleDevToggleImmortal = useCallback((enabled: boolean) => {
+    engineRef.current?.setDevImmortal(enabled);
+  }, []);
+
+  const handleDevToggleInfStamina = useCallback((enabled: boolean) => {
+    engineRef.current?.setDevInfStamina(enabled);
+  }, []);
+
+  const handleDevFillAwakening = useCallback(() => {
+    engineRef.current?.devFillAwakening();
+  }, []);
+
+  const handleDevFullHeal = useCallback(() => {
+    engineRef.current?.devFullHeal();
+  }, []);
+
+  const handleDevClearNearbyEnemies = useCallback((): number => {
+    return engineRef.current?.devClearNearbyEnemies(26) ?? 0;
   }, []);
 
   const handleSendRadioMessage = useCallback(
@@ -333,7 +395,17 @@ export default function App() {
   return (
     <div className="relative h-screen w-screen overflow-hidden bg-zinc-950">
       {/* Isolated WebGL mount container */}
-      <div ref={mountRef} className="h-full w-full" />
+      <div
+        ref={mountRef}
+        className="h-full w-full"
+        style={
+          (hud.awakening?.desaturateProgress ?? 0) > 0.005
+            ? {
+                filter: `saturate(${(1 - (hud.awakening?.desaturateProgress ?? 0) * 0.35).toFixed(3)}) contrast(${(1 + (hud.awakening?.desaturateProgress ?? 0) * 0.12).toFixed(3)})`,
+              }
+            : undefined
+        }
+      />
 
       {/* Semantic DOM HUD Overlay */}
       <GameHud
@@ -348,7 +420,19 @@ export default function App() {
         onToggleMute={handleToggleMute}
         onSendRadioMessage={handleSendRadioMessage}
         onCloseRadio={handleCloseRadio}
+        onWheelHoverSlot={handleWheelHoverSlot}
+        onWheelSelectSlot={handleWheelSelectSlot}
         getLiveMinimapTelemetry={getLiveMinimapTelemetry}
+      />
+
+      {/* Hidden PIN-Gated Exclusive Developer Mod Menu (F9 or Ctrl+Shift+~) */}
+      <DevModMenu
+        onOverlayChange={handleDevOverlayChange}
+        onToggleImmortal={handleDevToggleImmortal}
+        onToggleInfStamina={handleDevToggleInfStamina}
+        onFillAwakening={handleDevFillAwakening}
+        onFullHeal={handleDevFullHeal}
+        onClearNearbyEnemies={handleDevClearNearbyEnemies}
       />
     </div>
   );

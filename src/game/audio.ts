@@ -1,4 +1,5 @@
 import type { ZombieKind } from '../types/game';
+import type { WeaponId } from './weapons';
 
 /**
  * Procedural Web Audio API synthesizer for Agra Quarantine.
@@ -94,6 +95,10 @@ export class SoundEngine {
     if (!this.ctx) this.unlock();
     if (!this.ctx || this.ctx.state !== 'running') return null;
     return this.ctx;
+  }
+
+  public getAudioContext(): AudioContext | null {
+    return this.ready();
   }
 
   public playPipeSwing(): void {
@@ -349,15 +354,22 @@ export class SoundEngine {
     const osc = ctx.createOscillator();
     osc.type = 'sawtooth';
 
-    const base = kind === 'brute' ? 72 : kind === 'runner' ? 210 : 112;
-    const dur = kind === 'brute' ? 0.55 : kind === 'runner' ? 0.34 : 0.48;
+    const base =
+      kind === 'brute' ? 72 : kind === 'screamer' ? 245 : kind === 'runner' ? 210 : 112;
+    const dur = kind === 'brute' ? 0.55 : kind === 'screamer' ? 0.42 : kind === 'runner' ? 0.34 : 0.48;
     osc.frequency.setValueAtTime(base + Math.random() * 16, now);
-    osc.frequency.linearRampToValueAtTime(base * (kind === 'runner' ? 1.25 : 0.78), now + dur);
+    osc.frequency.linearRampToValueAtTime(
+      base * (kind === 'runner' || kind === 'screamer' ? 1.25 : 0.78),
+      now + dur,
+    );
 
     const formant = ctx.createBiquadFilter();
     formant.type = 'bandpass';
-    formant.frequency.setValueAtTime(kind === 'runner' ? 880 : 380, now);
-    formant.Q.value = 3.2;
+    formant.frequency.setValueAtTime(
+      kind === 'screamer' ? 1020 : kind === 'runner' ? 880 : 380,
+      now,
+    );
+    formant.Q.value = kind === 'screamer' ? 3.8 : 3.2;
 
     const gain = ctx.createGain();
     gain.gain.setValueAtTime(0.001, now);
@@ -1280,6 +1292,406 @@ export class SoundEngine {
       nSrc.start(now);
       nSrc.stop(now + 0.095);
     }
+  }
+
+  public playWheelOpen(): void {
+    const ctx = this.ready();
+    if (!ctx) return;
+    const now = ctx.currentTime;
+
+    const osc = ctx.createOscillator();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(280, now);
+    osc.frequency.exponentialRampToValueAtTime(140, now + 0.14);
+
+    const gain = ctx.createGain();
+    gain.gain.setValueAtTime(0.11, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.15);
+
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start(now);
+    osc.stop(now + 0.16);
+  }
+
+  public playWheelTick(): void {
+    const ctx = this.ready();
+    if (!ctx) return;
+    const now = ctx.currentTime;
+
+    // Subtle crisp mechanical UI click
+    const osc = ctx.createOscillator();
+    osc.type = 'triangle';
+    osc.frequency.setValueAtTime(1250, now);
+    osc.frequency.exponentialRampToValueAtTime(620, now + 0.025);
+
+    const gain = ctx.createGain();
+    gain.gain.setValueAtTime(0.085, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.03);
+
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start(now);
+    osc.stop(now + 0.032);
+  }
+
+  public playWeaponEquip(weaponId: WeaponId): void {
+    const ctx = this.ready();
+    if (!ctx) return;
+    const now = ctx.currentTime;
+
+    // Leather/cloth unsheathe whoosh
+    if (this.noiseBuffer) {
+      const nSrc = ctx.createBufferSource();
+      nSrc.buffer = this.noiseBuffer;
+      const bp = ctx.createBiquadFilter();
+      bp.type = 'bandpass';
+      const baseHz = weaponId === 'dagger' ? 1600 : weaponId === 'cleaver' ? 920 : weaponId === 'unarmed' ? 680 : 540;
+      bp.frequency.setValueAtTime(baseHz, now);
+      bp.frequency.exponentialRampToValueAtTime(baseHz * 0.55, now + 0.14);
+      bp.Q.value = 1.6;
+      const nGain = ctx.createGain();
+      nGain.gain.setValueAtTime(0.15, now);
+      nGain.gain.exponentialRampToValueAtTime(0.001, now + 0.15);
+      nSrc.connect(bp);
+      bp.connect(nGain);
+      nGain.connect(ctx.destination);
+      nSrc.start(now);
+      nSrc.stop(now + 0.16);
+    }
+
+    if (weaponId === 'dagger' || weaponId === 'cleaver') {
+      // Metallic blade unsheathe ring
+      const osc = ctx.createOscillator();
+      osc.type = 'triangle';
+      const startFreq = weaponId === 'dagger' ? 1480 : 760;
+      osc.frequency.setValueAtTime(startFreq, now);
+      osc.frequency.exponentialRampToValueAtTime(startFreq * 1.24, now + 0.12);
+      const gain = ctx.createGain();
+      gain.gain.setValueAtTime(0.12, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.16);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(now);
+      osc.stop(now + 0.17);
+    } else if (weaponId === 'bat') {
+      // Solid wooden grip thump
+      const osc = ctx.createOscillator();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(165, now);
+      osc.frequency.exponentialRampToValueAtTime(68, now + 0.12);
+      const gain = ctx.createGain();
+      gain.gain.setValueAtTime(0.24, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.14);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(now);
+      osc.stop(now + 0.15);
+    } else {
+      // Unarmed glove/wrist-wrap snap
+      const osc = ctx.createOscillator();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(210, now);
+      osc.frequency.exponentialRampToValueAtTime(90, now + 0.08);
+      const gain = ctx.createGain();
+      gain.gain.setValueAtTime(0.18, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.09);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(now);
+      osc.stop(now + 0.1);
+    }
+  }
+
+  public playWeaponSwing(weaponId: WeaponId): void {
+    const ctx = this.ready();
+    if (!ctx || !this.noiseBuffer) return;
+    const now = ctx.currentTime;
+
+    const src = ctx.createBufferSource();
+    src.buffer = this.noiseBuffer;
+
+    const filter = ctx.createBiquadFilter();
+    filter.type = 'bandpass';
+
+    let fStart = 520;
+    let fEnd = 190;
+    let dur = 0.21;
+    let vol = 0.24;
+
+    if (weaponId === 'dagger') {
+      fStart = 1150;
+      fEnd = 420;
+      dur = 0.13;
+      vol = 0.2;
+    } else if (weaponId === 'cleaver') {
+      fStart = 390;
+      fEnd = 125;
+      dur = 0.3;
+      vol = 0.32;
+    } else if (weaponId === 'unarmed') {
+      fStart = 720;
+      fEnd = 260;
+      dur = 0.14;
+      vol = 0.19;
+    }
+
+    filter.frequency.setValueAtTime(fStart, now);
+    filter.frequency.exponentialRampToValueAtTime(fEnd, now + dur);
+    filter.Q.value = weaponId === 'dagger' ? 2.2 : 1.5;
+
+    const gain = ctx.createGain();
+    gain.gain.setValueAtTime(0.001, now);
+    gain.gain.linearRampToValueAtTime(vol, now + Math.min(0.04, dur * 0.25));
+    gain.gain.exponentialRampToValueAtTime(0.001, now + dur);
+
+    src.connect(filter);
+    filter.connect(gain);
+    gain.connect(ctx.destination);
+    src.start(now);
+    src.stop(now + dur + 0.02);
+  }
+
+  public playWeaponHit(weaponId: WeaponId, blocked = false): void {
+    const ctx = this.ready();
+    if (!ctx) return;
+    const now = ctx.currentTime;
+
+    if (blocked) {
+      this.playPipeHit(false, true);
+      return;
+    }
+
+    if (weaponId === 'dagger' || weaponId === 'cleaver') {
+      const heavy = weaponId === 'cleaver';
+      // Impact thud
+      const osc = ctx.createOscillator();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(heavy ? 125 : 195, now);
+      osc.frequency.exponentialRampToValueAtTime(heavy ? 36 : 58, now + (heavy ? 0.24 : 0.12));
+      const gain = ctx.createGain();
+      gain.gain.setValueAtTime(heavy ? 0.44 : 0.26, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + (heavy ? 0.25 : 0.13));
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(now);
+      osc.stop(now + (heavy ? 0.26 : 0.14));
+
+      // Sharp slash transient
+      if (this.noiseBuffer) {
+        const nSrc = ctx.createBufferSource();
+        nSrc.buffer = this.noiseBuffer;
+        const hp = ctx.createBiquadFilter();
+        hp.type = 'bandpass';
+        hp.frequency.setValueAtTime(heavy ? 1850 : 2800, now);
+        hp.frequency.exponentialRampToValueAtTime(750, now + 0.11);
+        hp.Q.value = 1.4;
+        const nGain = ctx.createGain();
+        nGain.gain.setValueAtTime(heavy ? 0.26 : 0.2, now);
+        nGain.gain.exponentialRampToValueAtTime(0.001, now + 0.12);
+        nSrc.connect(hp);
+        hp.connect(nGain);
+        nGain.connect(ctx.destination);
+        nSrc.start(now);
+        nSrc.stop(now + 0.13);
+      }
+      return;
+    }
+
+    if (weaponId === 'unarmed') {
+      const osc = ctx.createOscillator();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(155, now);
+      osc.frequency.exponentialRampToValueAtTime(42, now + 0.12);
+      const gain = ctx.createGain();
+      gain.gain.setValueAtTime(0.32, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.13);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(now);
+      osc.stop(now + 0.14);
+      return;
+    }
+
+    // Wooden Baseball Bat crack + thud
+    const osc = ctx.createOscillator();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(160, now);
+    osc.frequency.exponentialRampToValueAtTime(40, now + 0.17);
+    const gain = ctx.createGain();
+    gain.gain.setValueAtTime(0.38, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.18);
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start(now);
+    osc.stop(now + 0.19);
+
+    const woodCrack = ctx.createOscillator();
+    woodCrack.type = 'triangle';
+    woodCrack.frequency.setValueAtTime(620, now);
+    woodCrack.frequency.exponentialRampToValueAtTime(240, now + 0.08);
+    const wGain = ctx.createGain();
+    wGain.gain.setValueAtTime(0.18, now);
+    wGain.gain.exponentialRampToValueAtTime(0.001, now + 0.09);
+    woodCrack.connect(wGain);
+    wGain.connect(ctx.destination);
+    woodCrack.start(now);
+    woodCrack.stop(now + 0.1);
+  }
+
+  public playScreamerScreech(): void {
+    const ctx = this.ready();
+    if (!ctx) return;
+    const now = ctx.currentTime;
+
+    // Raspy vocal-cord formant screech (dual detuned sawtooth oscillators through sweeping formant)
+    const osc1 = ctx.createOscillator();
+    const osc2 = ctx.createOscillator();
+    osc1.type = 'sawtooth';
+    osc2.type = 'sawtooth';
+
+    osc1.frequency.setValueAtTime(290 + Math.random() * 40, now);
+    osc1.frequency.exponentialRampToValueAtTime(640, now + 0.14);
+    osc1.frequency.exponentialRampToValueAtTime(255, now + 0.56);
+
+    osc2.frequency.setValueAtTime(304 + Math.random() * 40, now);
+    osc2.frequency.exponentialRampToValueAtTime(675, now + 0.14);
+    osc2.frequency.exponentialRampToValueAtTime(272, now + 0.56);
+
+    const formant = ctx.createBiquadFilter();
+    formant.type = 'bandpass';
+    formant.frequency.setValueAtTime(920, now);
+    formant.frequency.exponentialRampToValueAtTime(1750, now + 0.16);
+    formant.frequency.exponentialRampToValueAtTime(760, now + 0.56);
+    formant.Q.value = 2.8;
+
+    const gain = ctx.createGain();
+    gain.gain.setValueAtTime(0.001, now);
+    gain.gain.linearRampToValueAtTime(0.17, now + 0.05);
+    gain.gain.setValueAtTime(0.15, now + 0.24);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.58);
+
+    osc1.connect(formant);
+    osc2.connect(formant);
+    formant.connect(gain);
+    gain.connect(ctx.destination);
+    osc1.start(now);
+    osc2.start(now);
+    osc1.stop(now + 0.6);
+    osc2.stop(now + 0.6);
+
+    // Wet guttural rasp noise layer
+    if (this.noiseBuffer) {
+      const nSrc = ctx.createBufferSource();
+      nSrc.buffer = this.noiseBuffer;
+      const bp = ctx.createBiquadFilter();
+      bp.type = 'bandpass';
+      bp.frequency.setValueAtTime(1450, now);
+      bp.Q.value = 1.9;
+      const nGain = ctx.createGain();
+      nGain.gain.setValueAtTime(0.001, now);
+      nGain.gain.linearRampToValueAtTime(0.11, now + 0.06);
+      nGain.gain.exponentialRampToValueAtTime(0.001, now + 0.52);
+      nSrc.connect(bp);
+      bp.connect(nGain);
+      nGain.connect(ctx.destination);
+      nSrc.start(now);
+      nSrc.stop(now + 0.54);
+    }
+  }
+
+  public playHeadGrabWhiff(): void {
+    const ctx = this.ready();
+    if (!ctx || !this.noiseBuffer) return;
+    const now = ctx.currentTime;
+
+    const src = ctx.createBufferSource();
+    src.buffer = this.noiseBuffer;
+    const bp = ctx.createBiquadFilter();
+    bp.type = 'bandpass';
+    bp.frequency.setValueAtTime(740, now);
+    bp.frequency.exponentialRampToValueAtTime(260, now + 0.2);
+    bp.Q.value = 1.4;
+
+    const gain = ctx.createGain();
+    gain.gain.setValueAtTime(0.001, now);
+    gain.gain.linearRampToValueAtTime(0.2, now + 0.035);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.22);
+
+    src.connect(bp);
+    bp.connect(gain);
+    gain.connect(ctx.destination);
+    src.start(now);
+    src.stop(now + 0.24);
+  }
+
+  public playHeadGrabImpact(): void {
+    const ctx = this.ready();
+    if (!ctx) return;
+    const now = ctx.currentTime;
+
+    // Heavy skull-and-flesh low-end thump: 95 Hz -> 40 Hz
+    const osc = ctx.createOscillator();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(95, now);
+    osc.frequency.exponentialRampToValueAtTime(40, now + 0.18);
+
+    const oscGain = ctx.createGain();
+    oscGain.gain.setValueAtTime(0.46, now);
+    oscGain.gain.exponentialRampToValueAtTime(0.001, now + 0.2);
+
+    osc.connect(oscGain);
+    oscGain.connect(ctx.destination);
+    osc.start(now);
+    osc.stop(now + 0.21);
+
+    // Leathery palm-on-cranium grip crunch
+    if (this.noiseBuffer) {
+      const nSrc = ctx.createBufferSource();
+      nSrc.buffer = this.noiseBuffer;
+      const bp = ctx.createBiquadFilter();
+      bp.type = 'bandpass';
+      bp.frequency.setValueAtTime(1180, now);
+      bp.frequency.exponentialRampToValueAtTime(420, now + 0.14);
+      bp.Q.value = 1.5;
+
+      const nGain = ctx.createGain();
+      nGain.gain.setValueAtTime(0.28, now);
+      nGain.gain.exponentialRampToValueAtTime(0.001, now + 0.15);
+
+      nSrc.connect(bp);
+      bp.connect(nGain);
+      nGain.connect(ctx.destination);
+      nSrc.start(now);
+      nSrc.stop(now + 0.16);
+    }
+  }
+
+  public playGrabbedRasp(): void {
+    const ctx = this.ready();
+    if (!ctx) return;
+    const now = ctx.currentTime;
+
+    const osc = ctx.createOscillator();
+    osc.type = 'sawtooth';
+    osc.frequency.setValueAtTime(255, now);
+    osc.frequency.exponentialRampToValueAtTime(185, now + 0.42);
+
+    const formant = ctx.createBiquadFilter();
+    formant.type = 'bandpass';
+    formant.frequency.setValueAtTime(960, now);
+    formant.Q.value = 3.4;
+
+    const gain = ctx.createGain();
+    gain.gain.setValueAtTime(0.001, now);
+    gain.gain.linearRampToValueAtTime(0.14, now + 0.04);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.44);
+
+    osc.connect(formant);
+    formant.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start(now);
+    osc.stop(now + 0.46);
   }
 
   public stopContinuousLoops(): void {

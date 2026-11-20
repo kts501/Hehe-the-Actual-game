@@ -1,8 +1,20 @@
 import * as THREE from 'three';
+import { GLTFLoader, type GLTF } from 'three/addons/loaders/GLTFLoader.js';
+import * as SkeletonUtils from 'three/addons/utils/SkeletonUtils.js';
 import type { BoxCollider, ZombieKind } from '../types/game';
 import type { ProceduralTextureSet } from './textures';
 
 export type ZombieState = 'wander' | 'chase' | 'windup' | 'recover' | 'stunned' | 'dead';
+
+interface ZombieGltfAsset {
+  template: THREE.Object3D;
+  rawSize: THREE.Vector3;
+  rawMinY: number;
+  rawCenterX: number;
+  rawCenterZ: number;
+  walkClip: THREE.AnimationClip | null;
+  attackClip: THREE.AnimationClip | null;
+}
 
 export interface ZombieActor {
   id: number;
@@ -47,6 +59,13 @@ export interface ZombieActor {
   dogTail?: THREE.Group;
   dogBaseHeight?: number;
   territoryId?: string;
+  targetHeight: number;
+  targetRadius: number;
+  gltfRoot?: THREE.Object3D;
+  mixer?: THREE.AnimationMixer;
+  walkAction?: THREE.AnimationAction;
+  attackAction?: THREE.AnimationAction;
+  activeClip?: 'walk' | 'attack' | null;
 }
 
 const _tmpVec = new THREE.Vector3();
@@ -96,6 +115,8 @@ export class ZombieManager {
   private readonly disposables: Array<{ dispose: () => void }> = [];
   private nextId = 1;
   private nightSpawned = false;
+  private zombieGltfAsset: ZombieGltfAsset | null = null;
+  private disposed = false;
 
   // Shared PBR Materials
   private readonly shamblerSkinMat: THREE.MeshStandardMaterial;
@@ -103,9 +124,11 @@ export class ZombieManager {
   private readonly runnerMuscleMat: THREE.MeshStandardMaterial;
   private readonly runnerPaleMat: THREE.MeshStandardMaterial;
   private readonly runnerTornMat: THREE.MeshStandardMaterial;
+  private readonly nightCarapaceMat: THREE.MeshStandardMaterial;
   private readonly boneMat: THREE.MeshStandardMaterial;
   private readonly bruteSkinMat: THREE.MeshStandardMaterial;
   private readonly socketMat: THREE.MeshStandardMaterial;
+  private readonly gumMat: THREE.MeshStandardMaterial;
   private readonly teethMat: THREE.MeshStandardMaterial;
   private readonly armorMat: THREE.MeshStandardMaterial;
   private readonly shirtMats: THREE.MeshStandardMaterial[];
@@ -115,12 +138,14 @@ export class ZombieManager {
   private readonly eliteEyeMat: THREE.MeshBasicMaterial;
   private readonly shamblerEyeMat: THREE.MeshBasicMaterial;
   private readonly dogEyeMat: THREE.MeshBasicMaterial;
+  private readonly dogMilkEyeMat: THREE.MeshStandardMaterial;
   private readonly trailMat: THREE.MeshBasicMaterial;
   private readonly shadowMat: THREE.MeshBasicMaterial;
   private readonly dogHideMats: THREE.MeshStandardMaterial[];
   private readonly dogFleshMat: THREE.MeshStandardMaterial;
   private readonly dogChainMat: THREE.MeshStandardMaterial;
   private readonly dogNoseMat: THREE.MeshStandardMaterial;
+  private readonly dogClawMat: THREE.MeshStandardMaterial;
   private readonly geoCache = new Map<string, THREE.BufferGeometry>();
 
   private cachedGeo<T extends THREE.BufferGeometry>(key: string, factory: () => T): T {
@@ -144,10 +169,10 @@ export class ZombieManager {
       new THREE.MeshStandardMaterial({
         map: textures.zombieSkin,
         bumpMap: textures.zombieSkinBump,
-        bumpScale: 0.028,
-        roughnessMap: textures.zombieSkinBump,
-        color: 0x8d9984,
-        roughness: 0.78,
+        bumpScale: 0.032,
+        roughnessMap: textures.zombieSkinRoughness,
+        color: 0x9aa491,
+        roughness: 0.86,
         metalness: 0.03,
       }),
     );
@@ -156,10 +181,10 @@ export class ZombieManager {
       new THREE.MeshStandardMaterial({
         map: textures.zombieSkin,
         bumpMap: textures.zombieSkinBump,
-        bumpScale: 0.026,
-        roughnessMap: textures.zombieSkinBump,
-        color: 0x7b8373,
-        roughness: 0.82,
+        bumpScale: 0.03,
+        roughnessMap: textures.zombieSkinRoughness,
+        color: 0x868d7d,
+        roughness: 0.88,
         metalness: 0.02,
       }),
     );
@@ -168,9 +193,10 @@ export class ZombieManager {
       new THREE.MeshStandardMaterial({
         map: textures.nightHunterMuscle,
         bumpMap: textures.zombieSkinBump,
-        bumpScale: 0.03,
-        color: 0xb03c44,
-        roughness: 0.4,
+        bumpScale: 0.032,
+        roughnessMap: textures.zombieSkinRoughness,
+        color: 0xc2484e,
+        roughness: 0.56,
         metalness: 0.08,
       }),
     );
@@ -179,9 +205,10 @@ export class ZombieManager {
       new THREE.MeshStandardMaterial({
         map: textures.zombieSkin,
         bumpMap: textures.zombieSkinBump,
-        bumpScale: 0.02,
-        color: 0xc2c6cc,
-        roughness: 0.58,
+        bumpScale: 0.024,
+        roughnessMap: textures.zombieSkinRoughness,
+        color: 0xc5b8b2,
+        roughness: 0.66,
         metalness: 0.05,
       }),
     );
@@ -189,17 +216,36 @@ export class ZombieManager {
     this.runnerTornMat = trackMat(
       new THREE.MeshStandardMaterial({
         map: textures.nightHunterMuscle,
-        color: 0x6b1118,
-        roughness: 0.32,
+        bumpMap: textures.zombieSkinBump,
+        bumpScale: 0.026,
+        roughnessMap: textures.zombieSkinRoughness,
+        color: 0x7b141c,
+        roughness: 0.42,
         metalness: 0.1,
+      }),
+    );
+
+    // Iridescent dark slate-blue / charcoal armored chitin carapace (Night Hunter / Volatile)
+    this.nightCarapaceMat = trackMat(
+      new THREE.MeshStandardMaterial({
+        map: textures.nightHunterCarapace,
+        bumpMap: textures.nightHunterCarapaceBump,
+        bumpScale: 0.034,
+        roughnessMap: textures.nightHunterCarapaceRoughness,
+        color: 0x8fa6c2,
+        roughness: 0.56,
+        metalness: 0.28,
+        envMapIntensity: 1.25,
       }),
     );
 
     this.boneMat = trackMat(
       new THREE.MeshStandardMaterial({
-        color: 0xdfd8ca,
-        roughness: 0.42,
-        metalness: 0.05,
+        color: 0xd9cfb8,
+        bumpMap: textures.stoneBump,
+        bumpScale: 0.012,
+        roughness: 0.48,
+        metalness: 0.04,
       }),
     );
 
@@ -207,23 +253,33 @@ export class ZombieManager {
       new THREE.MeshStandardMaterial({
         map: textures.zombieSkin,
         bumpMap: textures.zombieSkinBump,
-        bumpScale: 0.034,
-        roughnessMap: textures.zombieSkinBump,
-        color: 0x65695a,
-        roughness: 0.82,
+        bumpScale: 0.038,
+        roughnessMap: textures.zombieSkinRoughness,
+        color: 0x707464,
+        roughness: 0.88,
         metalness: 0.04,
       }),
     );
 
-    this.socketMat = trackMat(new THREE.MeshStandardMaterial({ color: 0x160b0d, roughness: 0.95 }));
-    this.teethMat = trackMat(new THREE.MeshStandardMaterial({ color: 0xeae2cb, roughness: 0.42 }));
+    this.socketMat = trackMat(new THREE.MeshStandardMaterial({ color: 0x130709, roughness: 0.96 }));
+    this.gumMat = trackMat(
+      new THREE.MeshStandardMaterial({
+        color: 0x5c1118,
+        roughness: 0.28,
+        metalness: 0.06,
+      }),
+    );
+    this.teethMat = trackMat(new THREE.MeshStandardMaterial({ color: 0xe6dcc2, roughness: 0.4 }));
 
     this.armorMat = trackMat(
       new THREE.MeshStandardMaterial({
         map: textures.rustedMetal,
-        color: 0x4b5563,
-        roughness: 0.4,
-        metalness: 0.84,
+        bumpMap: textures.rustedMetalBump,
+        bumpScale: 0.026,
+        roughnessMap: textures.rustedMetalRoughness,
+        color: 0x626c78,
+        roughness: 0.54,
+        metalness: 0.82,
       }),
     );
 
@@ -231,32 +287,44 @@ export class ZombieManager {
       trackMat(
         new THREE.MeshStandardMaterial({
           map: textures.zombieCloth,
+          bumpMap: textures.clothWrapBump,
+          bumpScale: 0.018,
+          roughnessMap: textures.clothWrapRoughness,
           color: 0x64748b,
-          roughness: 0.92,
+          roughness: 0.94,
           side: THREE.DoubleSide,
         }),
       ),
       trackMat(
         new THREE.MeshStandardMaterial({
           map: textures.zombieCloth,
+          bumpMap: textures.clothWrapBump,
+          bumpScale: 0.018,
+          roughnessMap: textures.clothWrapRoughness,
           color: 0x9a3412,
-          roughness: 0.92,
+          roughness: 0.94,
           side: THREE.DoubleSide,
         }),
       ),
       trackMat(
         new THREE.MeshStandardMaterial({
           map: textures.zombieCloth,
+          bumpMap: textures.clothWrapBump,
+          bumpScale: 0.018,
+          roughnessMap: textures.clothWrapRoughness,
           color: 0x8a867b,
-          roughness: 0.92,
+          roughness: 0.94,
           side: THREE.DoubleSide,
         }),
       ),
       trackMat(
         new THREE.MeshStandardMaterial({
           map: textures.zombieCloth,
+          bumpMap: textures.clothWrapBump,
+          bumpScale: 0.018,
+          roughnessMap: textures.clothWrapRoughness,
           color: 0x4b5e43,
-          roughness: 0.92,
+          roughness: 0.94,
           side: THREE.DoubleSide,
         }),
       ),
@@ -266,16 +334,22 @@ export class ZombieManager {
       trackMat(
         new THREE.MeshStandardMaterial({
           map: textures.zombieCloth,
+          bumpMap: textures.clothWrapBump,
+          bumpScale: 0.016,
+          roughnessMap: textures.clothWrapRoughness,
           color: 0x2f3540,
-          roughness: 0.94,
+          roughness: 0.95,
           side: THREE.DoubleSide,
         }),
       ),
       trackMat(
         new THREE.MeshStandardMaterial({
           map: textures.zombieCloth,
+          bumpMap: textures.clothWrapBump,
+          bumpScale: 0.016,
+          roughnessMap: textures.clothWrapRoughness,
           color: 0x42382e,
-          roughness: 0.94,
+          roughness: 0.95,
           side: THREE.DoubleSide,
         }),
       ),
@@ -284,6 +358,8 @@ export class ZombieManager {
     this.hazmatMat = trackMat(
       new THREE.MeshStandardMaterial({
         map: textures.zombieCloth,
+        bumpMap: textures.clothWrapBump,
+        bumpScale: 0.014,
         color: 0xd4a72c,
         roughness: 0.72,
         metalness: 0.06,
@@ -291,17 +367,27 @@ export class ZombieManager {
       }),
     );
 
+    // Volatile fiery orange-amber glowing eyes
     this.runnerEyeMat = trackMat(
-      new THREE.MeshBasicMaterial({ color: new THREE.Color(2.4, 0.28, 0.16), toneMapped: false }),
+      new THREE.MeshBasicMaterial({ color: new THREE.Color(2.7, 0.78, 0.14), toneMapped: false }),
     );
     this.eliteEyeMat = trackMat(
-      new THREE.MeshBasicMaterial({ color: new THREE.Color(2.9, 0.72, 0.14), toneMapped: false }),
+      new THREE.MeshBasicMaterial({ color: new THREE.Color(3.1, 1.05, 0.18), toneMapped: false }),
     );
     this.shamblerEyeMat = trackMat(
-      new THREE.MeshBasicMaterial({ color: new THREE.Color(2.1, 1.85, 0.35), toneMapped: false }),
+      new THREE.MeshBasicMaterial({ color: new THREE.Color(1.9, 1.65, 0.42), toneMapped: false }),
     );
     this.dogEyeMat = trackMat(
-      new THREE.MeshBasicMaterial({ color: new THREE.Color(2.4, 1.25, 0.18), toneMapped: false }),
+      new THREE.MeshBasicMaterial({ color: new THREE.Color(2.5, 0.92, 0.16), toneMapped: false }),
+    );
+    this.dogMilkEyeMat = trackMat(
+      new THREE.MeshStandardMaterial({
+        color: 0xd9e0e3,
+        emissive: 0x4a3832,
+        emissiveIntensity: 0.45,
+        roughness: 0.18,
+        metalness: 0.05,
+      }),
     );
     this.trailMat = trackMat(
       new THREE.MeshBasicMaterial({
@@ -321,26 +407,28 @@ export class ZombieManager {
     );
 
     this.dogHideMats = [
-      // Variant 0: Doberman charred dark sable hide
+      // Variant 0: Doberman sleek dark charred-sable coat
       trackMat(
         new THREE.MeshStandardMaterial({
           map: textures.dogFurRot,
           bumpMap: textures.dogFurBump,
-          bumpScale: 0.026,
-          color: 0x5c4b3d,
-          roughness: 0.68,
-          metalness: 0.06,
+          bumpScale: 0.028,
+          roughnessMap: textures.dogFurRoughness,
+          color: 0x52453d,
+          roughness: 0.78,
+          metalness: 0.05,
         }),
       ),
-      // Variant 1: Spiked Alpha dark soot-ochre hide
+      // Variant 1: Spiked Alpha dark soot-ochre coat
       trackMat(
         new THREE.MeshStandardMaterial({
           map: textures.dogFurRot,
           bumpMap: textures.dogFurBump,
           bumpScale: 0.032,
-          color: 0x6b5d4e,
-          roughness: 0.72,
-          metalness: 0.06,
+          roughnessMap: textures.dogFurRoughness,
+          color: 0x625548,
+          roughness: 0.8,
+          metalness: 0.05,
         }),
       ),
       // Variant 2: Rabid Stray dark reddish-charcoal mottled fur
@@ -349,8 +437,9 @@ export class ZombieManager {
           map: textures.dogFurRot,
           bumpMap: textures.dogFurBump,
           bumpScale: 0.028,
-          color: 0x664c43,
-          roughness: 0.76,
+          roughnessMap: textures.dogFurRoughness,
+          color: 0x5e4740,
+          roughness: 0.82,
           metalness: 0.04,
         }),
       ),
@@ -360,9 +449,10 @@ export class ZombieManager {
       new THREE.MeshStandardMaterial({
         map: textures.nightHunterMuscle,
         bumpMap: textures.zombieSkinBump,
-        bumpScale: 0.024,
-        color: 0x85161c,
-        roughness: 0.34,
+        bumpScale: 0.028,
+        roughnessMap: textures.zombieSkinRoughness,
+        color: 0xa61d24,
+        roughness: 0.42,
         metalness: 0.08,
       }),
     );
@@ -370,21 +460,184 @@ export class ZombieManager {
     this.dogChainMat = trackMat(
       new THREE.MeshStandardMaterial({
         map: textures.rustedMetal,
-        color: 0x524b45,
-        roughness: 0.52,
+        bumpMap: textures.rustedMetalBump,
+        bumpScale: 0.022,
+        roughnessMap: textures.rustedMetalRoughness,
+        color: 0x5a524b,
+        roughness: 0.56,
         metalness: 0.8,
       }),
     );
 
     this.dogNoseMat = trackMat(
       new THREE.MeshStandardMaterial({
-        color: 0x1c1415,
-        roughness: 0.3,
+        color: 0x161012,
+        roughness: 0.24,
         metalness: 0.1,
       }),
     );
 
+    this.dogClawMat = trackMat(
+      new THREE.MeshStandardMaterial({
+        color: 0x181414,
+        roughness: 0.34,
+        metalness: 0.14,
+      }),
+    );
+
     this.spawnInitialPopulation();
+    void this.loadZombieGltfAsset();
+  }
+
+  private async loadZombieGltfAsset(): Promise<void> {
+    const loader = new GLTFLoader();
+    const candidates = ['/zombie.glb', '/models/zombie.glb', '/assets/zombie.glb'];
+
+    for (const url of candidates) {
+      try {
+        const response = await fetch(url);
+        if (!response.ok) continue;
+
+        const buffer = await response.arrayBuffer();
+        if (buffer.byteLength < 12) continue;
+
+        // Guard against SPA HTML fallbacks returning index.html with 200 OK
+        const headerView = new DataView(buffer);
+        const magic = headerView.getUint32(0, true);
+        const firstByte = new Uint8Array(buffer, 0, 1)[0];
+        const isBinaryGlb = magic === 0x46546c67; // "glTF"
+        const isJsonGltf = firstByte === 0x7b; // "{"
+        if (!isBinaryGlb && !isJsonGltf) continue;
+
+        const gltf: GLTF = await loader.parseAsync(buffer, '/');
+        if (this.disposed) return;
+
+        gltf.scene.updateMatrixWorld(true);
+        const bounds = new THREE.Box3().setFromObject(gltf.scene);
+        const rawSize = new THREE.Vector3();
+        const rawCenter = new THREE.Vector3();
+        bounds.getSize(rawSize);
+        bounds.getCenter(rawCenter);
+
+        const clips = gltf.animations ?? [];
+        const walkClip =
+          THREE.AnimationClip.findByName(clips, 'Walk') ??
+          clips.find((c) => /walk|run|move|shamble|locomotion/i.test(c.name)) ??
+          clips[0] ??
+          null;
+        const attackClip =
+          THREE.AnimationClip.findByName(clips, 'Attack') ??
+          clips.find((c) => /attack|bite|strike|swipe|hit|slash/i.test(c.name)) ??
+          clips[1] ??
+          walkClip;
+
+        if (walkClip) walkClip.optimize();
+        if (attackClip && attackClip !== walkClip) attackClip.optimize();
+
+        this.zombieGltfAsset = {
+          template: gltf.scene,
+          rawSize,
+          rawMinY: Number.isFinite(bounds.min.y) ? bounds.min.y : 0,
+          rawCenterX: Number.isFinite(rawCenter.x) ? rawCenter.x : 0,
+          rawCenterZ: Number.isFinite(rawCenter.z) ? rawCenter.z : 0,
+          walkClip,
+          attackClip,
+        };
+
+        for (let i = 0; i < this.zombies.length; i++) {
+          this.attachGltfVisual(this.zombies[i]);
+        }
+        return;
+      } catch {
+        // Try next candidate path or stay cleanly on procedural zombie fallback
+      }
+    }
+  }
+
+  private attachGltfVisual(actor: ZombieActor): void {
+    const asset = this.zombieGltfAsset;
+    if (!asset || actor.gltfRoot) return;
+
+    // Hide primitive/procedural rig while keeping group, ground shadow, hitbox, and AI intact
+    actor.pelvisGroup.visible = false;
+
+    const cloned = SkeletonUtils.clone(asset.template);
+    const hasValidBounds = Number.isFinite(asset.rawSize.y) && asset.rawSize.y > 0.05;
+    const scaleY = hasValidBounds ? actor.targetHeight / asset.rawSize.y : 1.0;
+    const rawHoriz = Math.max(asset.rawSize.x, asset.rawSize.z);
+    const maxDiameter = actor.targetRadius * 2.15;
+    let scaleXZ = scaleY;
+    if (hasValidBounds && rawHoriz > 0.05 && rawHoriz * scaleY > maxDiameter) {
+      scaleXZ = maxDiameter / rawHoriz;
+    }
+    if (actor.kind === 'brute') {
+      scaleXZ *= 1.1;
+    }
+
+    cloned.scale.set(scaleXZ, scaleY, scaleXZ);
+    cloned.position.set(
+      -asset.rawCenterX * scaleXZ,
+      -asset.rawMinY * scaleY,
+      -asset.rawCenterZ * scaleXZ,
+    );
+
+    cloned.traverse((obj) => {
+      if ((obj as THREE.Mesh).isMesh) {
+        const mesh = obj as THREE.Mesh;
+        mesh.castShadow = true;
+        mesh.receiveShadow = true;
+        if ((obj as THREE.SkinnedMesh).isSkinnedMesh) {
+          mesh.frustumCulled = false;
+        }
+      }
+    });
+
+    actor.group.add(cloned);
+    actor.gltfRoot = cloned;
+
+    const mixer = new THREE.AnimationMixer(cloned);
+    actor.mixer = mixer;
+
+    if (asset.walkClip) {
+      const walkAction = mixer.clipAction(asset.walkClip);
+      walkAction.setLoop(THREE.LoopRepeat, Infinity);
+      walkAction.play();
+      actor.walkAction = walkAction;
+      actor.activeClip = 'walk';
+    }
+    if (asset.attackClip) {
+      const attackAction = mixer.clipAction(asset.attackClip);
+      attackAction.setLoop(THREE.LoopRepeat, Infinity);
+      actor.attackAction = attackAction;
+    }
+  }
+
+  private setActorClip(actor: ZombieActor, clip: 'walk' | 'attack', fadeSec = 0.16): void {
+    if (actor.activeClip === clip) return;
+    const nextAction = clip === 'attack' ? actor.attackAction : actor.walkAction;
+    const prevAction = actor.activeClip === 'attack' ? actor.attackAction : actor.walkAction;
+    if (!nextAction) return;
+
+    nextAction.enabled = true;
+    nextAction.paused = false;
+    nextAction.reset();
+    nextAction.play();
+
+    if (prevAction && prevAction !== nextAction) {
+      prevAction.crossFadeTo(nextAction, fadeSec, false);
+    } else {
+      nextAction.fadeIn(fadeSec);
+    }
+    actor.activeClip = clip;
+  }
+
+  private cleanupActorMixer(actor: ZombieActor): void {
+    if (actor.mixer) {
+      actor.mixer.stopAllAction();
+      if (actor.gltfRoot) {
+        actor.mixer.uncacheRoot(actor.gltfRoot);
+      }
+    }
   }
 
   private buildSculptedHead(
@@ -442,57 +695,106 @@ export class ZombieManager {
     headGroup.add(nose);
 
     if (isRunner) {
+      // Jagged bony skull crown ridges (Volatile aesthetic)
+      const crownSpurGeo = this.cachedGeo(`h_rcrn_${k}`, () => new THREE.ConeGeometry(0.018 * scale, 0.072 * scale, 5));
+      [-0.068, -0.025, 0.025, 0.068].forEach((cx, ci) => {
+        const spur = new THREE.Mesh(crownSpurGeo, this.boneMat);
+        spur.position.set(cx * scale, 0.145 * scale, (-0.01 + (ci === 1 || ci === 2 ? 0.02 : -0.02)) * scale);
+        spur.rotation.set(-0.35, 0, cx * -2.6);
+        headGroup.add(spur);
+      });
+
+      // Recessed dark throat cavity + bloody upper maxilla gums & fangs
       const throat = new THREE.Mesh(
-        this.cachedGeo(`h_rthr_${k}`, () => new THREE.SphereGeometry(0.075 * scale, 8, 8)),
+        this.cachedGeo(`h_rthr_${k}`, () => new THREE.SphereGeometry(0.072 * scale, 10, 8)),
         this.socketMat,
       );
-      throat.position.set(0, -0.095 * scale, 0.08 * scale);
-      throat.scale.set(1.0, 1.1, 0.75);
+      throat.position.set(0, -0.088 * scale, 0.078 * scale);
+      throat.scale.set(1.05, 1.15, 0.75);
       headGroup.add(throat);
 
-      const mandGeo = this.cachedGeo(`h_rmand_${k}`, () => new THREE.CapsuleGeometry(0.038 * scale, 0.1 * scale, 4, 8));
-      const fangGeo = this.cachedGeo(`h_rfang_${k}`, () => new THREE.ConeGeometry(0.011 * scale, 0.044 * scale, 5));
+      const upperGum = new THREE.Mesh(
+        this.cachedGeo(`h_rugum_${k}`, () => new THREE.TorusGeometry(0.056 * scale, 0.015 * scale, 5, 10, Math.PI)),
+        this.gumMat,
+      );
+      upperGum.rotation.x = Math.PI / 2;
+      upperGum.position.set(0, -0.048 * scale, 0.086 * scale);
+      headGroup.add(upperGum);
+
+      const fangGeo = this.cachedGeo(`h_rfang_${k}`, () => new THREE.ConeGeometry(0.011 * scale, 0.046 * scale, 5));
+      [-0.046, -0.02, 0.02, 0.046].forEach((fx) => {
+        const uFang = new THREE.Mesh(fangGeo, this.teethMat);
+        uFang.rotation.x = Math.PI;
+        uFang.position.set(fx * scale, -0.064 * scale, 0.132 * scale);
+        headGroup.add(uFang);
+      });
+
+      // Splayed Split Lower Mandibles (outer chitinous armor ridge + bloody inner flesh + jagged fangs)
+      const mandGeo = this.cachedGeo(`h_rmand_${k}`, () => new THREE.CapsuleGeometry(0.036 * scale, 0.115 * scale, 5, 8));
+      const mandPlateGeo = this.cachedGeo(`h_rmplt_${k}`, () => new THREE.CapsuleGeometry(0.024 * scale, 0.095 * scale, 4, 8));
       [-1, 1].forEach((side) => {
         const mandible = new THREE.Mesh(mandGeo, this.runnerTornMat);
-        mandible.position.set(side * 0.075 * scale, -0.115 * scale, 0.09 * scale);
-        mandible.rotation.z = side * -0.38;
-        mandible.rotation.x = 0.25;
+        mandible.position.set(side * 0.074 * scale, -0.105 * scale, 0.088 * scale);
+        mandible.rotation.z = side * -0.44;
+        mandible.rotation.x = 0.28;
         headGroup.add(mandible);
 
-        for (let f = 0; f < 3; f++) {
+        const outerPlate = new THREE.Mesh(mandPlateGeo, this.nightCarapaceMat);
+        outerPlate.position.set(side * 0.016 * scale, -0.005 * scale, -0.008 * scale);
+        mandible.add(outerPlate);
+
+        for (let f = 0; f < 4; f++) {
           const fang = new THREE.Mesh(fangGeo, this.teethMat);
-          fang.position.set(side * -0.022 * scale, (0.025 - f * 0.032) * scale, 0.032 * scale);
-          fang.rotation.z = side * 1.15;
+          fang.position.set(side * -0.024 * scale, (0.032 - f * 0.026) * scale, 0.03 * scale);
+          fang.rotation.z = side * 1.18;
           mandible.add(fang);
         }
       });
     } else {
       const mouthCav = new THREE.Mesh(
-        this.cachedGeo(`h_mcav_${k}`, () => new THREE.SphereGeometry(0.058 * scale, 8, 6)),
+        this.cachedGeo(`h_mcav_${k}`, () => new THREE.SphereGeometry(0.056 * scale, 8, 6)),
         this.socketMat,
       );
-      mouthCav.scale.set(1.25, 0.75, 0.6);
-      mouthCav.position.set(0, -0.075 * scale, 0.115 * scale);
+      mouthCav.scale.set(1.22, 0.8, 0.6);
+      mouthCav.position.set(0, -0.072 * scale, 0.112 * scale);
       headGroup.add(mouthCav);
 
+      // Bloody upper & lower gums framing broken teeth
+      const gumArcGeo = this.cachedGeo(`h_zgum_${k}`, () => new THREE.TorusGeometry(0.048 * scale, 0.012 * scale, 5, 10, Math.PI));
+      const uGum = new THREE.Mesh(gumArcGeo, this.gumMat);
+      uGum.rotation.x = Math.PI / 2;
+      uGum.position.set(0, -0.044 * scale, 0.095 * scale);
+      headGroup.add(uGum);
+
       const jaw = new THREE.Mesh(
-        this.cachedGeo(`h_jaw_${k}`, () => new THREE.CapsuleGeometry(0.045 * scale, 0.09 * scale, 4, 8)),
+        this.cachedGeo(`h_jaw_${k}`, () => new THREE.CapsuleGeometry(0.046 * scale, 0.078 * scale, 5, 10)),
         skinMat,
       );
       jaw.rotation.z = Math.PI / 2;
-      jaw.rotation.y = 0.06;
-      jaw.position.set(0, -0.115 * scale, 0.072 * scale);
+      jaw.rotation.y = 0.05;
+      jaw.position.set(0, -0.112 * scale, 0.088 * scale);
       headGroup.add(jaw);
 
-      const toothGeo = this.cachedGeo(`h_tooth_${k}`, () => new THREE.ConeGeometry(0.009 * scale, 0.022 * scale, 4));
-      [-0.038 * scale, -0.013 * scale, 0.013 * scale, 0.038 * scale].forEach((tx) => {
+      // Crimson blood smear down chin
+      const chinBlood = new THREE.Mesh(
+        this.cachedGeo(`h_cblood_${k}`, () => new THREE.SphereGeometry(0.044 * scale, 8, 6)),
+        this.gumMat,
+      );
+      chinBlood.scale.set(1.05, 0.85, 0.55);
+      chinBlood.position.set(0, -0.108 * scale, 0.122 * scale);
+      headGroup.add(chinBlood);
+
+      const toothGeo = this.cachedGeo(`h_tooth_${k}`, () => new THREE.ConeGeometry(0.0085 * scale, 0.022 * scale, 4));
+      [-0.038 * scale, -0.014 * scale, 0.014 * scale, 0.038 * scale].forEach((tx, idx) => {
         const uTooth = new THREE.Mesh(toothGeo, this.teethMat);
         uTooth.rotation.x = Math.PI;
+        uTooth.rotation.z = (idx - 1.5) * 0.08;
         uTooth.position.set(tx, -0.056 * scale, 0.132 * scale);
         headGroup.add(uTooth);
 
         const lTooth = new THREE.Mesh(toothGeo, this.teethMat);
-        lTooth.position.set(tx, -0.095 * scale, 0.122 * scale);
+        lTooth.rotation.z = (idx - 1.5) * -0.06;
+        lTooth.position.set(tx, -0.092 * scale, 0.124 * scale);
         headGroup.add(lTooth);
       });
     }
@@ -675,31 +977,31 @@ export class ZombieManager {
     pelvisMesh.scale.set(1, 1, 0.78);
     pelvisGroup.add(pelvisMesh);
 
-    // Articulated Digitigrade-leaning Muscular Legs
-    const leftLegRig = this.buildArticulatedLeg(scale, this.runnerMuscleMat, this.runnerPaleMat, this.runnerPaleMat, 0.105 * scale);
+    // Articulated Digitigrade-leaning Muscular Legs with Iridescent Chitin Armor Plates
+    const leftLegRig = this.buildArticulatedLeg(scale, this.nightCarapaceMat, this.nightCarapaceMat, this.runnerPaleMat, 0.105 * scale);
     leftLegRig.hip.position.set(-0.15 * scale, -0.02 * scale, 0);
     pelvisGroup.add(leftLegRig.hip);
 
-    const rightLegRig = this.buildArticulatedLeg(scale, this.runnerMuscleMat, this.runnerPaleMat, this.runnerPaleMat, 0.105 * scale);
+    const rightLegRig = this.buildArticulatedLeg(scale, this.nightCarapaceMat, this.nightCarapaceMat, this.runnerPaleMat, 0.105 * scale);
     rightLegRig.hip.position.set(0.15 * scale, -0.02 * scale, 0);
     pelvisGroup.add(rightLegRig.hip);
 
-    // Hunched Hyper-Muscular Spine & Tapered Flayed Torso
+    // Hunched Hyper-Muscular Spine & Tapered Flayed Torso (Volatile Silhouette)
     const spineGroup = new THREE.Group();
     spineGroup.position.set(0, 0.08 * scale, 0.02 * scale);
     spineGroup.rotation.x = 0.34;
     pelvisGroup.add(spineGroup);
 
     const abdomen = new THREE.Mesh(
-      this.cachedGeo('nh_abd', () => new THREE.CapsuleGeometry(0.175 * scale, 0.24 * scale, 5, 12)),
+      this.cachedGeo('nh_abd', () => new THREE.CapsuleGeometry(0.172 * scale, 0.24 * scale, 5, 12)),
       this.runnerPaleMat,
     );
     abdomen.position.y = 0.16 * scale;
-    abdomen.scale.set(1.08, 1, 0.78);
+    abdomen.scale.set(1.06, 1, 0.78);
     spineGroup.add(abdomen);
 
     const chest = new THREE.Mesh(
-      this.cachedGeo('nh_chest', () => new THREE.CapsuleGeometry(0.245 * scale, 0.3 * scale, 5, 12)),
+      this.cachedGeo('nh_chest', () => new THREE.CapsuleGeometry(0.242 * scale, 0.3 * scale, 5, 12)),
       this.runnerMuscleMat,
     );
     chest.position.set(0, 0.42 * scale, 0.03 * scale);
@@ -707,40 +1009,63 @@ export class ZombieManager {
     chest.castShadow = true;
     spineGroup.add(chest);
 
-    // Torn Crimson Deltoid Craters + Dorsal Bone Horns
-    const craterGeo = this.cachedGeo('nh_crater', () => new THREE.SphereGeometry(0.115 * scale, 10, 8));
-    const trapHornGeo = this.cachedGeo('nh_thorn', () => new THREE.ConeGeometry(0.042 * scale, 0.26 * scale, 6));
-    [-0.29 * scale, 0.29 * scale].forEach((sx, idx) => {
-      const crater = new THREE.Mesh(craterGeo, this.runnerTornMat);
-      crater.position.set(sx, 0.53 * scale, 0.02 * scale);
-      spineGroup.add(crater);
+    // Pale flayed sternum / pectoral fascia overlay across front chest
+    const sternum = new THREE.Mesh(
+      this.cachedGeo('nh_sternum', () => new THREE.CapsuleGeometry(0.16 * scale, 0.18 * scale, 5, 10)),
+      this.runnerPaleMat,
+    );
+    sternum.position.set(0, 0.41 * scale, 0.105 * scale);
+    sternum.scale.set(1.24, 1, 0.48);
+    spineGroup.add(sternum);
+
+    // Iridescent Dark Slate-Blue Chitinous Back Carapace & Broad Armored Shoulder Plates
+    const backCarapace = new THREE.Mesh(
+      this.cachedGeo('nh_bplate', () => new THREE.CapsuleGeometry(0.225 * scale, 0.28 * scale, 5, 12)),
+      this.nightCarapaceMat,
+    );
+    backCarapace.position.set(0, 0.44 * scale, -0.068 * scale);
+    backCarapace.scale.set(1.26, 1, 0.56);
+    backCarapace.castShadow = true;
+    spineGroup.add(backCarapace);
+
+    const shoulderPlateGeo = this.cachedGeo('nh_splate', () => new THREE.SphereGeometry(0.145 * scale, 10, 8));
+    const trapHornGeo = this.cachedGeo('nh_thorn', () => new THREE.ConeGeometry(0.038 * scale, 0.24 * scale, 6));
+    [-0.295 * scale, 0.295 * scale].forEach((sx, idx) => {
+      const shoulderPlate = new THREE.Mesh(shoulderPlateGeo, this.nightCarapaceMat);
+      shoulderPlate.position.set(sx, 0.54 * scale, 0.01 * scale);
+      shoulderPlate.scale.set(1.12, 0.88, 1.05);
+      shoulderPlate.castShadow = true;
+      spineGroup.add(shoulderPlate);
 
       const trapHorn = new THREE.Mesh(trapHornGeo, this.boneMat);
-      trapHorn.position.set(sx * 0.85, 0.68 * scale, -0.07 * scale);
-      trapHorn.rotation.set(-0.48, 0, idx === 0 ? 0.34 : -0.34);
+      trapHorn.position.set(sx * 0.88, 0.66 * scale, -0.05 * scale);
+      trapHorn.rotation.set(-0.42, 0, idx === 0 ? 0.42 : -0.42);
       spineGroup.add(trapHorn);
     });
 
     // Exposed Curved Dorsal Spine Horns
-    const spineHornGeo = this.cachedGeo('nh_shorn', () => new THREE.ConeGeometry(0.036 * scale, 0.2 * scale, 6));
-    [0.54, 0.41, 0.28, 0.15].forEach((sy, idx) => {
+    const spineHornGeo = this.cachedGeo('nh_shorn', () => new THREE.ConeGeometry(0.034 * scale, 0.19 * scale, 6));
+    [0.56, 0.44, 0.32, 0.20, 0.09].forEach((sy, idx) => {
       const spineHorn = new THREE.Mesh(spineHornGeo, this.boneMat);
-      spineHorn.scale.y = 1.1 - idx * 0.1;
-      spineHorn.position.set(0, sy * scale, -0.18 * scale);
-      spineHorn.rotation.x = -1.12 - idx * 0.1;
+      spineHorn.scale.y = 1.12 - idx * 0.09;
+      spineHorn.position.set(0, sy * scale, -0.185 * scale);
+      spineHorn.rotation.x = -1.14 - idx * 0.08;
       spineGroup.add(spineHorn);
     });
 
-    // Protruding Lower Rib Hooks
-    const ribHookGeo = this.cachedGeo('nh_rhook', () => new THREE.ConeGeometry(0.03 * scale, 0.21 * scale, 6));
-    [-0.17 * scale, 0.17 * scale].forEach((rx, idx) => {
-      const ribHook = new THREE.Mesh(ribHookGeo, this.boneMat);
-      ribHook.position.set(rx, 0.22 * scale, 0.15 * scale);
-      ribHook.rotation.set(0.95, 0, idx === 0 ? -0.45 : 0.45);
-      spineGroup.add(ribHook);
+    // Prominent Jagged Pale Bone Rib-Spurs Erupting Outward from Both Lower Torso Flanks (ref image_899097b3!)
+    const ribHookGeo = this.cachedGeo('nh_rhook', () => new THREE.ConeGeometry(0.034 * scale, 0.24 * scale, 6));
+    [-1, 1].forEach((side) => {
+      for (let r = 0; r < 3; r++) {
+        const ribHook = new THREE.Mesh(ribHookGeo, this.boneMat);
+        ribHook.scale.setScalar(1.08 - r * 0.16);
+        ribHook.position.set(side * (0.19 - r * 0.015) * scale, (0.28 - r * 0.075) * scale, (0.12 - r * 0.02) * scale);
+        ribHook.rotation.set(0.45 + r * 0.12, 0, side * (-1.05 - r * 0.12));
+        spineGroup.add(ribHook);
+      }
     });
 
-    // Neck + Anatomical Pale Head with Split Mandibles
+    // Neck + Anatomical Head with Skull Crown Spikes & Split Mandibles
     const neck = new THREE.Mesh(
       this.cachedGeo('nh_neck', () => new THREE.CylinderGeometry(0.075 * scale, 0.095 * scale, 0.14 * scale, 10)),
       this.runnerPaleMat,
@@ -759,12 +1084,12 @@ export class ZombieManager {
     headGroup.rotation.x = -0.22;
     spineGroup.add(headGroup);
 
-    // Asymmetrical Mutated Articulated Arms
+    // Asymmetrical Mutated Articulated Arms with Dark Slate-Blue Chitin Forearm Carapace
     const leftArmRig = this.buildArticulatedArm(
       -1,
       scale,
-      this.runnerMuscleMat,
-      this.runnerPaleMat,
+      this.nightCarapaceMat,
+      this.nightCarapaceMat,
       this.runnerPaleMat,
       0.098 * scale,
       true,
@@ -775,8 +1100,8 @@ export class ZombieManager {
     const rightArmRig = this.buildArticulatedArm(
       1,
       scale,
-      this.runnerMuscleMat,
-      this.runnerPaleMat,
+      this.nightCarapaceMat,
+      this.nightCarapaceMat,
       this.runnerPaleMat,
       0.084 * scale,
       true,
@@ -796,6 +1121,12 @@ export class ZombieManager {
       trailHistory.push(new THREE.Vector3(x, y + 0.95, z));
     }
 
+    group.traverse((child) => {
+      if (child instanceof THREE.Mesh && child.material !== this.shadowMat) {
+        child.castShadow = true;
+        child.receiveShadow = true;
+      }
+    });
     this.scene.add(group);
 
     const id = this.nextId++;
@@ -838,7 +1169,10 @@ export class ZombieManager {
       isElite,
       flankAngle: ((id % 5) - 2) * 0.36,
       pounceCooldown: 1.5,
+      targetHeight: isElite ? 2.3 : 2.18,
+      targetRadius: 0.54,
     };
+    this.attachGltfVisual(actor);
     this.zombies.push(actor);
     return actor;
   }
@@ -850,7 +1184,7 @@ export class ZombieManager {
     // Variant 0 = Exposed-Ribs Doberman, 1 = Spiked Chained Alpha, 2 = Flayed Rabid Stray
     const scale = variant === 1 ? 1.24 : variant === 0 ? 1.06 : 0.98;
     const hideMat = this.dogHideMats[variant % this.dogHideMats.length];
-    const eyeMat = this.dogEyeMat;
+    const eyeMat = variant === 1 ? this.dogEyeMat : this.dogMilkEyeMat;
     const dk = scale.toFixed(2);
 
     // Oval Ground Contact Shadow (shared unit plane scaled by dog size)
@@ -878,14 +1212,14 @@ export class ZombieManager {
     pelvisMesh.castShadow = true;
     pelvisGroup.add(pelvisMesh);
 
-    // Raw torn flesh wound patch on left haunch
-    const haunchWound = new THREE.Mesh(
-      this.cachedGeo(`dog_wnd_${dk}`, () => new THREE.SphereGeometry(0.105 * scale, 10, 8)),
-      this.dogFleshMat,
-    );
-    haunchWound.scale.set(0.45, 0.85, 1.15);
-    haunchWound.position.set(-0.115 * scale, 0.03 * scale, -0.02 * scale);
-    pelvisGroup.add(haunchWound);
+    // Raw torn striated flesh wound patches on both haunches (ref image_1c1166cd)
+    const haunchWoundGeo = this.cachedGeo(`dog_wnd_${dk}`, () => new THREE.SphereGeometry(0.108 * scale, 10, 8));
+    [-1, 1].forEach((side, idx) => {
+      const haunchWound = new THREE.Mesh(haunchWoundGeo, this.dogFleshMat);
+      haunchWound.scale.set(0.42, 0.92, 1.18);
+      haunchWound.position.set(side * 0.118 * scale, 0.02 * scale, (idx === 0 ? -0.02 : 0.01) * scale);
+      pelvisGroup.add(haunchWound);
+    });
 
     // Articulated Tail (cropped nub for Doberman, curved mangy/spiked tail for Alpha & Stray)
     const dogTail = new THREE.Group();
@@ -934,31 +1268,37 @@ export class ZombieManager {
     loin.castShadow = true;
     spineGroup.add(loin);
 
-    // Deep Barrel Ribcage / Chest
+    // Deep Barrel Ribcage / Chest (slightly indented laterally so exposed rib cavity reads crisply)
     const chest = new THREE.Mesh(
-      this.cachedGeo(`dog_chst_${dk}`, () => new THREE.CapsuleGeometry(0.205 * scale, 0.34 * scale, 5, 12)),
+      this.cachedGeo(`dog_chst_${dk}`, () => new THREE.CapsuleGeometry(0.195 * scale, 0.34 * scale, 5, 12)),
       hideMat,
     );
     chest.rotation.x = Math.PI / 2 + 0.12;
     chest.position.set(0, 0.04 * scale, 0.38 * scale);
-    chest.scale.set(0.88, 1.0, 1.18);
+    chest.scale.set(0.84, 1.0, 1.18);
     chest.castShadow = true;
     spineGroup.add(chest);
 
-    // EXPOSED FLAYED RIBCAGE ON BOTH FLANKS
-    const flankCavityGeo = this.cachedGeo(`dog_flank_${dk}`, () => new THREE.SphereGeometry(0.15 * scale, 10, 8));
-    const ribGeo = this.cachedGeo(`dog_rib_${dk}`, () => new THREE.TorusGeometry(0.142 * scale, 0.013 * scale, 5, 10, Math.PI * 0.72));
+    // EXPOSED HOLLOWED THORACIC RIBCAGE ON BOTH FLANKS (dark cavity + crimson torn rim + 5 curved ribs!)
+    const flankRimGeo = this.cachedGeo(`dog_flank_${dk}`, () => new THREE.SphereGeometry(0.155 * scale, 10, 8));
+    const flankInnerGeo = this.cachedGeo(`dog_finn_${dk}`, () => new THREE.SphereGeometry(0.132 * scale, 10, 8));
+    const ribGeo = this.cachedGeo(`dog_rib_${dk}`, () => new THREE.TorusGeometry(0.138 * scale, 0.0125 * scale, 5, 12, Math.PI * 0.78));
     [-1, 1].forEach((side) => {
-      const flankCavity = new THREE.Mesh(flankCavityGeo, this.dogFleshMat);
-      flankCavity.scale.set(0.32, 0.85, 1.38);
-      flankCavity.position.set(side * 0.155 * scale, 0.0 * scale, 0.34 * scale);
-      spineGroup.add(flankCavity);
+      const flankRim = new THREE.Mesh(flankRimGeo, this.dogFleshMat);
+      flankRim.scale.set(0.28, 0.86, 1.38);
+      flankRim.position.set(side * 0.145 * scale, 0.005 * scale, 0.34 * scale);
+      spineGroup.add(flankRim);
+
+      const flankInner = new THREE.Mesh(flankInnerGeo, this.socketMat);
+      flankInner.scale.set(0.24, 0.72, 1.18);
+      flankInner.position.set(side * 0.156 * scale, 0.005 * scale, 0.34 * scale);
+      spineGroup.add(flankInner);
 
       for (let r = 0; r < 5; r++) {
         const rib = new THREE.Mesh(ribGeo, this.boneMat);
-        rib.position.set(side * 0.055 * scale, 0.01 * scale, (0.22 + r * 0.058) * scale);
+        rib.position.set(side * 0.052 * scale, 0.018 * scale, (0.22 + r * 0.056) * scale);
         rib.rotation.y = side * (Math.PI * 0.5);
-        rib.rotation.x = 0.25;
+        rib.rotation.x = 0.24;
         spineGroup.add(rib);
       }
     });
@@ -1010,14 +1350,22 @@ export class ZombieManager {
     neck.castShadow = true;
     spineGroup.add(neck);
 
-    // Flayed Throat Muscle Strip
+    // Flayed Throat & Side-Neck Muscle Strips (matches ref image_1c1166cd)
     const throatTear = new THREE.Mesh(
-      this.cachedGeo(`dog_thr_${dk}`, () => new THREE.CapsuleGeometry(0.068 * scale, 0.18 * scale, 4, 10)),
+      this.cachedGeo(`dog_thr_${dk}`, () => new THREE.CapsuleGeometry(0.072 * scale, 0.19 * scale, 4, 10)),
       this.dogFleshMat,
     );
     throatTear.position.set(0, 0.15 * scale, 0.61 * scale);
     throatTear.rotation.x = 0.65;
     spineGroup.add(throatTear);
+
+    const neckSideTearGeo = this.cachedGeo(`dog_nst_${dk}`, () => new THREE.CapsuleGeometry(0.054 * scale, 0.17 * scale, 4, 8));
+    [-1, 1].forEach((side) => {
+      const neckSideTear = new THREE.Mesh(neckSideTearGeo, this.dogFleshMat);
+      neckSideTear.position.set(side * 0.095 * scale, 0.21 * scale, 0.56 * scale);
+      neckSideTear.rotation.x = 0.62;
+      spineGroup.add(neckSideTear);
+    });
 
     // Rusted Collar & Heavy Draped Broken Chain Loops (Variant 0 & 1!)
     if (variant !== 2) {
@@ -1122,22 +1470,29 @@ export class ZombieManager {
     nose.position.set(0, 0.005 * scale, 0.285 * scale);
     headGroup.add(nose);
 
-    // Flayed cheek jowls exposing upper teeth
-    const jowlGeo = this.cachedGeo(`dog_jowl_${dk}`, () => new THREE.CapsuleGeometry(0.022 * scale, 0.12 * scale, 4, 8));
-    [-0.048 * scale, 0.048 * scale].forEach((jx) => {
-      const jowl = new THREE.Mesh(jowlGeo, this.dogFleshMat);
+    // Flayed cheek jowls & bloody upper gums exposing teeth
+    const jowlGeo = this.cachedGeo(`dog_jowl_${dk}`, () => new THREE.CapsuleGeometry(0.024 * scale, 0.13 * scale, 4, 8));
+    [-0.046 * scale, 0.046 * scale].forEach((jx) => {
+      const jowl = new THREE.Mesh(jowlGeo, this.gumMat);
       jowl.rotation.x = Math.PI / 2;
-      jowl.position.set(jx, -0.026 * scale, 0.17 * scale);
+      jowl.position.set(jx, -0.026 * scale, 0.175 * scale);
       headGroup.add(jowl);
     });
 
-    // Upper Canine Fangs & Molars
-    const uFangGeo = this.cachedGeo(`dog_ufang_${dk}`, () => new THREE.ConeGeometry(0.011 * scale, 0.048 * scale, 5));
+    // Upper Canine Fangs, Front Incisors & Molars
+    const uFangGeo = this.cachedGeo(`dog_ufang_${dk}`, () => new THREE.ConeGeometry(0.011 * scale, 0.05 * scale, 5));
     [-0.036, 0.036].forEach((fx) => {
       const upperFang = new THREE.Mesh(uFangGeo, this.teethMat);
       upperFang.rotation.x = Math.PI;
-      upperFang.position.set(fx * scale, -0.048 * scale, 0.25 * scale);
+      upperFang.position.set(fx * scale, -0.048 * scale, 0.252 * scale);
       headGroup.add(upperFang);
+    });
+    const incisorGeo = this.cachedGeo(`dog_inc_${dk}`, () => new THREE.ConeGeometry(0.006 * scale, 0.022 * scale, 4));
+    [-0.018, -0.006, 0.006, 0.018].forEach((ix) => {
+      const inc = new THREE.Mesh(incisorGeo, this.teethMat);
+      inc.rotation.x = Math.PI;
+      inc.position.set(ix * scale, -0.038 * scale, 0.268 * scale);
+      headGroup.add(inc);
     });
     const molarGeo = this.cachedGeo(`dog_mol_${dk}`, () => new THREE.ConeGeometry(0.008 * scale, 0.026 * scale, 5));
     [-0.038, 0.038].forEach((mx) => {
@@ -1149,10 +1504,10 @@ export class ZombieManager {
       }
     });
 
-    // Articulated Hinged Lower Jaw + Lower Fangs + Lolling Crimson Tongue
+    // Articulated Hinged Lower Jaw + Bloody Gums + Lower Fangs + Lolling Crimson Tongue
     const dogJaw = new THREE.Group();
     dogJaw.position.set(0, -0.048 * scale, 0.08 * scale);
-    dogJaw.rotation.x = 0.22;
+    dogJaw.rotation.x = 0.24;
     headGroup.add(dogJaw);
 
     const lowerJawMesh = new THREE.Mesh(
@@ -1164,6 +1519,15 @@ export class ZombieManager {
     lowerJawMesh.position.set(0, -0.014 * scale, 0.095 * scale);
     dogJaw.add(lowerJawMesh);
 
+    const lowerGumRim = new THREE.Mesh(
+      this.cachedGeo(`dog_lgum_${dk}`, () => new THREE.CapsuleGeometry(0.035 * scale, 0.13 * scale, 4, 8)),
+      this.gumMat,
+    );
+    lowerGumRim.rotation.x = Math.PI / 2;
+    lowerGumRim.scale.set(0.86, 1.0, 0.38);
+    lowerGumRim.position.set(0, 0.002 * scale, 0.102 * scale);
+    dogJaw.add(lowerGumRim);
+
     const tongue = new THREE.Mesh(
       this.cachedGeo(`dog_tng_${dk}`, () => new THREE.CapsuleGeometry(0.024 * scale, 0.1 * scale, 4, 8)),
       this.dogFleshMat,
@@ -1173,10 +1537,10 @@ export class ZombieManager {
     tongue.position.set(0, 0.008 * scale, 0.11 * scale);
     dogJaw.add(tongue);
 
-    const lFangGeo = this.cachedGeo(`dog_lfang_${dk}`, () => new THREE.ConeGeometry(0.01 * scale, 0.044 * scale, 5));
+    const lFangGeo = this.cachedGeo(`dog_lfang_${dk}`, () => new THREE.ConeGeometry(0.01 * scale, 0.046 * scale, 5));
     [-0.03, 0.03].forEach((fx) => {
       const lowerFang = new THREE.Mesh(lFangGeo, this.teethMat);
-      lowerFang.position.set(fx * scale, 0.018 * scale, 0.165 * scale);
+      lowerFang.position.set(fx * scale, 0.02 * scale, 0.165 * scale);
       dogJaw.add(lowerFang);
     });
 
@@ -1198,7 +1562,7 @@ export class ZombieManager {
     const dPawGeo = this.cachedGeo(`dog_lpw_${dk}`, () => new THREE.SphereGeometry(0.054 * scale, 10, 8));
     const dClawGeo = this.cachedGeo(`dog_lcl_${dk}`, () => new THREE.ConeGeometry(0.009 * scale, 0.042 * scale, 5));
 
-    const buildQuadrupedLeg = (isFront: boolean): { upper: THREE.Group; lower: THREE.Group } => {
+    const buildQuadrupedLeg = (isFront: boolean, sideSign: -1 | 1): { upper: THREE.Group; lower: THREE.Group } => {
       const upper = new THREE.Group();
 
       const upperMesh = new THREE.Mesh(
@@ -1213,11 +1577,26 @@ export class ZombieManager {
       upperMesh.castShadow = true;
       upper.add(upperMesh);
 
+      // Striated raw exposed crimson muscle tear along outer shoulder/foreleg & hind thigh (ref image_1c1166cd)
+      if (isFront || sideSign === -1) {
+        const legMuscle = new THREE.Mesh(
+          this.cachedGeo(
+            `dog_lmusc_${dk}_${isFront ? 'f' : 'b'}`,
+            () => new THREE.CapsuleGeometry((isFront ? 0.046 : 0.054) * scale, 0.21 * scale, 4, 8),
+          ),
+          this.dogFleshMat,
+        );
+        legMuscle.position.set(sideSign * 0.042 * scale, -0.14 * scale, (isFront ? 0.01 : 0.04) * scale);
+        legMuscle.rotation.x = isFront ? 0.22 : -0.34;
+        legMuscle.scale.set(0.65, 1, 0.85);
+        upper.add(legMuscle);
+      }
+
       const lower = new THREE.Group();
       lower.position.set(0, -0.28 * scale, isFront ? -0.04 * scale : 0.08 * scale);
       upper.add(lower);
 
-      const joint = new THREE.Mesh(dJointGeo, hideMat);
+      const joint = new THREE.Mesh(dJointGeo, isFront ? this.dogFleshMat : hideMat);
       lower.add(joint);
 
       const midLen = 0.23 * scale;
@@ -1245,31 +1624,37 @@ export class ZombieManager {
       lower.add(paw);
 
       [-0.026, 0, 0.026].forEach((cx) => {
-        const claw = new THREE.Mesh(dClawGeo, this.boneMat);
-        claw.rotation.x = Math.PI * 0.45;
-        claw.position.set(cx * scale, -0.01 * scale, 0.058 * scale);
+        const claw = new THREE.Mesh(dClawGeo, this.dogClawMat);
+        claw.rotation.x = Math.PI * 0.46;
+        claw.position.set(cx * scale, -0.012 * scale, 0.058 * scale);
         paw.add(claw);
       });
 
       return { upper, lower };
     };
 
-    const frontLeft = buildQuadrupedLeg(true);
+    const frontLeft = buildQuadrupedLeg(true, -1);
     frontLeft.upper.position.set(-0.155 * scale, -0.02 * scale, 0.46 * scale);
     spineGroup.add(frontLeft.upper);
 
-    const frontRight = buildQuadrupedLeg(true);
+    const frontRight = buildQuadrupedLeg(true, 1);
     frontRight.upper.position.set(0.155 * scale, -0.02 * scale, 0.46 * scale);
     spineGroup.add(frontRight.upper);
 
-    const backLeft = buildQuadrupedLeg(false);
+    const backLeft = buildQuadrupedLeg(false, -1);
     backLeft.upper.position.set(-0.145 * scale, -0.01 * scale, -0.02 * scale);
     pelvisGroup.add(backLeft.upper);
 
-    const backRight = buildQuadrupedLeg(false);
+    const backRight = buildQuadrupedLeg(false, 1);
     backRight.upper.position.set(0.145 * scale, -0.01 * scale, -0.02 * scale);
     pelvisGroup.add(backRight.upper);
 
+    group.traverse((child) => {
+      if (child instanceof THREE.Mesh && child.material !== this.shadowMat) {
+        child.castShadow = true;
+        child.receiveShadow = true;
+      }
+    });
     this.scene.add(group);
 
     const hp = variant === 1 ? 115 : 85;
@@ -1318,7 +1703,10 @@ export class ZombieManager {
       dogJaw,
       dogTail,
       dogBaseHeight: baseHeight,
+      targetHeight: variant === 1 ? 1.24 : 1.05,
+      targetRadius: 0.42,
     };
+    this.attachGltfVisual(actor);
     this.zombies.push(actor);
     return actor;
   }
@@ -1437,6 +1825,17 @@ export class ZombieManager {
     tornHem.castShadow = true;
     spineGroup.add(tornHem);
 
+    // Torn bloodied chest/shoulder laceration exposing raw flesh on shamblers & brutes
+    if (!isHazmat) {
+      const chestGash = new THREE.Mesh(
+        this.cachedGeo(`z_gash_${zk}`, () => new THREE.SphereGeometry(0.115 * scale, 8, 6)),
+        this.dogFleshMat,
+      );
+      chestGash.scale.set(1.15, 0.85, 0.45);
+      chestGash.position.set((this.nextId % 2 === 0 ? 0.06 : -0.06) * scale, 0.41 * scale, 0.135 * scale);
+      spineGroup.add(chestGash);
+    }
+
     // Exposed Necrotic Neck & Anatomical Head
     const neck = new THREE.Mesh(
       this.cachedGeo(`z_neck_${zk}`, () => new THREE.CylinderGeometry(0.064 * scale, 0.08 * scale, 0.13 * scale, 10)),
@@ -1495,6 +1894,12 @@ export class ZombieManager {
       leftArmRig.elbow.add(vambrace);
     }
 
+    group.traverse((child) => {
+      if (child instanceof THREE.Mesh && child.material !== this.shadowMat) {
+        child.castShadow = true;
+        child.receiveShadow = true;
+      }
+    });
     this.scene.add(group);
 
     const hp = kind === 'brute' ? 190 : 112;
@@ -1540,7 +1945,10 @@ export class ZombieManager {
       isClimbing: false,
       flankAngle: ((id % 5) - 2) * 0.36,
       pounceCooldown: 0,
+      targetHeight: kind === 'brute' ? 2.55 : 1.8,
+      targetRadius: kind === 'brute' ? 0.65 : 0.45,
     };
+    this.attachGltfVisual(actor);
     this.zombies.push(actor);
     return actor;
   }
@@ -1625,6 +2033,7 @@ export class ZombieManager {
   public resetAll(): void {
     this.nightSpawned = false;
     this.zombies.forEach((z) => {
+      this.cleanupActorMixer(z);
       this.scene.remove(z.group);
       z.trailMeshes.forEach((tm) => this.scene.remove(tm));
     });
@@ -1763,7 +2172,14 @@ export class ZombieManager {
         z.stateTimer += dt;
         const fallT = Math.min(1, z.stateTimer / 0.38);
         const ease = 1 - Math.pow(1 - fallT, 2);
-        if (z.kind === 'dog') {
+        if (z.gltfRoot && z.mixer) {
+          if (z.walkAction) z.walkAction.paused = true;
+          if (z.attackAction) z.attackAction.paused = true;
+          z.group.rotation.x = -ease * (Math.PI * 0.48);
+          z.group.rotation.z = z.hitReactDir * ease * 0.24;
+          z.group.position.y = Math.max(0.16, z.pos.y * (1 - ease));
+          z.gltfRoot.rotation.set(0, 0, 0);
+        } else if (z.kind === 'dog') {
           // Quadruped side collapse onto the ground
           const sideSign = z.hitReactDir || 1;
           z.group.rotation.z = sideSign * ease * (Math.PI * 0.48);
@@ -1796,6 +2212,12 @@ export class ZombieManager {
           z.vel.set(0, 0, 0);
           z.group.rotation.set(0, z.yaw, 0);
           z.group.position.copy(z.pos);
+          if (z.gltfRoot) {
+            z.gltfRoot.rotation.set(0, 0, 0);
+            if (z.walkAction) z.walkAction.paused = false;
+            if (z.attackAction) z.attackAction.paused = false;
+            this.setActorClip(z, 'walk', 0.12);
+          }
           z.leftKnee.rotation.x = 0;
           z.rightKnee.rotation.x = 0;
           z.leftShoulder.rotation.set(0, 0, 0);
@@ -2006,9 +2428,34 @@ export class ZombieManager {
         z.vel.y = 0;
       }
 
-      // Natural Multi-Joint Articulated Locomotion (Quadruped Gallop vs. Humanoid Stride)
+      // GLTF Skeletal Animation Playback ('Walk' / 'Attack' clips) OR Procedural Fallback
       const moveMag = Math.hypot(z.vel.x, z.vel.z);
-      if (z.kind === 'dog') {
+      if (z.gltfRoot && z.mixer) {
+        if (z.state === 'windup' || z.state === 'recover') {
+          this.setActorClip(z, 'attack', 0.12);
+          if (z.attackAction) {
+            z.attackAction.timeScale = z.kind === 'brute' ? 0.9 : z.kind === 'runner' || z.kind === 'dog' ? 1.25 : 1.05;
+          }
+          z.gltfRoot.rotation.set(0, 0, 0);
+        } else if (z.state === 'stunned') {
+          this.setActorClip(z, 'walk', 0.14);
+          if (z.walkAction) {
+            z.walkAction.timeScale = 0.22;
+          }
+          const snap = z.hitReactTimer > 0 ? Math.sin((z.hitReactTimer / 0.34) * Math.PI) : 0;
+          z.gltfRoot.rotation.set(-0.24 * snap, 0, z.hitReactDir * 0.18 * snap);
+        } else {
+          this.setActorClip(z, 'walk', 0.18);
+          if (z.walkAction) {
+            z.walkAction.timeScale =
+              z.state === 'chase'
+                ? THREE.MathUtils.clamp(moveMag / 2.2, 0.9, 2.3)
+                : THREE.MathUtils.clamp(moveMag / 2.2, 0.48, 0.9);
+          }
+          z.gltfRoot.rotation.set(0, 0, 0);
+        }
+        z.mixer.update(dt);
+      } else if (z.kind === 'dog') {
         if (z.state !== 'windup' && z.state !== 'stunned') {
           z.animPhase += dt * (3.2 + moveMag * 2.2);
           const amp = Math.min(0.85, moveMag * 0.16 + 0.14);
@@ -2221,7 +2668,9 @@ export class ZombieManager {
   }
 
   public dispose(): void {
+    this.disposed = true;
     this.zombies.forEach((z) => {
+      this.cleanupActorMixer(z);
       this.scene.remove(z.group);
       z.trailMeshes.forEach((tm) => this.scene.remove(tm));
     });

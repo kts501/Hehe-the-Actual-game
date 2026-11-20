@@ -252,6 +252,13 @@ export class AllySurvivor {
     this.leftLegGroup = buildLeg(-1);
     this.rightLegGroup = buildLeg(1);
 
+    this.mesh.traverse((child) => {
+      if (child instanceof THREE.Mesh) {
+        child.castShadow = true;
+        child.receiveShadow = true;
+      }
+    });
+
     scene.add(this.mesh);
   }
 
@@ -428,7 +435,7 @@ export class AllySurvivor {
       considerTarget({ kind: 'zombie', actor: z }, z.pos.x, z.pos.y, z.pos.z);
     }
 
-    this.targetEnemy = bestTarget;
+    this.targetEnemy = bestTarget as AllyTargetRef | null;
     this.state = bestTarget ? 'COMBAT' : this.commandMode;
 
     // -------------------------------------------------------------------------

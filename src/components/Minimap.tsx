@@ -96,7 +96,7 @@ export const Minimap: React.FC<MinimapProps> = ({ hud }) => {
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const dpr = 1;
     if (canvas.width !== MAP_W * dpr || canvas.height !== MAP_H * dpr) {
       canvas.width = MAP_W * dpr;
       canvas.height = MAP_H * dpr;

@@ -40,6 +40,35 @@ const CAM_TILT_RAD = 0.67; // ~38.4 deg pitch-down oblique 3D GTA angle
 const COS_TILT = Math.cos(CAM_TILT_RAD);
 const SIN_TILT = Math.sin(CAM_TILT_RAD);
 
+// Pre-partitioned static map lists & reusable scratch buffers (eliminates per-frame GC churn)
+const LOW_TERRACES: MapBuilding3D[] = AGRA_BUILDINGS_3D.filter((b) => b.maxY <= 3.01);
+const TALL_BUILDINGS: MapBuilding3D[] = AGRA_BUILDINGS_3D.filter((b) => b.maxY > 3.01);
+
+interface BuildingSortEntry {
+  b: MapBuilding3D;
+  depth: number;
+}
+interface DomeSortEntry {
+  d: MapDome3D;
+  depth: number;
+}
+
+const _terraceSortBuf: BuildingSortEntry[] = LOW_TERRACES.map((b) => ({ b, depth: 0 }));
+const _tallSortBuf: BuildingSortEntry[] = TALL_BUILDINGS.map((b) => ({ b, depth: 0 }));
+const _domeSortBuf: DomeSortEntry[] = AGRA_DOMES_3D.map((d) => ({ d, depth: 0 }));
+
+const _quadScratch: Vec3[] = [
+  { x: 0, y: 0, z: 0 },
+  { x: 0, y: 0, z: 0 },
+  { x: 0, y: 0, z: 0 },
+  { x: 0, y: 0, z: 0 },
+];
+
+const TERRITORY_RING_SEGS = 22;
+const _ringScratch: Vec3[] = Array.from({ length: TERRITORY_RING_SEGS }, () => ({ x: 0, y: 0.14, z: 0 }));
+const _ringCos = Array.from({ length: TERRITORY_RING_SEGS }, (_, s) => Math.cos((s / TERRITORY_RING_SEGS) * Math.PI * 2));
+const _ringSin = Array.from({ length: TERRITORY_RING_SEGS }, (_, s) => Math.sin((s / TERRITORY_RING_SEGS) * Math.PI * 2));
+
 function toCameraSpace(
   wx: number,
   wy: number,
@@ -382,18 +411,31 @@ function draw3DDomeOrMinaret(
   if (radPx < 1.2) return;
 
   if (d.isMinaret) {
-    // Tapered minaret shaft + crown cupola
+    // Tapered minaret shaft + crown cupola (flat two-tone shade, zero per-frame gradient alloc)
     ctx.beginPath();
     ctx.moveTo(baseScr.x - radPx, baseScr.y);
     ctx.lineTo(topScr.x - radPx * 0.55, topScr.y);
     ctx.lineTo(topScr.x + radPx * 0.55, topScr.y);
     ctx.lineTo(baseScr.x + radPx, baseScr.y);
     ctx.closePath();
-    const grad = ctx.createLinearGradient(baseScr.x - radPx, 0, baseScr.x + radPx, 0);
-    grad.addColorStop(0, d.color);
-    grad.addColorStop(1, d.shadeColor);
-    ctx.fillStyle = grad;
+    ctx.fillStyle = d.color;
     ctx.fill();
+
+    ctx.beginPath();
+    ctx.moveTo(baseScr.x, baseScr.y);
+    ctx.lineTo(topScr.x, topScr.y);
+    ctx.lineTo(topScr.x + radPx * 0.55, topScr.y);
+    ctx.lineTo(baseScr.x + radPx, baseScr.y);
+    ctx.closePath();
+    ctx.fillStyle = d.shadeColor;
+    ctx.fill();
+
+    ctx.beginPath();
+    ctx.moveTo(baseScr.x - radPx, baseScr.y);
+    ctx.lineTo(topScr.x - radPx * 0.55, topScr.y);
+    ctx.lineTo(topScr.x + radPx * 0.55, topScr.y);
+    ctx.lineTo(baseScr.x + radPx, baseScr.y);
+    ctx.closePath();
     ctx.strokeStyle = 'rgba(15, 23, 42, 0.32)';
     ctx.lineWidth = 0.7;
     ctx.stroke();
@@ -403,7 +445,7 @@ function draw3DDomeOrMinaret(
     ctx.fillStyle = d.color;
     ctx.fill();
   } else {
-    // Bulbous Mughal Onion Dome + golden kalash spire
+    // Bulbous Mughal Onion Dome + golden kalash spire (two-tone highlight, zero gradient alloc)
     const midY = (baseScr.y + topScr.y) * 0.55;
     const bulgeR = radPx * 1.1;
     ctx.beginPath();
@@ -425,15 +467,26 @@ function draw3DDomeOrMinaret(
       baseScr.y,
     );
     ctx.closePath();
-    const grad = ctx.createLinearGradient(baseScr.x - radPx, topScr.y, baseScr.x + radPx, baseScr.y);
-    grad.addColorStop(0, '#ffffff');
-    grad.addColorStop(0.55, d.color);
-    grad.addColorStop(1, d.shadeColor);
-    ctx.fillStyle = grad;
+    ctx.fillStyle = d.color;
     ctx.fill();
     ctx.strokeStyle = 'rgba(15, 23, 42, 0.3)';
     ctx.lineWidth = 0.8;
     ctx.stroke();
+
+    // Sunlit marble crescent highlight on left flank
+    ctx.beginPath();
+    ctx.moveTo(baseScr.x, baseScr.y);
+    ctx.bezierCurveTo(
+      baseScr.x - bulgeR * 0.72,
+      midY,
+      topScr.x - radPx * 0.25,
+      topScr.y + 3,
+      topScr.x,
+      topScr.y,
+    );
+    ctx.closePath();
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.32)';
+    ctx.fill();
 
     // Kalash finial spire
     ctx.beginPath();
@@ -625,14 +678,22 @@ function render3DMinimap(
       y = 0.45;
     }
 
+    _quadScratch[0].x = f.x - hw;
+    _quadScratch[0].y = y;
+    _quadScratch[0].z = f.z - hd;
+    _quadScratch[1].x = f.x + hw;
+    _quadScratch[1].y = y;
+    _quadScratch[1].z = f.z - hd;
+    _quadScratch[2].x = f.x + hw;
+    _quadScratch[2].y = y;
+    _quadScratch[2].z = f.z + hd;
+    _quadScratch[3].x = f.x - hw;
+    _quadScratch[3].y = y;
+    _quadScratch[3].z = f.z + hd;
+
     drawProjectedPoly(
       ctx,
-      [
-        { x: f.x - hw, y, z: f.z - hd },
-        { x: f.x + hw, y, z: f.z - hd },
-        { x: f.x + hw, y, z: f.z + hd },
-        { x: f.x - hw, y, z: f.z + hd },
-      ],
+      _quadScratch,
       px,
       py,
       pz,
@@ -649,19 +710,13 @@ function render3DMinimap(
   if (telemetry.territories && telemetry.territories.length > 0) {
     for (let ti = 0; ti < telemetry.territories.length; ti++) {
       const t = telemetry.territories[ti];
-      const segs = 22;
-      const ringPts: Vec3[] = [];
-      for (let s = 0; s < segs; s++) {
-        const ang = (s / segs) * Math.PI * 2;
-        ringPts.push({
-          x: t.x + Math.cos(ang) * t.radius,
-          y: 0.14,
-          z: t.z + Math.sin(ang) * t.radius,
-        });
+      for (let s = 0; s < TERRITORY_RING_SEGS; s++) {
+        _ringScratch[s].x = t.x + _ringCos[s] * t.radius;
+        _ringScratch[s].z = t.z + _ringSin[s] * t.radius;
       }
       drawProjectedPoly(
         ctx,
-        ringPts,
+        _ringScratch,
         px,
         py,
         pz,
@@ -767,33 +822,37 @@ function render3DMinimap(
     ctx.restore();
   }
 
-  // 3. Painter-Sorted 3D Extruded Buildings (terraces first, then buildings back-to-front)
-  const lowTerraces = AGRA_BUILDINGS_3D.filter((b) => b.maxY <= 3.01);
-  const tallBuildings = AGRA_BUILDINGS_3D.filter((b) => b.maxY > 3.01);
+  // 3. Painter-Sorted 3D Extruded Buildings (terraces first, then buildings back-to-front, zero GC)
+  for (let i = 0; i < _terraceSortBuf.length; i++) {
+    const entry = _terraceSortBuf[i];
+    const b = entry.b;
+    entry.depth = toCameraSpace(b.x, (b.minY + b.maxY) * 0.5, b.z, px, py, pz, cosYaw, sinYaw).depth;
+  }
+  _terraceSortBuf.sort((a, b) => b.depth - a.depth);
+  for (let i = 0; i < _terraceSortBuf.length; i++) {
+    draw3DBuilding(ctx, _terraceSortBuf[i].b, px, py, pz, cosYaw, sinYaw, w, h, focal, isNight);
+  }
 
-  lowTerraces
-    .map((b) => ({
-      b,
-      depth: toCameraSpace(b.x, (b.minY + b.maxY) * 0.5, b.z, px, py, pz, cosYaw, sinYaw).depth,
-    }))
-    .sort((a, b) => b.depth - a.depth)
-    .forEach(({ b }) => draw3DBuilding(ctx, b, px, py, pz, cosYaw, sinYaw, w, h, focal, isNight));
-
-  tallBuildings
-    .map((b) => ({
-      b,
-      depth: toCameraSpace(b.x, (b.minY + b.maxY) * 0.5, b.z, px, py, pz, cosYaw, sinYaw).depth,
-    }))
-    .sort((a, b) => b.depth - a.depth)
-    .forEach(({ b }) => draw3DBuilding(ctx, b, px, py, pz, cosYaw, sinYaw, w, h, focal, isNight));
+  for (let i = 0; i < _tallSortBuf.length; i++) {
+    const entry = _tallSortBuf[i];
+    const b = entry.b;
+    entry.depth = toCameraSpace(b.x, (b.minY + b.maxY) * 0.5, b.z, px, py, pz, cosYaw, sinYaw).depth;
+  }
+  _tallSortBuf.sort((a, b) => b.depth - a.depth);
+  for (let i = 0; i < _tallSortBuf.length; i++) {
+    draw3DBuilding(ctx, _tallSortBuf[i].b, px, py, pz, cosYaw, sinYaw, w, h, focal, isNight);
+  }
 
   // 4. Taj Mahal Domes & Corner Minarets (back-to-front)
-  AGRA_DOMES_3D.map((d) => ({
-    d,
-    depth: toCameraSpace(d.x, d.baseY, d.z, px, py, pz, cosYaw, sinYaw).depth,
-  }))
-    .sort((a, b) => b.depth - a.depth)
-    .forEach(({ d }) => draw3DDomeOrMinaret(ctx, d, px, py, pz, cosYaw, sinYaw, w, h, focal));
+  for (let i = 0; i < _domeSortBuf.length; i++) {
+    const entry = _domeSortBuf[i];
+    const d = entry.d;
+    entry.depth = toCameraSpace(d.x, d.baseY, d.z, px, py, pz, cosYaw, sinYaw).depth;
+  }
+  _domeSortBuf.sort((a, b) => b.depth - a.depth);
+  for (let i = 0; i < _domeSortBuf.length; i++) {
+    draw3DDomeOrMinaret(ctx, _domeSortBuf[i].d, px, py, pz, cosYaw, sinYaw, w, h, focal);
+  }
 
   // 5. Elevated 3D Ziplines
   ctx.save();
@@ -1186,8 +1245,12 @@ export const DualMinimaps: React.FC<DualMinimapsProps> = ({
   const hudRef = useRef<HudSnapshot>(hud);
   const getterRef = useRef(getLiveMinimapTelemetry);
 
+  const size3dRef = useRef({ w: 224, h: 124 });
+  const size2dRef = useRef({ w: 224, h: 124 });
+
   useEffect(() => {
-    hudRef.current = hud;
+    const hudVal = hud;
+    hudRef.current = hudVal;
   }, [hud]);
 
   useEffect(() => {
@@ -1195,45 +1258,72 @@ export const DualMinimaps: React.FC<DualMinimapsProps> = ({
   }, [getLiveMinimapTelemetry]);
 
   useEffect(() => {
+    const c3d = canvas3dRef.current;
+    const c2d = canvas2dRef.current;
+    if (!c3d || !c2d) return;
+
+    const updateCanvasSize = (canvas: HTMLCanvasElement, targetRef: React.MutableRefObject<{ w: number; h: number }>) => {
+      const cssW = Math.max(120, Math.round(canvas.clientWidth || 224));
+      const cssH = Math.max(70, Math.round(canvas.clientHeight || 124));
+      targetRef.current.w = cssW;
+      targetRef.current.h = cssH;
+      // Strictly cap minimap canvas DPR to 1.0 to eliminate 4x pixel fill-rate on Intel HD 4600
+      if (canvas.width !== cssW || canvas.height !== cssH) {
+        canvas.width = cssW;
+        canvas.height = cssH;
+      }
+    };
+
+    updateCanvasSize(c3d, size3dRef);
+    updateCanvasSize(c2d, size2dRef);
+
+    let ro: ResizeObserver | null = null;
+    if (typeof ResizeObserver !== 'undefined') {
+      ro = new ResizeObserver(() => {
+        if (canvas3dRef.current) updateCanvasSize(canvas3dRef.current, size3dRef);
+        if (canvas2dRef.current) updateCanvasSize(canvas2dRef.current, size2dRef);
+      });
+      ro.observe(c3d);
+      ro.observe(c2d);
+    }
+
+    const ctx3d = c3d.getContext('2d');
+    const ctx2d = c2d.getContext('2d');
     let rafId = 0;
     const startMs = performance.now();
+    let lastDrawMs = -1000;
+    // Pace DualMinimaps to ~24 Hz (42ms) to cut secondary canvas bandwidth by 60%
+    const MINIMAP_INTERVAL_MS = 42;
 
     const drawFrame = (now: number) => {
-      const c3d = canvas3dRef.current;
-      const c2d = canvas2dRef.current;
+      rafId = requestAnimationFrame(drawFrame);
+      if (document.hidden || now - lastDrawMs < MINIMAP_INTERVAL_MS) {
+        return;
+      }
+      lastDrawMs = now;
+
       const currentHud = hudRef.current;
       const telemetry = getterRef.current?.() ?? currentHud.minimap;
+      if (!telemetry) return;
 
-      if (c3d && c2d && telemetry) {
-        const dpr = Math.min(window.devicePixelRatio || 1, 2);
-        const elapsedSec = (now - startMs) * 0.001;
-
-        for (const [canvas, renderer] of [
-          [c3d, render3DMinimap],
-          [c2d, render2DMinimap],
-        ] as const) {
-          const rect = canvas.getBoundingClientRect();
-          const cssW = Math.max(120, Math.round(rect.width));
-          const cssH = Math.max(70, Math.round(rect.height));
-          const targetW = Math.round(cssW * dpr);
-          const targetH = Math.round(cssH * dpr);
-          if (canvas.width !== targetW || canvas.height !== targetH) {
-            canvas.width = targetW;
-            canvas.height = targetH;
-          }
-          const ctx = canvas.getContext('2d');
-          if (ctx) {
-            ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-            renderer(ctx, cssW, cssH, telemetry, currentHud.isNight, elapsedSec);
-          }
-        }
+      const elapsedSec = (now - startMs) * 0.001;
+      if (ctx3d) {
+        const { w, h } = size3dRef.current;
+        ctx3d.setTransform(1, 0, 0, 1, 0, 0);
+        render3DMinimap(ctx3d, w, h, telemetry, currentHud.isNight, elapsedSec);
       }
-
-      rafId = requestAnimationFrame(drawFrame);
+      if (ctx2d) {
+        const { w, h } = size2dRef.current;
+        ctx2d.setTransform(1, 0, 0, 1, 0, 0);
+        render2DMinimap(ctx2d, w, h, telemetry, currentHud.isNight, elapsedSec);
+      }
     };
 
     rafId = requestAnimationFrame(drawFrame);
-    return () => cancelAnimationFrame(rafId);
+    return () => {
+      cancelAnimationFrame(rafId);
+      ro?.disconnect();
+    };
   }, []);
 
   return (

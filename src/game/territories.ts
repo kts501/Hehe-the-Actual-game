@@ -198,6 +198,8 @@ export class TerritoryManager {
 
     const trimRing = new THREE.Mesh(new THREE.CylinderGeometry(0.74, 0.74, 0.12, 12), pedestalMat);
     trimRing.position.y = 0.72;
+    trimRing.castShadow = true;
+    trimRing.receiveShadow = true;
     group.add(trimRing);
 
     // Tall 6.8m metallic pole (#4a4f55)
@@ -209,6 +211,7 @@ export class TerritoryManager {
     const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.055, 0.08, 6.8, 10), poleMat);
     pole.position.y = 3.4;
     pole.castShadow = true;
+    pole.receiveShadow = true;
     group.add(pole);
 
     // Emissive Top Beacon
@@ -236,6 +239,7 @@ export class TerritoryManager {
     const banner = new THREE.Mesh(bannerGeo, bannerMat);
     banner.position.set(0.06, 1.4, 0);
     banner.castShadow = true;
+    banner.receiveShadow = true;
     group.add(banner);
 
     // Perimeter Boundary Ring (RingGeometry(radius - 0.35, radius, 64))

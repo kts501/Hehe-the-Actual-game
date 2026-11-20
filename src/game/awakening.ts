@@ -803,7 +803,7 @@ export class AwakeningSystem {
     // Outer Ground Blast Ring: RingGeometry(0.5, 1.4, 40) @ y + 0.15
     const primaryGeo = new THREE.RingGeometry(0.5, 1.4, 40);
     const primaryMat = new THREE.MeshBasicMaterial({
-      color: 0xff5500,
+      color: new THREE.Color(2.6, 0.72, 0.06),
       transparent: true,
       opacity: 1.0,
       blending: THREE.AdditiveBlending,
@@ -818,7 +818,7 @@ export class AwakeningSystem {
     // Inner Golden Pressure Ring: RingGeometry(0.3, 0.85, 40) @ y + 0.45
     const secondaryGeo = new THREE.RingGeometry(0.3, 0.85, 40);
     const secondaryMat = new THREE.MeshBasicMaterial({
-      color: 0xffd93b,
+      color: new THREE.Color(2.8, 2.05, 0.35),
       transparent: true,
       opacity: 1.0,
       blending: THREE.AdditiveBlending,

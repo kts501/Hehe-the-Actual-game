@@ -2380,9 +2380,10 @@ export class WeaponAndEffects {
 
     this.shockwaveMat = trackMat(
       new THREE.MeshBasicMaterial({
-        color: 0xf59e0b,
+        color: new THREE.Color(2.4, 1.35, 0.12),
         transparent: true,
         opacity: 0,
+        blending: THREE.AdditiveBlending,
         side: THREE.DoubleSide,
         depthWrite: false,
       }),

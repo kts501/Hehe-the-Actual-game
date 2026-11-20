@@ -418,7 +418,7 @@ export class InfectedEnemy {
 
   // Timers & Reaction Kinematics
   private animPhase = Math.random() * 12;
-  private staggerTimer = 0;
+  public staggerTimer = 0;
   private readonly staggerDuration = 0.35;
   private staggerHeadYaw = 0;
   private staggerHeadPitch = 0;
@@ -499,9 +499,10 @@ export class InfectedEnemy {
       new THREE.MeshStandardMaterial({
         map: textures.zombieSkin,
         bumpMap: textures.zombieSkinBump,
-        bumpScale: 0.024,
+        bumpScale: 0.026,
+        roughnessMap: textures.zombieSkinRoughness,
         color: isElite ? 0x624f4e : InfectedEnemy.BASE_SKIN_HEX,
-        roughness: 0.72,
+        roughness: 0.74,
         metalness: 0.04,
         flatShading: false,
       }),
@@ -511,9 +512,10 @@ export class InfectedEnemy {
       new THREE.MeshStandardMaterial({
         map: textures.zombieSkin,
         bumpMap: textures.zombieSkinBump,
-        bumpScale: 0.02,
+        bumpScale: 0.022,
+        roughnessMap: textures.zombieSkinRoughness,
         color: InfectedEnemy.BASE_BRUISE_HEX,
-        roughness: 0.76,
+        roughness: 0.78,
         metalness: 0.04,
         flatShading: false,
       }),
@@ -550,10 +552,10 @@ export class InfectedEnemy {
 
     const cataractEyeMat = trackMat(
       new THREE.MeshStandardMaterial({
-        color: this.isElite ? 0xff7b29 : 0xd8d2c5,
-        emissive: this.isElite ? 0xff3b14 : 0x331100,
-        emissiveIntensity: this.isElite ? 2.6 : 0.35,
-        roughness: 0.25,
+        color: this.isElite ? 0xffb347 : 0xd8d2c5,
+        emissive: this.isElite ? 0xff6200 : 0x331100,
+        emissiveIntensity: this.isElite ? 2.8 : 0.35,
+        roughness: 0.22,
         metalness: 0.02,
         flatShading: false,
       }),
@@ -656,8 +658,11 @@ export class InfectedEnemy {
     const tunicSlateMat = trackMat(
       new THREE.MeshStandardMaterial({
         map: textures.zombieCloth,
+        bumpMap: textures.clothWrapBump,
+        bumpScale: 0.018,
+        roughnessMap: textures.clothWrapRoughness,
         color: 0x2b282c,
-        roughness: 0.9,
+        roughness: 0.92,
         metalness: 0.03,
         side: THREE.DoubleSide,
         flatShading: false,
@@ -667,8 +672,11 @@ export class InfectedEnemy {
     const tunicMaroonMat = trackMat(
       new THREE.MeshStandardMaterial({
         map: textures.zombieCloth,
+        bumpMap: textures.clothWrapBump,
+        bumpScale: 0.018,
+        roughnessMap: textures.clothWrapRoughness,
         color: 0x3d2224,
-        roughness: 0.88,
+        roughness: 0.9,
         metalness: 0.04,
         side: THREE.DoubleSide,
         flatShading: false,
@@ -678,8 +686,11 @@ export class InfectedEnemy {
     const trouserMat = trackMat(
       new THREE.MeshStandardMaterial({
         map: textures.zombieCloth,
+        bumpMap: textures.clothWrapBump,
+        bumpScale: 0.016,
+        roughnessMap: textures.clothWrapRoughness,
         color: 0x22201e,
-        roughness: 0.92,
+        roughness: 0.94,
         metalness: 0.02,
         side: THREE.DoubleSide,
         flatShading: false,
@@ -1234,6 +1245,13 @@ export class InfectedEnemy {
         damping: 8.5 + (idx % 3) * 1.4,
         sensitivity: 0.045 + (hs.len - 0.08) * 0.28,
       });
+    });
+
+    this.root.traverse((child) => {
+      if (child instanceof THREE.Mesh && child.material !== cataractEyeMat) {
+        child.castShadow = true;
+        child.receiveShadow = true;
+      }
     });
 
     scene.add(this.root);

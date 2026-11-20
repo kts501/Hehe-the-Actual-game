@@ -4,7 +4,9 @@ import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { Pass } from 'three/addons/postprocessing/Pass.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+import { VignetteShader } from 'three/addons/shaders/VignetteShader.js';
 import type {
   AllyNameplate,
   BoxCollider,
@@ -37,6 +39,11 @@ import { InfectedEnemy, type MeleeSwingDirection } from './infectedEnemy';
 import { NightRunner } from './nightRunner';
 import { TerritoryManager, type ActiveTerritoryHudInfo } from './territories';
 import { AllyManager } from './allies';
+import {
+  HD4600Governor,
+  probeGpuHardwareProfile,
+  type GpuHardwareProfile,
+} from './hd4600Governor';
 
 declare global {
   interface Window {
@@ -218,7 +225,12 @@ export class AgraSurvivalEngine {
   private readonly bloomPass: UnrealBloomPass | null = null;
   private readonly scene: THREE.Scene;
   private readonly camera: THREE.PerspectiveCamera;
+  private readonly gpuProfile: GpuHardwareProfile;
+  private readonly governor: HD4600Governor;
   private readonly isSoftwareGl: boolean;
+  private useDirectForward = false;
+  private viewportW = 1280;
+  private viewportH = 720;
   private readonly textures: ProceduralTextureSet;
   private readonly world: WorldBuildResult;
   private readonly viewmodel: WeaponAndEffects;
@@ -246,6 +258,7 @@ export class AgraSurvivalEngine {
   private lastNow = performance.now();
   private elapsed = 0;
   private hudThrottle = 0;
+  private resizeObserver: ResizeObserver | null = null;
 
   // Game & Player state
   private phase: GamePhase = 'start';
@@ -440,28 +453,34 @@ export class AgraSurvivalEngine {
     this.mountEl = mountEl;
     this.onHudUpdate = onHudUpdate;
 
-    // 1. Software WebGL detection
-    this.isSoftwareGl = (() => {
-      const gl = document.createElement('canvas').getContext('webgl2');
-      if (!gl) return true;
-      const ext = gl.getExtension('WEBGL_debug_renderer_info');
-      const param = ext ? ext.UNMASKED_RENDERER_WEBGL : gl.RENDERER;
-      const gpu = String(gl.getParameter(param));
-      gl.getExtension('WEBGL_lose_context')?.loseContext();
-      return /SwiftShader|llvmpipe|softpipe|Software|Basic Render/i.test(gpu);
-    })();
+    // 1. Hardware GPU probe & Intel HD 4600 / Software GL configuration
+    this.gpuProfile = probeGpuHardwareProfile();
+    this.isSoftwareGl = this.gpuProfile.isSoftwareGl;
+    this.governor = new HD4600Governor(this.gpuProfile);
+    this.useDirectForward = this.governor.config.useDirectForward;
+
+    this.viewportW = mountEl.clientWidth || window.innerWidth;
+    this.viewportH = mountEl.clientHeight || window.innerHeight;
 
     this.renderer = new THREE.WebGLRenderer({
-      antialias: !this.isSoftwareGl,
+      antialias: false,
       powerPreference: 'high-performance',
+      stencil: false,
+      depth: true,
+      precision: 'mediump',
     });
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    this.renderer.toneMappingExposure = 1.15;
-    this.renderer.setPixelRatio(this.isSoftwareGl ? 1 : Math.min(window.devicePixelRatio, 1.5));
-    this.renderer.setSize(mountEl.clientWidth || window.innerWidth, mountEl.clientHeight || window.innerHeight);
+    this.renderer.toneMappingExposure = 1.18;
+    // Hard initial pixel ratio cap strictly to 1.0 (overrides Windows 125%/150% DPI scaling on HD 4600)
+    this.renderer.setPixelRatio(1.0);
+    this.renderer.setSize(this.viewportW, this.viewportH);
     this.renderer.shadowMap.enabled = !this.isSoftwareGl;
-    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    this.renderer.shadowMap.type = this.gpuProfile.isIntelIntegrated
+      ? THREE.PCFShadowMap
+      : THREE.PCFSoftShadowMap;
+    this.renderer.shadowMap.autoUpdate = false;
+    this.renderer.shadowMap.needsUpdate = !this.isSoftwareGl;
     this.renderer.domElement.style.display = 'block';
     this.renderer.domElement.style.width = '100%';
     this.renderer.domElement.style.height = '100%';
@@ -477,7 +496,7 @@ export class AgraSurvivalEngine {
 
     this.camera = new THREE.PerspectiveCamera(
       MOVEMENT_CONFIG.BASE_FOV,
-      (mountEl.clientWidth || window.innerWidth) / (mountEl.clientHeight || window.innerHeight),
+      this.viewportW / this.viewportH,
       0.05,
       1400,
     );
@@ -487,10 +506,12 @@ export class AgraSurvivalEngine {
     this.scene.add(this.camera);
 
     // 3. Three-point / Outdoor Golden Dusk-Nightfall Lighting + Player Flashlight
-    this.lighting = new TimeOfDayLightingSystem(this.scene, this.isSoftwareGl);
+    const shadowMapSize = this.gpuProfile.isIntelIntegrated ? 1024 : 2048;
+    this.lighting = new TimeOfDayLightingSystem(this.scene, this.isSoftwareGl, shadowMapSize);
 
     this.flashlight = new THREE.SpotLight(0xfef9c3, 0, 42, Math.PI / 4.2, 0.55, 1.55);
     this.flashlight.castShadow = false;
+    this.flashlight.layers.enable(2);
     this.flashlight.position.set(0.18, -0.08, 0);
     this.flashlightTarget.position.set(0, 0, -12);
     this.camera.add(this.flashlight);
@@ -498,8 +519,14 @@ export class AgraSurvivalEngine {
     this.flashlight.target = this.flashlightTarget;
 
     // 4. Build World, Textures, Viewmodel, Zombies & Intro Controller
-    this.textures = createProceduralTextures(this.renderer.capabilities.getMaxAnisotropy());
-    this.world = buildAgraWorld(this.scene, this.textures, this.isSoftwareGl);
+    const rawMaxAniso = this.renderer.capabilities.getMaxAnisotropy();
+    const tunedAniso = this.gpuProfile.isIntelIntegrated
+      ? Math.min(2, rawMaxAniso)
+      : Math.min(4, rawMaxAniso);
+    this.textures = createProceduralTextures(tunedAniso);
+    this.world = buildAgraWorld(this.scene, this.textures, this.isSoftwareGl, {
+      isIntelIntegrated: this.gpuProfile.isIntelIntegrated,
+    });
     this.viewmodel = new WeaponAndEffects(this.scene, this.camera, this.textures);
     this.viewmodel.setVisible(false);
     this.zombies = new ZombieManager(this.scene, this.textures);
@@ -522,21 +549,35 @@ export class AgraSurvivalEngine {
     });
 
     if (!this.isSoftwareGl) {
-      const w = mountEl.clientWidth || window.innerWidth;
-      const h = mountEl.clientHeight || window.innerHeight;
-      this.composer = new EffectComposer(this.renderer);
-      this.composer.setPixelRatio(this.renderer.getPixelRatio());
-      this.composer.setSize(w, h);
-      this.composer.addPass(new RenderPass(this.scene, this.camera));
-      this.viewmodelPass = new ViewmodelRenderPass(this.scene, this.camera);
-      this.viewmodelPass.enabled = false;
-      this.composer.addPass(this.viewmodelPass);
-      this.bloomPass = new UnrealBloomPass(new THREE.Vector2(w, h), 0.35, 0.4, 0.85);
-      this.composer.addPass(this.bloomPass);
-      this.composer.addPass(new OutputPass());
-      this.camera.layers.enable(2);
-      this.renderer.compile(this.scene, this.camera);
-      this.camera.layers.disable(2);
+      try {
+        const w = this.viewportW;
+        const h = this.viewportH;
+        const bloomW = Math.max(1, Math.floor(w * 0.5));
+        const bloomH = Math.max(1, Math.floor(h * 0.5));
+        this.composer = new EffectComposer(this.renderer);
+        this.composer.setPixelRatio(this.governor.currentPixelRatio);
+        this.composer.setSize(w, h);
+        this.composer.addPass(new RenderPass(this.scene, this.camera));
+        this.viewmodelPass = new ViewmodelRenderPass(this.scene, this.camera);
+        this.viewmodelPass.enabled = false;
+        this.composer.addPass(this.viewmodelPass);
+        // Half-resolution bloom mip chain cuts fragment fill-rate by ~75% while preserving golden-hour glow
+        this.bloomPass = new UnrealBloomPass(new THREE.Vector2(bloomW, bloomH), 0.42, 0.55, 0.82);
+        this.composer.addPass(this.bloomPass);
+        const vignettePass = new ShaderPass(VignetteShader);
+        vignettePass.uniforms['offset'].value = 0.82;
+        vignettePass.uniforms['darkness'].value = 1.0;
+        this.composer.addPass(vignettePass);
+        this.composer.addPass(new OutputPass());
+        this.camera.layers.enable(2);
+        this.renderer.compile(this.scene, this.camera);
+        this.camera.layers.disable(2);
+      } catch {
+        this.composer?.dispose();
+        this.composer = null;
+        this.viewmodelPass = null;
+        this.bloomPass = null;
+      }
     }
 
     this.bindEvents();
@@ -1100,6 +1141,10 @@ export class AgraSurvivalEngine {
 
   private bindEvents(): void {
     window.addEventListener('resize', this.onResize);
+    if (typeof ResizeObserver !== 'undefined') {
+      this.resizeObserver = new ResizeObserver(() => this.onResize());
+      this.resizeObserver.observe(this.mountEl);
+    }
     window.addEventListener('keydown', this.onKeyDown);
     window.addEventListener('keyup', this.onKeyUp);
     window.addEventListener('mouseup', this.onMouseUp);
@@ -1114,6 +1159,8 @@ export class AgraSurvivalEngine {
 
   private unbindEvents(): void {
     window.removeEventListener('resize', this.onResize);
+    this.resizeObserver?.disconnect();
+    this.resizeObserver = null;
     window.removeEventListener('keydown', this.onKeyDown);
     window.removeEventListener('keyup', this.onKeyUp);
     window.removeEventListener('mouseup', this.onMouseUp);
@@ -1137,15 +1184,19 @@ export class AgraSurvivalEngine {
   private onResize = () => {
     const w = this.mountEl.clientWidth || window.innerWidth;
     const h = this.mountEl.clientHeight || window.innerHeight;
+    this.viewportW = w;
+    this.viewportH = h;
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
-    this.renderer.setPixelRatio(this.isSoftwareGl ? 1 : Math.min(window.devicePixelRatio, 1.5));
+    const scale = this.governor.currentPixelRatio;
+    this.renderer.setPixelRatio(scale);
     this.renderer.setSize(w, h);
     if (this.composer && this.bloomPass) {
-      this.composer.setPixelRatio(this.renderer.getPixelRatio());
+      this.composer.setPixelRatio(scale);
       this.composer.setSize(w, h);
-      this.bloomPass.setSize(w, h);
+      this.bloomPass.setSize(Math.max(1, Math.floor(w * 0.5)), Math.max(1, Math.floor(h * 0.5)));
     }
+    this.renderer.shadowMap.needsUpdate = !this.isSoftwareGl;
   };
 
   private onPointerLockChange = () => {
@@ -4568,10 +4619,27 @@ export class AgraSurvivalEngine {
         this.sound.stopContinuousLoops();
       }
 
+      this.governor.sampleFrame(rawDt, (pixelRatio, bloomEnabled, useDirectForward) => {
+        this.useDirectForward = useDirectForward;
+        this.renderer.setPixelRatio(pixelRatio);
+        this.renderer.setSize(this.viewportW, this.viewportH);
+        if (this.composer && this.bloomPass) {
+          this.composer.setPixelRatio(pixelRatio);
+          this.composer.setSize(this.viewportW, this.viewportH);
+          this.bloomPass.setSize(
+            Math.max(1, Math.floor(this.viewportW * 0.5)),
+            Math.max(1, Math.floor(this.viewportH * 0.5)),
+          );
+          this.bloomPass.enabled = bloomEnabled;
+        }
+        this.renderer.shadowMap.needsUpdate = !this.isSoftwareGl;
+      });
+
       this.updateAtmosphere(this.radioOpen ? 0 : dt);
       const showVm = this.phase === 'playing' && !this.isFinisherActive;
       this.viewmodel.setVisible(showVm);
-      if (this.composer) {
+      this.renderer.shadowMap.needsUpdate = this.governor.shouldUpdateShadows(this.isSoftwareGl);
+      if (!this.useDirectForward && this.composer) {
         if (this.viewmodelPass) {
           this.viewmodelPass.enabled = showVm;
         }
@@ -4583,9 +4651,8 @@ export class AgraSurvivalEngine {
         this.renderer.autoClear = true;
         this.renderer.render(this.scene, this.camera);
         if (showVm) {
-          const oldShadowAuto = this.renderer.shadowMap.autoUpdate;
           const prevBg = this.scene.background;
-          this.renderer.shadowMap.autoUpdate = false;
+          this.renderer.shadowMap.needsUpdate = false;
           this.scene.background = null;
           this.camera.layers.set(2);
           this.renderer.autoClear = false;
@@ -4593,7 +4660,6 @@ export class AgraSurvivalEngine {
           this.renderer.render(this.scene, this.camera);
           this.renderer.autoClear = true;
           this.scene.background = prevBg;
-          this.renderer.shadowMap.autoUpdate = oldShadowAuto;
           this.camera.layers.enable(0);
           this.camera.layers.enable(1);
           this.camera.layers.disable(2);
@@ -4601,7 +4667,7 @@ export class AgraSurvivalEngine {
       }
 
       this.hudThrottle += rawDt;
-      if (this.hudThrottle >= 0.04) {
+      if (this.hudThrottle >= 0.066) {
         this.hudThrottle = 0;
         this.emitHud();
       }
@@ -4638,8 +4704,8 @@ export class AgraSurvivalEngine {
   }
 
   private emitHud(): void {
-    const w = this.mountEl.clientWidth || window.innerWidth;
-    const h = this.mountEl.clientHeight || window.innerHeight;
+    const w = this.viewportW;
+    const h = this.viewportH;
     const counterIndicators: CounterIndicator[] = [];
 
     if (this.phase === 'playing' && !this.intro.isIntroPlaying) {
@@ -4919,53 +4985,86 @@ export class AgraSurvivalEngine {
   }
 
   public getLiveMinimapTelemetry(): MinimapTelemetry {
-    return {
-      playerX: this.playerPos.x,
-      playerY: this.playerPos.y,
-      playerZ: this.playerPos.z,
-      playerYaw: this.yaw,
-      crates: this.world.crates.map((c) => ({
+    const crates: MinimapTelemetry['crates'] = [];
+    for (let i = 0; i < this.world.crates.length; i++) {
+      const c = this.world.crates[i];
+      crates.push({
         id: c.id,
         x: c.position.x,
         y: c.position.y,
         z: c.position.z,
         collected: c.collected,
-      })),
-      enemies: [
-        ...this.zombies.zombies
-          .filter((z) => z.state !== 'dead')
-          .map((z) => ({
-            x: z.pos.x,
-            z: z.pos.z,
-            kind: z.kind,
-            alerted: z.state === 'chase' || z.state === 'windup',
-          })),
-        ...this.infectedEnemies
-          .filter((e) => e.aiState !== 'DEAD' && e.aiState !== 'IMPALED_DEAD' && e.aiState !== 'DEAD_RAGDOLL')
-          .map((e) => ({
-            x: e.root.position.x,
-            z: e.root.position.z,
-            kind: 'screamer' as const,
-            alerted: e.aiState === 'CHASE' || e.aiState === 'GRABBED',
-          })),
-        ...this.nightRunners
-          .filter((nr) => nr.state !== 'DEAD')
-          .map((nr) => ({
-            x: nr.group.position.x,
-            z: nr.group.position.z,
-            kind: 'night_runner' as const,
-            alerted: nr.state === 'CHASE' || nr.state === 'ATTACK_MELEE' || nr.state === 'FINISHER_GRAB',
-          })),
-      ],
-      allies: this.allies.allies
-        .filter((a) => a.state !== 'DEAD')
-        .map((a) => ({
-          id: a.id,
-          name: a.name,
-          x: a.mesh.position.x,
-          z: a.mesh.position.z,
-          mode: a.commandMode === 'FOLLOW' ? ('FOLLOW' as const) : ('GUARD' as const),
-        })),
+      });
+    }
+
+    const enemies: MinimapTelemetry['enemies'] = [];
+    const zombies = this.zombies.zombies;
+    for (let i = 0; i < zombies.length; i++) {
+      const z = zombies[i];
+      if (z.state === 'dead') continue;
+      enemies.push({
+        x: z.pos.x,
+        z: z.pos.z,
+        kind: z.kind,
+        alerted: z.state === 'chase' || z.state === 'windup',
+      });
+    }
+    for (let i = 0; i < this.infectedEnemies.length; i++) {
+      const e = this.infectedEnemies[i];
+      if (e.aiState === 'DEAD' || e.aiState === 'IMPALED_DEAD' || e.aiState === 'DEAD_RAGDOLL') continue;
+      enemies.push({
+        x: e.root.position.x,
+        z: e.root.position.z,
+        kind: 'screamer',
+        alerted: e.aiState === 'CHASE' || e.aiState === 'GRABBED',
+      });
+    }
+    for (let i = 0; i < this.nightRunners.length; i++) {
+      const nr = this.nightRunners[i];
+      if (nr.state === 'DEAD') continue;
+      enemies.push({
+        x: nr.group.position.x,
+        z: nr.group.position.z,
+        kind: 'night_runner',
+        alerted: nr.state === 'CHASE' || nr.state === 'ATTACK_MELEE' || nr.state === 'FINISHER_GRAB',
+      });
+    }
+
+    const allies: NonNullable<MinimapTelemetry['allies']> = [];
+    for (let i = 0; i < this.allies.allies.length; i++) {
+      const a = this.allies.allies[i];
+      if (a.state === 'DEAD') continue;
+      allies.push({
+        id: a.id,
+        name: a.name,
+        x: a.mesh.position.x,
+        z: a.mesh.position.z,
+        mode: a.commandMode === 'FOLLOW' ? 'FOLLOW' : 'GUARD',
+      });
+    }
+
+    const territories: NonNullable<MinimapTelemetry['territories']> = [];
+    for (let i = 0; i < this.territories.sectors.length; i++) {
+      const s = this.territories.sectors[i];
+      territories.push({
+        id: s.data.id,
+        name: s.data.name,
+        x: s.data.center.x,
+        z: s.data.center.z,
+        radius: s.data.radius,
+        captured: s.data.captured,
+        progress: s.data.progress,
+      });
+    }
+
+    return {
+      playerX: this.playerPos.x,
+      playerY: this.playerPos.y,
+      playerZ: this.playerPos.z,
+      playerYaw: this.yaw,
+      crates,
+      enemies,
+      allies,
       tajGate: {
         x: this.world.tajGateCenter.x,
         z: this.world.tajGateCenter.z,
@@ -4974,15 +5073,7 @@ export class AgraSurvivalEngine {
         x: this.world.guardTowerCenter.x,
         z: this.world.guardTowerCenter.z,
       },
-      territories: this.territories.sectors.map((s) => ({
-        id: s.data.id,
-        name: s.data.name,
-        x: s.data.center.x,
-        z: s.data.center.z,
-        radius: s.data.radius,
-        captured: s.data.captured,
-        progress: s.data.progress,
-      })),
+      territories,
     };
   }
 
@@ -5373,7 +5464,7 @@ export class AgraSurvivalEngine {
         const nx = sec.id === 'sector_mausoleum' ? ox : sec.center.x + ox;
         const nz = sec.id === 'sector_mausoleum' ? oz : sec.center.z + oz;
         const ny = this.sampleTerritoryFloorY(nx, nz);
-        const nr = new NightRunner(nextNrId++, nx, ny, nz, this.scene);
+        const nr = new NightRunner(nextNrId++, nx, ny, nz, this.scene, this.textures);
         nr.territoryId = sec.id;
         this.nightRunners.push(nr);
         sec.nightRunnerIds.push(nr.id);

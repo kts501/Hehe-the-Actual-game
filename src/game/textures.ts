@@ -61,7 +61,38 @@ export interface ProceduralTextureSet {
   railwayIcfBlue: THREE.CanvasTexture;
   railwayCreamExpress: THREE.CanvasTexture;
   railwayGaribGreen: THREE.CanvasTexture;
+  marbleBump: THREE.CanvasTexture;
+  marbleRoughness: THREE.CanvasTexture;
+  sandstoneBump: THREE.CanvasTexture;
+  sandstoneRoughness: THREE.CanvasTexture;
+  grassBump: THREE.CanvasTexture;
+  grassRoughness: THREE.CanvasTexture;
+  waterRippleBump: THREE.CanvasTexture;
+  zombieSkinRoughness: THREE.CanvasTexture;
+  dogFurRoughness: THREE.CanvasTexture;
+  nightHunterCarapace: THREE.CanvasTexture;
+  nightHunterCarapaceBump: THREE.CanvasTexture;
+  nightHunterCarapaceRoughness: THREE.CanvasTexture;
+  bazaarWallBump: THREE.CanvasTexture;
+  bazaarWallRoughness: THREE.CanvasTexture;
+  woodBump: THREE.CanvasTexture;
+  rustedMetalBump: THREE.CanvasTexture;
+  rustedMetalRoughness: THREE.CanvasTexture;
   dispose: () => void;
+}
+
+export interface ProceduralPBRTextureBundle {
+  marbleMap: THREE.CanvasTexture;
+  marbleBump: THREE.CanvasTexture;
+  marbleRoughness: THREE.CanvasTexture;
+  sandstoneMap: THREE.CanvasTexture;
+  sandstoneBump: THREE.CanvasTexture;
+  sandstoneRoughness: THREE.CanvasTexture;
+  grassMap: THREE.CanvasTexture;
+  grassBump: THREE.CanvasTexture;
+  grassRoughness: THREE.CanvasTexture;
+  waterMap: THREE.CanvasTexture;
+  waterRippleBump: THREE.CanvasTexture;
 }
 
 function finalizeTexture(
@@ -96,164 +127,704 @@ function finalizeLinearTexture(
   return tex;
 }
 
+function hash2D(ix: number, iy: number, seed: number): number {
+  const n = Math.sin(ix * 127.1 + iy * 311.7 + seed * 74.7) * 43758.5453123;
+  return n - Math.floor(n);
+}
+
+function tileableValueNoise(u: number, v: number, freq: number, seed: number): number {
+  const fx = u * freq;
+  const fy = v * freq;
+  const ix0 = Math.floor(fx);
+  const iy0 = Math.floor(fy);
+  const tx = fx - ix0;
+  const ty = fy - iy0;
+  const sx = tx * tx * (3 - 2 * tx);
+  const sy = ty * ty * (3 - 2 * ty);
+
+  const x0 = ((ix0 % freq) + freq) % freq;
+  const y0 = ((iy0 % freq) + freq) % freq;
+  const x1 = (x0 + 1) % freq;
+  const y1 = (y0 + 1) % freq;
+
+  const n00 = hash2D(x0, y0, seed);
+  const n10 = hash2D(x1, y0, seed);
+  const n01 = hash2D(x0, y1, seed);
+  const n11 = hash2D(x1, y1, seed);
+
+  const nx0 = n00 + (n10 - n00) * sx;
+  const nx1 = n01 + (n11 - n01) * sx;
+  return nx0 + (nx1 - nx0) * sy;
+}
+
+function fbmTileable(u: number, v: number, baseFreq: number, octaves: number, seed: number): number {
+  let sum = 0;
+  let amp = 0.5;
+  let freq = baseFreq;
+  let norm = 0;
+  for (let o = 0; o < octaves; o++) {
+    sum += tileableValueNoise(u, v, freq, seed + o * 19.3) * amp;
+    norm += amp;
+    amp *= 0.5;
+    freq *= 2;
+  }
+  return sum / norm;
+}
+
+export function createProceduralPBRTextures(maxAnisotropy = 8): ProceduralPBRTextureBundle {
+  const SIZE = 512;
+  const aniso = Math.max(1, Math.min(8, maxAnisotropy));
+
+  const setupColorTex = (canvas: HTMLCanvasElement, rx: number, ry: number): THREE.CanvasTexture => {
+    const tex = new THREE.CanvasTexture(canvas);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    tex.wrapS = THREE.RepeatWrapping;
+    tex.wrapT = THREE.RepeatWrapping;
+    tex.repeat.set(rx, ry);
+    tex.anisotropy = aniso;
+    tex.needsUpdate = true;
+    return tex;
+  };
+
+  const setupDataTex = (canvas: HTMLCanvasElement, rx: number, ry: number): THREE.CanvasTexture => {
+    const tex = new THREE.CanvasTexture(canvas);
+    tex.colorSpace = THREE.NoColorSpace;
+    tex.wrapS = THREE.RepeatWrapping;
+    tex.wrapT = THREE.RepeatWrapping;
+    tex.repeat.set(rx, ry);
+    tex.anisotropy = aniso;
+    tex.needsUpdate = true;
+    return tex;
+  };
+
+  // ---------------------------------------------------------------------------
+  // 1. Agra White Makrana Marble (512x512 Albedo + Bump + Polished Roughness)
+  // ---------------------------------------------------------------------------
+  const marbleAlbCanvas = document.createElement('canvas');
+  marbleAlbCanvas.width = SIZE;
+  marbleAlbCanvas.height = SIZE;
+  const maCtx = marbleAlbCanvas.getContext('2d')!;
+  const maImg = maCtx.createImageData(SIZE, SIZE);
+
+  const marbleBumpCanvas = document.createElement('canvas');
+  marbleBumpCanvas.width = SIZE;
+  marbleBumpCanvas.height = SIZE;
+  const mbCtx = marbleBumpCanvas.getContext('2d')!;
+  const mbImg = mbCtx.createImageData(SIZE, SIZE);
+
+  const marbleRoughCanvas = document.createElement('canvas');
+  marbleRoughCanvas.width = SIZE;
+  marbleRoughCanvas.height = SIZE;
+  const mrCtx = marbleRoughCanvas.getContext('2d')!;
+  const mrImg = mrCtx.createImageData(SIZE, SIZE);
+
+  // Base #f5efe6 = (245, 239, 230), Veins #d6cec2 = (214, 206, 194)
+  for (let y = 0; y < SIZE; y++) {
+    const v = y / SIZE;
+    for (let x = 0; x < SIZE; x++) {
+      const u = x / SIZE;
+      const idx = (y * SIZE + x) * 4;
+
+      const fbm1 = fbmTileable(u, v, 4, 4, 11.7);
+      const fbm2 = fbmTileable(u, v, 8, 3, 37.2);
+      // Organic mineral vein turbulence using multi-octave noise + sine warp
+      const veinWave = Math.abs(Math.sin((u * 2.0 + v * 1.0 + fbm1 * 2.15) * Math.PI * 2));
+      const primaryVein = Math.pow(1.0 - veinWave, 7.5);
+      const fineWave = Math.abs(Math.sin((u * 4.0 - v * 3.0 + fbm2 * 2.6) * Math.PI * 2));
+      const secondaryVein = Math.pow(1.0 - fineWave, 10.0) * 0.6;
+      const veinFactor = Math.min(1, primaryVein * 0.85 + secondaryVein + (fbm2 - 0.5) * 0.14);
+
+      const goldHint = Math.max(0, fbm1 - 0.52) * 0.35;
+      const r = Math.round(245 - veinFactor * 31 - goldHint * 8);
+      const g = Math.round(239 - veinFactor * 33 - goldHint * 14);
+      const b = Math.round(230 - veinFactor * 36 - goldHint * 24);
+
+      maImg.data[idx] = Math.max(0, Math.min(255, r));
+      maImg.data[idx + 1] = Math.max(0, Math.min(255, g));
+      maImg.data[idx + 2] = Math.max(0, Math.min(255, b));
+      maImg.data[idx + 3] = 255;
+
+      // Subtle mineral bump & polished roughness (~0.22 => ~56/255)
+      const bVal = Math.round(132 - veinFactor * 26 + (fbm2 - 0.5) * 14);
+      mbImg.data[idx] = bVal;
+      mbImg.data[idx + 1] = bVal;
+      mbImg.data[idx + 2] = bVal;
+      mbImg.data[idx + 3] = 255;
+
+      const rVal = Math.round(220 + veinFactor * 35); // scaled by material.roughness=0.22
+      mrImg.data[idx] = Math.min(255, rVal);
+      mrImg.data[idx + 1] = Math.min(255, rVal);
+      mrImg.data[idx + 2] = Math.min(255, rVal);
+      mrImg.data[idx + 3] = 255;
+    }
+  }
+  maCtx.putImageData(maImg, 0, 0);
+  mbCtx.putImageData(mbImg, 0, 0);
+  mrCtx.putImageData(mrImg, 0, 0);
+
+  // Inlaid Mughal geometric border trim & slab seams on Makrana marble
+  maCtx.strokeStyle = 'rgba(182, 168, 148, 0.48)';
+  maCtx.lineWidth = 2;
+  mbCtx.strokeStyle = 'rgb(74, 74, 74)';
+  mbCtx.lineWidth = 2.5;
+  mrCtx.strokeStyle = 'rgb(255, 255, 255)';
+  mrCtx.lineWidth = 2.5;
+  for (let i = 0; i <= SIZE; i += 128) {
+    [maCtx, mbCtx, mrCtx].forEach((ctx) => {
+      ctx.beginPath();
+      ctx.moveTo(0, i);
+      ctx.lineTo(SIZE, i);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(i, 0);
+      ctx.lineTo(i, SIZE);
+      ctx.stroke();
+    });
+  }
+  // Delicate Mughal pietra dura geometric border trim band
+  maCtx.strokeStyle = 'rgba(164, 146, 120, 0.42)';
+  maCtx.lineWidth = 1.5;
+  maCtx.strokeRect(10, 10, SIZE - 20, SIZE - 20);
+  maCtx.strokeStyle = 'rgba(130, 118, 104, 0.35)';
+  maCtx.strokeRect(18, 18, SIZE - 36, SIZE - 36);
+  for (let k = 32; k < SIZE; k += 64) {
+    maCtx.beginPath();
+    maCtx.moveTo(k, 10);
+    maCtx.lineTo(k + 8, 14);
+    maCtx.lineTo(k, 18);
+    maCtx.lineTo(k - 8, 14);
+    maCtx.closePath();
+    maCtx.stroke();
+  }
+
+  const marbleMap = setupColorTex(marbleAlbCanvas, 3, 3);
+  const marbleBump = setupDataTex(marbleBumpCanvas, 3, 3);
+  const marbleRoughness = setupDataTex(marbleRoughCanvas, 3, 3);
+
+  // ---------------------------------------------------------------------------
+  // 2. Red Agra Sandstone (512x512 Albedo + Ashlar Mortar Bump + Matte Roughness)
+  // ---------------------------------------------------------------------------
+  const sandAlbCanvas = document.createElement('canvas');
+  sandAlbCanvas.width = SIZE;
+  sandAlbCanvas.height = SIZE;
+  const saCtx = sandAlbCanvas.getContext('2d')!;
+  const saImg = saCtx.createImageData(SIZE, SIZE);
+
+  const sandBumpCanvas = document.createElement('canvas');
+  sandBumpCanvas.width = SIZE;
+  sandBumpCanvas.height = SIZE;
+  const sbCtx = sandBumpCanvas.getContext('2d')!;
+  const sbImg = sbCtx.createImageData(SIZE, SIZE);
+
+  const sandRoughCanvas = document.createElement('canvas');
+  sandRoughCanvas.width = SIZE;
+  sandRoughCanvas.height = SIZE;
+  const srCtx = sandRoughCanvas.getContext('2d')!;
+  const srImg = srCtx.createImageData(SIZE, SIZE);
+
+  // Base #a8523a = (168, 82, 58)
+  for (let y = 0; y < SIZE; y++) {
+    const v = y / SIZE;
+    const row = Math.floor(y / 64);
+    for (let x = 0; x < SIZE; x++) {
+      const u = x / SIZE;
+      const idx = (y * SIZE + x) * 4;
+      const col = Math.floor((x + (row % 2) * 64) / 128);
+      const blockTint = (hash2D(col, row, 9.1) - 0.5) * 18;
+
+      const grain = (hash2D(x, y, 3.7) - 0.5) * 22;
+      const strata = fbmTileable(u * 0.5, v * 2.0, 6, 3, 51.3);
+      const strataShift = (strata - 0.5) * 26;
+
+      const r = Math.round(168 + blockTint + grain + strataShift);
+      const g = Math.round(82 + blockTint * 0.55 + grain * 0.65 + strataShift * 0.55);
+      const b = Math.round(58 + blockTint * 0.4 + grain * 0.5 + strataShift * 0.4);
+
+      saImg.data[idx] = Math.max(0, Math.min(255, r));
+      saImg.data[idx + 1] = Math.max(0, Math.min(255, g));
+      saImg.data[idx + 2] = Math.max(0, Math.min(255, b));
+      saImg.data[idx + 3] = 255;
+
+      const bVal = Math.max(40, Math.min(235, Math.round(148 + grain * 1.4 + strataShift * 1.1)));
+      sbImg.data[idx] = bVal;
+      sbImg.data[idx + 1] = bVal;
+      sbImg.data[idx + 2] = bVal;
+      sbImg.data[idx + 3] = 255;
+
+      const rVal = Math.max(190, Math.min(255, Math.round(224 + (strata - 0.5) * 32)));
+      srImg.data[idx] = rVal;
+      srImg.data[idx + 1] = rVal;
+      srImg.data[idx + 2] = rVal;
+      srImg.data[idx + 3] = 255;
+    }
+  }
+  saCtx.putImageData(saImg, 0, 0);
+  sbCtx.putImageData(sbImg, 0, 0);
+  srCtx.putImageData(srImg, 0, 0);
+
+  // Carved ashlar stone block mortar grid lines
+  saCtx.strokeStyle = 'rgba(64, 28, 20, 0.68)';
+  saCtx.lineWidth = 3.5;
+  sbCtx.strokeStyle = 'rgb(34, 34, 34)';
+  sbCtx.lineWidth = 4.0;
+  srCtx.strokeStyle = 'rgb(255, 255, 255)';
+  srCtx.lineWidth = 4.0;
+  for (let y = 0; y <= SIZE; y += 64) {
+    const offset = ((y / 64) % 2) * 64;
+    [saCtx, sbCtx, srCtx].forEach((ctx) => {
+      ctx.beginPath();
+      ctx.moveTo(0, y);
+      ctx.lineTo(SIZE, y);
+      ctx.stroke();
+      for (let x = offset; x < SIZE; x += 128) {
+        ctx.beginPath();
+        ctx.moveTo(x, y);
+        ctx.lineTo(x, y + 64);
+        ctx.stroke();
+      }
+    });
+  }
+  // Subtle sunlit upper-edge bevel on ashlar blocks
+  saCtx.strokeStyle = 'rgba(222, 138, 108, 0.25)';
+  saCtx.lineWidth = 1.5;
+  for (let y = 3; y < SIZE; y += 64) {
+    saCtx.beginPath();
+    saCtx.moveTo(0, y);
+    saCtx.lineTo(SIZE, y);
+    saCtx.stroke();
+  }
+
+  const sandstoneMap = setupColorTex(sandAlbCanvas, 4, 4);
+  const sandstoneBump = setupDataTex(sandBumpCanvas, 4, 4);
+  const sandstoneRoughness = setupDataTex(sandRoughCanvas, 4, 4);
+
+  // ---------------------------------------------------------------------------
+  // 3. Charbagh Courtyard Grass & Garden Beds (512x512 Emerald/Olive + Micro-Bump)
+  // ---------------------------------------------------------------------------
+  const grassAlbCanvas = document.createElement('canvas');
+  grassAlbCanvas.width = SIZE;
+  grassAlbCanvas.height = SIZE;
+  const gaCtx = grassAlbCanvas.getContext('2d')!;
+  const gaImg = gaCtx.createImageData(SIZE, SIZE);
+
+  const grassBumpCanvas = document.createElement('canvas');
+  grassBumpCanvas.width = SIZE;
+  grassBumpCanvas.height = SIZE;
+  const gbCtx = grassBumpCanvas.getContext('2d')!;
+  const gbImg = gbCtx.createImageData(SIZE, SIZE);
+
+  const grassRoughCanvas = document.createElement('canvas');
+  grassRoughCanvas.width = SIZE;
+  grassRoughCanvas.height = SIZE;
+  const grCtx = grassRoughCanvas.getContext('2d')!;
+
+  // Base gradient between #3a5a32 (58,90,50) and #4d703f (77,112,63)
+  for (let y = 0; y < SIZE; y++) {
+    const v = y / SIZE;
+    for (let x = 0; x < SIZE; x++) {
+      const u = x / SIZE;
+      const idx = (y * SIZE + x) * 4;
+      const patch = fbmTileable(u, v, 6, 3, 21.4);
+      const blade = hash2D(x, y, 71.3);
+      const t = Math.min(1, Math.max(0, patch * 0.72 + blade * 0.28));
+
+      gaImg.data[idx] = Math.round(54 + t * 25);
+      gaImg.data[idx + 1] = Math.round(86 + t * 30);
+      gaImg.data[idx + 2] = Math.round(46 + t * 20);
+      gaImg.data[idx + 3] = 255;
+
+      const bVal = Math.round(92 + blade * 90 + (patch - 0.5) * 40);
+      gbImg.data[idx] = bVal;
+      gbImg.data[idx + 1] = bVal;
+      gbImg.data[idx + 2] = bVal;
+      gbImg.data[idx + 3] = 255;
+    }
+  }
+  gaCtx.putImageData(gaImg, 0, 0);
+  gbCtx.putImageData(gbImg, 0, 0);
+  grCtx.fillStyle = '#ebebe9'; // ~0.92 high matte roughness
+  grCtx.fillRect(0, 0, SIZE, SIZE);
+
+  // Crisp grass blade strokes in emerald & olive tones
+  for (let i = 0; i < 3600; i++) {
+    const gx = (hash2D(i, 1, 5.5) * SIZE) | 0;
+    const gy = (hash2D(i, 2, 8.9) * SIZE) | 0;
+    const len = 5 + (i % 7);
+    const lean = ((i % 5) - 2) * 1.1;
+    gaCtx.strokeStyle =
+      i % 4 === 0
+        ? 'rgba(77, 112, 63, 0.58)'
+        : i % 4 === 1
+          ? 'rgba(58, 90, 50, 0.62)'
+          : i % 4 === 2
+            ? 'rgba(92, 128, 68, 0.42)'
+            : 'rgba(42, 66, 36, 0.52)';
+    gaCtx.lineWidth = 1.4;
+    gaCtx.beginPath();
+    gaCtx.moveTo(gx, gy);
+    gaCtx.lineTo(gx + lean, gy - len);
+    gaCtx.stroke();
+
+    const bv = 135 + (i % 90);
+    gbCtx.strokeStyle = `rgb(${bv},${bv},${bv})`;
+    gbCtx.lineWidth = 1.4;
+    gbCtx.beginPath();
+    gbCtx.moveTo(gx, gy);
+    gbCtx.lineTo(gx + lean, gy - len);
+    gbCtx.stroke();
+  }
+
+  const grassMap = setupColorTex(grassAlbCanvas, 6, 12);
+  const grassBump = setupDataTex(grassBumpCanvas, 6, 12);
+  const grassRoughness = setupDataTex(grassRoughCanvas, 6, 12);
+
+  // ---------------------------------------------------------------------------
+  // 4. Charbagh Reflecting Pool Water (512x512 Seamless Procedural Ripple Bump)
+  // ---------------------------------------------------------------------------
+  const waterAlbCanvas = document.createElement('canvas');
+  waterAlbCanvas.width = SIZE;
+  waterAlbCanvas.height = SIZE;
+  const waCtx = waterAlbCanvas.getContext('2d')!;
+  const waImg = waCtx.createImageData(SIZE, SIZE);
+
+  const waterBumpCanvas = document.createElement('canvas');
+  waterBumpCanvas.width = SIZE;
+  waterBumpCanvas.height = SIZE;
+  const wb2Ctx = waterBumpCanvas.getContext('2d')!;
+  const wb2Img = wb2Ctx.createImageData(SIZE, SIZE);
+
+  const TAU = Math.PI * 2;
+  for (let y = 0; y < SIZE; y++) {
+    const v = y / SIZE;
+    for (let x = 0; x < SIZE; x++) {
+      const u = x / SIZE;
+      const idx = (y * SIZE + x) * 4;
+
+      // Multi-directional periodic ripples so UV scrolling is 100% seamless
+      const w1 = Math.sin((u * 4 + v * 3) * TAU);
+      const w2 = Math.sin((u * -3 + v * 5) * TAU + 1.2);
+      const w3 = Math.cos((u * 7 + v * 2) * TAU + 2.4) * 0.55;
+      const w4 = Math.sin((u * 2 - v * 8) * TAU + 0.7) * 0.45;
+      const ripple = (w1 + w2 + w3 + w4) / 3.0; // [-1..1]
+
+      // Base #1c3d4a = (28, 61, 74)
+      const crest = Math.max(0, ripple);
+      waImg.data[idx] = Math.round(28 + crest * 22);
+      waImg.data[idx + 1] = Math.round(61 + crest * 44);
+      waImg.data[idx + 2] = Math.round(74 + crest * 48);
+      waImg.data[idx + 3] = 255;
+
+      const bVal = Math.max(0, Math.min(255, Math.round(128 + ripple * 96)));
+      wb2Img.data[idx] = bVal;
+      wb2Img.data[idx + 1] = bVal;
+      wb2Img.data[idx + 2] = bVal;
+      wb2Img.data[idx + 3] = 255;
+    }
+  }
+  waCtx.putImageData(waImg, 0, 0);
+  wb2Ctx.putImageData(wb2Img, 0, 0);
+
+  const waterMap = setupColorTex(waterAlbCanvas, 2, 12);
+  const waterRippleBump = setupDataTex(waterBumpCanvas, 3, 18);
+
+  return {
+    marbleMap,
+    marbleBump,
+    marbleRoughness,
+    sandstoneMap,
+    sandstoneBump,
+    sandstoneRoughness,
+    grassMap,
+    grassBump,
+    grassRoughness,
+    waterMap,
+    waterRippleBump,
+  };
+}
+
 export function createProceduralTextures(maxAnisotropy: number): ProceduralTextureSet {
-  // 1. Agra White Marble with subtle grey veins & weathered cracks
-  const marbleCanvas = document.createElement('canvas');
-  marbleCanvas.width = 256;
-  marbleCanvas.height = 256;
-  const mCtx = marbleCanvas.getContext('2d')!;
-  mCtx.fillStyle = '#efe9df';
-  mCtx.fillRect(0, 0, 256, 256);
-  for (let i = 0; i < 24; i++) {
-    mCtx.strokeStyle = `rgba(145, 140, 134, ${0.12 + (i % 3) * 0.06})`;
-    mCtx.lineWidth = 1 + (i % 2);
-    mCtx.beginPath();
-    let x = (i * 37) % 256;
-    let y = 0;
-    mCtx.moveTo(x, y);
-    for (let s = 0; s < 8; s++) {
-      x += Math.sin(i + s * 1.4) * 18;
-      y += 32;
-      mCtx.lineTo(x, y);
-    }
-    mCtx.stroke();
-  }
-  mCtx.strokeStyle = 'rgba(110, 104, 96, 0.22)';
-  mCtx.lineWidth = 1;
-  for (let y = 0; y < 256; y += 64) {
-    mCtx.beginPath();
-    mCtx.moveTo(0, y);
-    mCtx.lineTo(256, y);
-    mCtx.stroke();
-  }
-  const marble = finalizeTexture(marbleCanvas, 3, 3, maxAnisotropy);
+  const pbr = createProceduralPBRTextures(maxAnisotropy);
+  const marble = pbr.marbleMap;
+  const marbleBump = pbr.marbleBump;
+  const marbleRoughness = pbr.marbleRoughness;
+  const sandstone = pbr.sandstoneMap;
+  const sandstoneBump = pbr.sandstoneBump;
+  const sandstoneRoughness = pbr.sandstoneRoughness;
 
-  // 2. Red Agra Sandstone Flagstones (Charbagh walkways)
-  const sandCanvas = document.createElement('canvas');
-  sandCanvas.width = 256;
-  sandCanvas.height = 256;
-  const sCtx = sandCanvas.getContext('2d')!;
-  sCtx.fillStyle = '#9c5240';
-  sCtx.fillRect(0, 0, 256, 256);
-  for (let i = 0; i < 480; i++) {
-    const shade = (i % 5) * 9 - 18;
-    sCtx.fillStyle = `rgb(${156 + shade}, ${82 + shade * 0.55}, ${64 + shade * 0.45})`;
-    sCtx.fillRect((i * 73) % 256, (i * 41) % 256, 8, 5);
-  }
-  sCtx.strokeStyle = 'rgba(46, 20, 15, 0.48)';
-  sCtx.lineWidth = 2.5;
-  for (let y = 0; y < 256; y += 32) {
-    sCtx.beginPath();
-    sCtx.moveTo(0, y);
-    sCtx.lineTo(256, y);
-    sCtx.stroke();
-    const offset = (y / 32) % 2 === 0 ? 0 : 32;
-    for (let x = offset; x < 256; x += 64) {
-      sCtx.beginPath();
-      sCtx.moveTo(x, y);
-      sCtx.lineTo(x, y + 32);
-      sCtx.stroke();
-    }
-  }
-  const sandstone = finalizeTexture(sandCanvas, 4, 4, maxAnisotropy);
-
-  // 3. Cracked Courtyard Stone Pavement
+  // 3. Cracked Courtyard Flagstone Pavement (512x512 beveled slabs, mortar joints & mineral grit)
   const tileCanvas = document.createElement('canvas');
-  tileCanvas.width = 256;
-  tileCanvas.height = 256;
+  tileCanvas.width = 512;
+  tileCanvas.height = 512;
   const tCtx = tileCanvas.getContext('2d')!;
-  tCtx.fillStyle = '#57534e';
-  tCtx.fillRect(0, 0, 256, 256);
-  for (let y = 0; y < 256; y += 64) {
-    for (let x = 0; x < 256; x += 64) {
-      const tone = 72 + ((x * 3 + y * 5) % 24);
-      tCtx.fillStyle = `rgb(${tone + 6}, ${tone + 2}, ${tone - 4})`;
+  tCtx.fillStyle = '#4e4a44';
+  tCtx.fillRect(0, 0, 512, 512);
+  for (let row = 0; row < 8; row++) {
+    const y = row * 64;
+    const offset = (row % 2) * 32;
+    for (let col = -1; col < 9; col++) {
+      const x = col * 64 + offset;
+      const h = hash2D(col + 10, row + 10, 14.3);
+      const tone = Math.round(78 + h * 26);
+      const warm = Math.round((h - 0.5) * 10);
+      tCtx.fillStyle = `rgb(${tone + 8 + warm}, ${tone + 3}, ${tone - 5 - warm})`;
       tCtx.fillRect(x + 2, y + 2, 60, 60);
+      // Sunlit top-left bevel highlight & shadow bottom-right bevel
+      tCtx.fillStyle = 'rgba(220, 208, 190, 0.14)';
+      tCtx.fillRect(x + 2, y + 2, 60, 3);
+      tCtx.fillRect(x + 2, y + 2, 3, 60);
+      tCtx.fillStyle = 'rgba(18, 16, 14, 0.28)';
+      tCtx.fillRect(x + 2, y + 59, 60, 3);
+      tCtx.fillRect(x + 59, y + 2, 3, 60);
     }
   }
-  tCtx.strokeStyle = 'rgba(24, 24, 27, 0.55)';
+  // Fine aggregate speckles & weathered dust
+  for (let i = 0; i < 1800; i++) {
+    const gx = (i * 73 + (i % 9) * 17) % 512;
+    const gy = (i * 41 + (i % 13) * 19) % 512;
+    tCtx.fillStyle = i % 3 === 0 ? 'rgba(210, 196, 174, 0.12)' : 'rgba(28, 25, 22, 0.16)';
+    tCtx.fillRect(gx, gy, 2 + (i % 2), 2);
+  }
+  tCtx.strokeStyle = 'rgba(22, 20, 18, 0.65)';
   tCtx.lineWidth = 2;
-  for (let i = 0; i < 12; i++) {
+  for (let i = 0; i < 18; i++) {
     tCtx.beginPath();
-    const sx = (i * 59) % 256;
-    const sy = (i * 83) % 256;
+    const sx = (i * 89) % 512;
+    const sy = (i * 127) % 512;
     tCtx.moveTo(sx, sy);
-    tCtx.lineTo(sx + 22, sy + 16);
-    tCtx.lineTo(sx + 34, sy + 36);
+    tCtx.lineTo(sx + 26, sy + 18);
+    tCtx.lineTo(sx + 44, sy + 42);
     tCtx.stroke();
   }
   const courtyardTile = finalizeTexture(tileCanvas, 18, 18, maxAnisotropy);
 
-  // 4. Weathered Wood Planks
+  // 4. Weathered Sun-Bleached Wood Planks + Wood Grain Bump Map
   const woodCanvas = document.createElement('canvas');
   woodCanvas.width = 256;
   woodCanvas.height = 256;
   const wCtx = woodCanvas.getContext('2d')!;
-  wCtx.fillStyle = '#7c5333';
+  const wbCanvas = document.createElement('canvas');
+  wbCanvas.width = 256;
+  wbCanvas.height = 256;
+  const wBCtx = wbCanvas.getContext('2d')!;
+  wCtx.fillStyle = '#754c2e';
   wCtx.fillRect(0, 0, 256, 256);
-  for (let x = 0; x < 256; x += 64) {
-    wCtx.fillStyle = x % 128 === 0 ? '#744c2e' : '#855a39';
+  wBCtx.fillStyle = '#808080';
+  wBCtx.fillRect(0, 0, 256, 256);
+  for (let p = 0; p < 4; p++) {
+    const x = p * 64;
+    const tone = p % 2 === 0 ? '#744c2e' : p === 1 ? '#865b3a' : '#6c472c';
+    wCtx.fillStyle = tone;
     wCtx.fillRect(x + 2, 0, 60, 256);
-    wCtx.strokeStyle = 'rgba(46, 28, 14, 0.45)';
-    wCtx.lineWidth = 1.5;
-    for (let g = 0; g < 10; g++) {
-      const gx = x + 6 + g * 5;
+    wBCtx.fillStyle = '#929292';
+    wBCtx.fillRect(x + 2, 0, 60, 256);
+    // Plank gap shadow & bump seam
+    wCtx.fillStyle = 'rgba(24, 14, 8, 0.72)';
+    wCtx.fillRect(x, 0, 2, 256);
+    wBCtx.fillStyle = '#242424';
+    wBCtx.fillRect(x, 0, 3, 256);
+    // Cathedral grain fibers
+    for (let g = 0; g < 14; g++) {
+      const gx = x + 5 + g * 4;
+      wCtx.strokeStyle = g % 3 === 0 ? 'rgba(38, 22, 10, 0.45)' : 'rgba(176, 134, 92, 0.24)';
+      wCtx.lineWidth = g % 3 === 0 ? 1.6 : 1.1;
+      wBCtx.strokeStyle = g % 3 === 0 ? '#525252' : '#ababab';
+      wBCtx.lineWidth = 1.4;
       wCtx.beginPath();
+      wBCtx.beginPath();
       wCtx.moveTo(gx, 0);
-      wCtx.lineTo(gx + Math.sin(g) * 3, 256);
+      wBCtx.moveTo(gx, 0);
+      for (let y = 16; y <= 256; y += 16) {
+        const wave = Math.sin(y * 0.04 + g + p * 1.7) * 3.2;
+        wCtx.lineTo(gx + wave, y);
+        wBCtx.lineTo(gx + wave, y);
+      }
       wCtx.stroke();
+      wBCtx.stroke();
     }
+    // Iron nail heads
+    wCtx.fillStyle = '#26221e';
+    wBCtx.fillStyle = '#383838';
+    [16, 238].forEach((ny) => {
+      wCtx.beginPath();
+      wCtx.arc(x + 12, ny, 2.2, 0, Math.PI * 2);
+      wCtx.arc(x + 50, ny, 2.2, 0, Math.PI * 2);
+      wCtx.fill();
+      wBCtx.beginPath();
+      wBCtx.arc(x + 12, ny, 2.5, 0, Math.PI * 2);
+      wBCtx.arc(x + 50, ny, 2.5, 0, Math.PI * 2);
+      wBCtx.fill();
+    });
   }
   const woodPlank = finalizeTexture(woodCanvas, 2, 2, maxAnisotropy);
+  const woodBump = finalizeLinearTexture(wbCanvas, 2, 2, maxAnisotropy);
 
-  // 5. Rusted Corrugated Metal
+  // 5. Rusted Corrugated Metal + Bump & Oxide Roughness Maps
   const metalCanvas = document.createElement('canvas');
   metalCanvas.width = 256;
   metalCanvas.height = 256;
   const rCtx = metalCanvas.getContext('2d')!;
-  rCtx.fillStyle = '#474c52';
+  const rmBumpCanvas = document.createElement('canvas');
+  rmBumpCanvas.width = 256;
+  rmBumpCanvas.height = 256;
+  const rmBCtx = rmBumpCanvas.getContext('2d')!;
+  const rmRoughCanvas = document.createElement('canvas');
+  rmRoughCanvas.width = 256;
+  rmRoughCanvas.height = 256;
+  const rmRCtx = rmRoughCanvas.getContext('2d')!;
+
+  rCtx.fillStyle = '#4f555c';
   rCtx.fillRect(0, 0, 256, 256);
-  for (let x = 0; x < 256; x += 16) {
-    rCtx.fillStyle = x % 32 === 0 ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.16)';
-    rCtx.fillRect(x, 0, 8, 256);
+  rmRCtx.fillStyle = '#787878'; // bare steel semi-shiny
+  rmRCtx.fillRect(0, 0, 256, 256);
+  for (let x = 0; x < 256; x++) {
+    const corr = Math.sin((x / 16) * Math.PI * 2);
+    const shade = Math.round(128 + corr * 72);
+    rmBCtx.fillStyle = `rgb(${shade},${shade},${shade})`;
+    rmBCtx.fillRect(x, 0, 1, 256);
+    if (corr > 0.25) {
+      rCtx.fillStyle = `rgba(255,255,255,${(corr - 0.25) * 0.14})`;
+      rCtx.fillRect(x, 0, 1, 256);
+    } else if (corr < -0.25) {
+      rCtx.fillStyle = `rgba(0,0,0,${(-corr - 0.25) * 0.24})`;
+      rCtx.fillRect(x, 0, 1, 256);
+    }
   }
-  for (let i = 0; i < 60; i++) {
-    rCtx.fillStyle = `rgba(138, 66, 32, ${0.22 + (i % 4) * 0.1})`;
+  // Oxidized rust bloom patches (rough & pitted)
+  for (let i = 0; i < 72; i++) {
+    const rx = (i * 47) % 256;
+    const ry = (i * 89) % 256;
+    const rad = 6 + (i % 15);
+    rCtx.fillStyle = i % 3 === 0 ? 'rgba(148, 64, 28, 0.42)' : 'rgba(104, 46, 24, 0.34)';
     rCtx.beginPath();
-    rCtx.arc((i * 47) % 256, (i * 89) % 256, 6 + (i % 14), 0, Math.PI * 2);
+    rCtx.ellipse(rx, ry, rad, rad * 0.7, (i % 4) * 0.5, 0, Math.PI * 2);
     rCtx.fill();
+
+    rmRCtx.fillStyle = 'rgba(235, 235, 235, 0.75)'; // rust is very matte
+    rmRCtx.beginPath();
+    rmRCtx.ellipse(rx, ry, rad, rad * 0.7, (i % 4) * 0.5, 0, Math.PI * 2);
+    rmRCtx.fill();
+
+    rmBCtx.fillStyle = 'rgba(48, 48, 48, 0.35)';
+    rmBCtx.beginPath();
+    rmBCtx.ellipse(rx, ry, rad * 0.8, rad * 0.55, (i % 4) * 0.5, 0, Math.PI * 2);
+    rmBCtx.fill();
   }
+  // Horizontal sheet overlap seam & rivets
+  rCtx.fillStyle = 'rgba(16, 18, 22, 0.52)';
+  rCtx.fillRect(0, 126, 256, 4);
+  rmBCtx.fillStyle = '#282828';
+  rmBCtx.fillRect(0, 126, 256, 4);
   const rustedMetal = finalizeTexture(metalCanvas, 2, 2, maxAnisotropy);
+  const rustedMetalBump = finalizeLinearTexture(rmBumpCanvas, 2, 2, maxAnisotropy);
+  const rustedMetalRoughness = finalizeLinearTexture(rmRoughCanvas, 2, 2, maxAnisotropy);
 
-  // 6. Weathered Bazaar Plaster Wall
+  // 6. Weathered Bazaar Stucco Plaster Wall (512x512 Albedo + Bump + Roughness, Dying Light Golden-Hour Feel)
   const wallCanvas = document.createElement('canvas');
-  wallCanvas.width = 256;
-  wallCanvas.height = 256;
+  wallCanvas.width = 512;
+  wallCanvas.height = 512;
   const bCtx = wallCanvas.getContext('2d')!;
-  bCtx.fillStyle = '#c4a987';
-  bCtx.fillRect(0, 0, 256, 256);
-  for (let i = 0; i < 80; i++) {
-    bCtx.fillStyle = i % 2 === 0 ? 'rgba(92, 74, 52, 0.14)' : 'rgba(235, 220, 198, 0.14)';
-    bCtx.fillRect((i * 53) % 256, (i * 37) % 256, 26, 18);
-  }
-  bCtx.fillStyle = 'rgba(48, 36, 28, 0.35)';
-  bCtx.fillRect(0, 224, 256, 32);
-  const bazaarWall = finalizeTexture(wallCanvas, 2, 2, maxAnisotropy);
+  const wallBumpCanvas = document.createElement('canvas');
+  wallBumpCanvas.width = 512;
+  wallBumpCanvas.height = 512;
+  const bBCtx = wallBumpCanvas.getContext('2d')!;
+  const wallRoughCanvas = document.createElement('canvas');
+  wallRoughCanvas.width = 512;
+  wallRoughCanvas.height = 512;
+  const bRCtx = wallRoughCanvas.getContext('2d')!;
 
-  // 7. Reflecting Pool Turquoise Rippled Water Sheen
-  const poolCanvas = document.createElement('canvas');
-  poolCanvas.width = 256;
-  poolCanvas.height = 256;
-  const pCtx = poolCanvas.getContext('2d')!;
-  pCtx.fillStyle = '#1b5b63';
-  pCtx.fillRect(0, 0, 256, 256);
-  for (let i = 0; i < 64; i++) {
-    pCtx.fillStyle = i % 2 === 0 ? 'rgba(110, 210, 215, 0.22)' : 'rgba(14, 52, 60, 0.3)';
-    pCtx.beginPath();
-    pCtx.ellipse((i * 61) % 256, (i * 43) % 256, 26, 6, 0.1, 0, Math.PI * 2);
-    pCtx.fill();
+  const wallAlbImg = bCtx.createImageData(512, 512);
+  const wallBumpImg = bBCtx.createImageData(512, 512);
+  const wallRoughImg = bRCtx.createImageData(512, 512);
+  for (let y = 0; y < 512; y++) {
+    const v = y / 512;
+    const damp = Math.pow(Math.max(0, (v - 0.72) / 0.28), 1.6);
+    for (let x = 0; x < 512; x++) {
+      const u = x / 512;
+      const idx = (y * 512 + x) * 4;
+      const stucco = fbmTileable(u, v, 6, 3, 19.7);
+      const fine = (hash2D(x, y, 42.1) - 0.5) * 16;
+      const streak = fbmTileable(u * 4, v * 0.5, 4, 2, 7.3);
+      const grime = damp * (0.45 + streak * 0.55);
+
+      const baseR = 204 + (stucco - 0.5) * 34 + fine - grime * 74;
+      const baseG = 178 + (stucco - 0.5) * 30 + fine - grime * 66;
+      const baseB = 142 + (stucco - 0.5) * 26 + fine - grime * 52;
+
+      wallAlbImg.data[idx] = Math.max(0, Math.min(255, Math.round(baseR)));
+      wallAlbImg.data[idx + 1] = Math.max(0, Math.min(255, Math.round(baseG)));
+      wallAlbImg.data[idx + 2] = Math.max(0, Math.min(255, Math.round(baseB)));
+      wallAlbImg.data[idx + 3] = 255;
+
+      const bVal = Math.max(20, Math.min(240, Math.round(134 + (stucco - 0.5) * 56 + fine * 1.3)));
+      wallBumpImg.data[idx] = bVal;
+      wallBumpImg.data[idx + 1] = bVal;
+      wallBumpImg.data[idx + 2] = bVal;
+      wallBumpImg.data[idx + 3] = 255;
+
+      const rVal = Math.max(170, Math.min(255, Math.round(224 + (stucco - 0.5) * 30 - grime * 28)));
+      wallRoughImg.data[idx] = rVal;
+      wallRoughImg.data[idx + 1] = rVal;
+      wallRoughImg.data[idx + 2] = rVal;
+      wallRoughImg.data[idx + 3] = 255;
+    }
   }
-  const poolWater = finalizeTexture(poolCanvas, 2, 12, maxAnisotropy);
+  bCtx.putImageData(wallAlbImg, 0, 0);
+  bBCtx.putImageData(wallBumpImg, 0, 0);
+  bRCtx.putImageData(wallRoughImg, 0, 0);
+
+  // Peeling plaster patches revealing weathered underlying brick masonry
+  for (let p = 0; p < 5; p++) {
+    const px = 56 + ((p * 113) % 380);
+    const py = 72 + ((p * 149) % 340);
+    const pw = 54 + (p % 3) * 18;
+    const ph = 36 + (p % 2) * 14;
+    bCtx.fillStyle = '#8b523b';
+    bCtx.fillRect(px, py, pw, ph);
+    bCtx.strokeStyle = 'rgba(240, 224, 198, 0.6)';
+    bCtx.lineWidth = 2.5;
+    bCtx.strokeRect(px, py, pw, ph);
+    bBCtx.fillStyle = '#565656';
+    bBCtx.fillRect(px, py, pw, ph);
+    bBCtx.strokeStyle = '#bcbcbc';
+    bBCtx.lineWidth = 3;
+    bBCtx.strokeRect(px, py, pw, ph);
+    bCtx.strokeStyle = 'rgba(54, 34, 24, 0.55)';
+    bCtx.lineWidth = 1.5;
+    for (let by = py + 10; by < py + ph; by += 10) {
+      bCtx.beginPath();
+      bCtx.moveTo(px, by);
+      bCtx.lineTo(px + pw, by);
+      bCtx.stroke();
+    }
+  }
+  // Hairline stucco cracks
+  bCtx.strokeStyle = 'rgba(62, 46, 34, 0.48)';
+  bCtx.lineWidth = 1.5;
+  bBCtx.strokeStyle = '#2e2e2e';
+  bBCtx.lineWidth = 2;
+  for (let c = 0; c < 9; c++) {
+    let cx = (c * 83 + 29) % 512;
+    let cy = (c * 67 + 19) % 512;
+    bCtx.beginPath();
+    bBCtx.beginPath();
+    bCtx.moveTo(cx, cy);
+    bBCtx.moveTo(cx, cy);
+    for (let s = 0; s < 5; s++) {
+      cx += Math.sin(c * 1.9 + s * 2.1) * 18;
+      cy += 16 + (s % 2) * 8;
+      bCtx.lineTo(cx, cy);
+      bBCtx.lineTo(cx, cy);
+    }
+    bCtx.stroke();
+    bBCtx.stroke();
+  }
+  const bazaarWall = finalizeTexture(wallCanvas, 2, 2, maxAnisotropy);
+  const bazaarWallBump = finalizeLinearTexture(wallBumpCanvas, 2, 2, maxAnisotropy);
+  const bazaarWallRoughness = finalizeLinearTexture(wallRoughCanvas, 2, 2, maxAnisotropy);
+
+  // 7. Reflecting Pool Water Albedo & Procedural Ripple Bump (512x512)
+  const poolWater = pbr.waterMap;
+  const waterRippleBump = pbr.waterRippleBump;
 
   // 8. Soft Radial Contact Shadow
   const shadowCanvas = document.createElement('canvas');
@@ -392,29 +963,134 @@ export function createProceduralTextures(maxAnisotropy: number): ProceduralTextu
   }
   const tealWindow = finalizeTexture(winCanvas, 1, 1, maxAnisotropy);
 
-  // 14. Night Hunter Exposed Striated Crimson Muscle & Scarred Pale Fascia
+  // 14. Night Hunter Exposed Flayed Pale Fascia & Striated Crimson Muscle + Iridescent Chitin Carapace
   const nhCanvas = document.createElement('canvas');
-  nhCanvas.width = 256;
-  nhCanvas.height = 256;
+  nhCanvas.width = 512;
+  nhCanvas.height = 512;
   const nhCtx = nhCanvas.getContext('2d')!;
-  nhCtx.fillStyle = '#4a181e';
-  nhCtx.fillRect(0, 0, 256, 256);
+  nhCtx.fillStyle = '#6c2428';
+  nhCtx.fillRect(0, 0, 512, 512);
+  // Mottled pale-grey flayed skin/fascia patches over crimson sinew
   for (let i = 0; i < 42; i++) {
-    nhCtx.strokeStyle = i % 3 === 0 ? 'rgba(218, 205, 200, 0.35)' : 'rgba(138, 24, 34, 0.65)';
-    nhCtx.lineWidth = i % 3 === 0 ? 2 : 3.5;
+    nhCtx.fillStyle =
+      i % 3 === 0
+        ? 'rgba(196, 178, 170, 0.36)'
+        : i % 3 === 1
+          ? 'rgba(42, 12, 16, 0.56)'
+          : 'rgba(156, 34, 38, 0.52)';
     nhCtx.beginPath();
-    const y0 = (i * 11) % 256;
-    nhCtx.moveTo(0, y0);
-    nhCtx.bezierCurveTo(85, y0 + Math.sin(i) * 18, 170, y0 - Math.cos(i) * 18, 256, (y0 + 24) % 256);
-    nhCtx.stroke();
-  }
-  for (let i = 0; i < 28; i++) {
-    nhCtx.fillStyle = i % 2 === 0 ? 'rgba(30, 8, 12, 0.5)' : 'rgba(185, 38, 46, 0.42)';
-    nhCtx.beginPath();
-    nhCtx.ellipse((i * 59) % 256, (i * 83) % 256, 14, 7, (i % 5) * 0.4, 0, Math.PI * 2);
+    nhCtx.ellipse((i * 83) % 512, (i * 119) % 512, 34 + (i % 20), 16 + (i % 12), (i % 5) * 0.4, 0, Math.PI * 2);
     nhCtx.fill();
   }
+  // Striated muscle fibers & glistening tendon cords
+  for (let i = 0; i < 84; i++) {
+    nhCtx.strokeStyle =
+      i % 4 === 0
+        ? 'rgba(226, 212, 204, 0.45)'
+        : i % 2 === 0
+          ? 'rgba(168, 28, 36, 0.72)'
+          : 'rgba(92, 14, 18, 0.64)';
+    nhCtx.lineWidth = i % 4 === 0 ? 2.2 : 3.8;
+    nhCtx.beginPath();
+    const y0 = (i * 13) % 512;
+    nhCtx.moveTo(0, y0);
+    nhCtx.bezierCurveTo(170, y0 + Math.sin(i) * 28, 340, y0 - Math.cos(i) * 28, 512, (y0 + 36) % 512);
+    nhCtx.stroke();
+  }
+  // Dark arterial veins
+  nhCtx.strokeStyle = 'rgba(26, 12, 22, 0.6)';
+  nhCtx.lineWidth = 1.6;
+  for (let v = 0; v < 22; v++) {
+    let vx = (v * 67) % 512;
+    let vy = (v * 97) % 512;
+    nhCtx.beginPath();
+    nhCtx.moveTo(vx, vy);
+    for (let s = 0; s < 6; s++) {
+      vx += Math.sin(v * 1.4 + s * 1.8) * 24;
+      vy += 22;
+      nhCtx.lineTo(vx, vy);
+    }
+    nhCtx.stroke();
+  }
   const nightHunterMuscle = finalizeTexture(nhCanvas, 2, 2, maxAnisotropy);
+
+  // 14B. Night Hunter Iridescent Dark Slate-Blue / Charcoal Armored Chitin Carapace (Albedo + Bump + Roughness)
+  const ncCanvas = document.createElement('canvas');
+  ncCanvas.width = 512;
+  ncCanvas.height = 512;
+  const ncCtx = ncCanvas.getContext('2d')!;
+  const ncBumpCanvas = document.createElement('canvas');
+  ncBumpCanvas.width = 512;
+  ncBumpCanvas.height = 512;
+  const ncBCtx = ncBumpCanvas.getContext('2d')!;
+  const ncRoughCanvas = document.createElement('canvas');
+  ncRoughCanvas.width = 512;
+  ncRoughCanvas.height = 512;
+  const ncRCtx = ncRoughCanvas.getContext('2d')!;
+
+  const ncAlbImg = ncCtx.createImageData(512, 512);
+  const ncBmpImg = ncBCtx.createImageData(512, 512);
+  const ncRghImg = ncRCtx.createImageData(512, 512);
+  for (let y = 0; y < 512; y++) {
+    const v = y / 512;
+    for (let x = 0; x < 512; x++) {
+      const u = x / 512;
+      const idx = (y * 512 + x) * 4;
+      const f1 = fbmTileable(u, v, 5, 4, 31.4);
+      const f2 = fbmTileable(u * 2, v, 10, 3, 64.9);
+      const ridgeWave = Math.sin((u * 6 + v * 3 + f1 * 2.4) * Math.PI * 2);
+      const ridge = Math.pow(Math.max(0, ridgeWave), 2.2);
+      const irid = Math.max(0, Math.sin((u * 3 - v * 2 + f2 * 3.0) * Math.PI * 2));
+
+      // Deep slate-charcoal #1a2230 with cool blue-teal chitin ridge highlights & subtle crimson battle grime
+      const r = Math.round(28 + ridge * 28 + f2 * 16 + (1 - f1) * 14);
+      const g = Math.round(38 + ridge * 42 + irid * 22 + f2 * 14);
+      const b = Math.round(54 + ridge * 64 + irid * 34 + f2 * 18);
+
+      ncAlbImg.data[idx] = Math.min(255, r);
+      ncAlbImg.data[idx + 1] = Math.min(255, g);
+      ncAlbImg.data[idx + 2] = Math.min(255, b);
+      ncAlbImg.data[idx + 3] = 255;
+
+      const bVal = Math.max(20, Math.min(245, Math.round(96 + ridge * 110 + (f2 - 0.5) * 48)));
+      ncBmpImg.data[idx] = bVal;
+      ncBmpImg.data[idx + 1] = bVal;
+      ncBmpImg.data[idx + 2] = bVal;
+      ncBmpImg.data[idx + 3] = 255;
+
+      // Polished wet chitin crests (~0.30) vs matte armored seams (~0.72)
+      const rVal = Math.max(60, Math.min(230, Math.round(182 - ridge * 92 - irid * 24)));
+      ncRghImg.data[idx] = rVal;
+      ncRghImg.data[idx + 1] = rVal;
+      ncRghImg.data[idx + 2] = rVal;
+      ncRghImg.data[idx + 3] = 255;
+    }
+  }
+  ncCtx.putImageData(ncAlbImg, 0, 0);
+  ncBCtx.putImageData(ncBmpImg, 0, 0);
+  ncRCtx.putImageData(ncRghImg, 0, 0);
+
+  // Battle scars & crimson gore streaks across chitin plates
+  for (let s = 0; s < 18; s++) {
+    const sx = (s * 79 + 23) % 512;
+    const sy = (s * 113 + 17) % 512;
+    ncCtx.strokeStyle = s % 3 === 0 ? 'rgba(130, 18, 24, 0.55)' : 'rgba(148, 178, 210, 0.34)';
+    ncCtx.lineWidth = s % 3 === 0 ? 3 : 1.6;
+    ncCtx.beginPath();
+    ncCtx.moveTo(sx, sy);
+    ncCtx.lineTo(sx + 38, sy + (s % 2 === 0 ? 18 : -16));
+    ncCtx.stroke();
+
+    ncBCtx.strokeStyle = '#303030';
+    ncBCtx.lineWidth = 2.5;
+    ncBCtx.beginPath();
+    ncBCtx.moveTo(sx, sy);
+    ncBCtx.lineTo(sx + 38, sy + (s % 2 === 0 ? 18 : -16));
+    ncBCtx.stroke();
+  }
+  const nightHunterCarapace = finalizeTexture(ncCanvas, 2, 2, maxAnisotropy);
+  const nightHunterCarapaceBump = finalizeLinearTexture(ncBumpCanvas, 2, 2, maxAnisotropy);
+  const nightHunterCarapaceRoughness = finalizeLinearTexture(ncRoughCanvas, 2, 2, maxAnisotropy);
 
   // 15. Industrial Steel Diamond-Plate Catwalk Grating (Pic 2!)
   const dpCanvas = document.createElement('canvas');
@@ -555,25 +1231,10 @@ export function createProceduralTextures(maxAnisotropy: number): ProceduralTextu
   tgCtx.setLineDash([]);
   const tacticalGlove = finalizeTexture(tgCanvas, 2, 2, maxAnisotropy);
 
-  // 17. Charbagh Lush Overgrown Garden Lawn Turf
-  const grassCanvas = document.createElement('canvas');
-  grassCanvas.width = 256;
-  grassCanvas.height = 256;
-  const gCtx = grassCanvas.getContext('2d')!;
-  gCtx.fillStyle = '#3f5e2c';
-  gCtx.fillRect(0, 0, 256, 256);
-  for (let i = 0; i < 650; i++) {
-    const gx = (i * 47) % 256;
-    const gy = (i * 83) % 256;
-    gCtx.fillStyle =
-      i % 4 === 0
-        ? 'rgba(104, 134, 58, 0.36)'
-        : i % 3 === 0
-          ? 'rgba(42, 68, 28, 0.42)'
-          : 'rgba(132, 128, 62, 0.22)';
-    gCtx.fillRect(gx, gy, 3, 7);
-  }
-  const charbaghGrass = finalizeTexture(grassCanvas, 6, 12, maxAnisotropy);
+  // 17. Charbagh Lush Overgrown Garden Lawn Turf + Micro-Bump (512x512)
+  const charbaghGrass = pbr.grassMap;
+  const grassBump = pbr.grassBump;
+  const grassRoughness = pbr.grassRoughness;
 
   // 18. Oak/Ash Hardwood Baseball Bat Grain, Scuffs, Dirt Smudges & Subtle Dried Blood near Barrel Tip
   const batCanvas = document.createElement('canvas');
@@ -664,76 +1325,97 @@ export function createProceduralTextures(maxAnisotropy: number): ProceduralTextu
   }
   const batGripTape = finalizeTexture(bgCanvas, 1, 2, maxAnisotropy);
 
-  // 19. Necrotic Zombie Skin (pale gray-green mottled flesh, dark veins, bruises & crimson blood splatters)
+  // 19. Necrotic Zombie Skin + Bump + Wet Blood Roughness (512x512 crisp lesions & veins)
   const zsCanvas = document.createElement('canvas');
-  zsCanvas.width = 256;
-  zsCanvas.height = 256;
+  zsCanvas.width = 512;
+  zsCanvas.height = 512;
   const zsCtx = zsCanvas.getContext('2d')!;
-  zsCtx.fillStyle = '#7e8f77';
-  zsCtx.fillRect(0, 0, 256, 256);
-  // Bruised necrotic mottling
-  for (let i = 0; i < 48; i++) {
-    zsCtx.fillStyle = i % 3 === 0 ? 'rgba(64, 54, 72, 0.28)' : i % 2 === 0 ? 'rgba(84, 96, 68, 0.34)' : 'rgba(148, 160, 134, 0.24)';
-    zsCtx.beginPath();
-    zsCtx.ellipse((i * 53) % 256, (i * 79) % 256, 18 + (i % 14), 10 + (i % 8), (i % 5) * 0.4, 0, Math.PI * 2);
-    zsCtx.fill();
-  }
-  // Dark branching necrotic veins
-  zsCtx.strokeStyle = 'rgba(32, 38, 44, 0.46)';
-  zsCtx.lineWidth = 1.6;
-  for (let v = 0; v < 18; v++) {
-    zsCtx.beginPath();
-    let vx = (v * 37) % 256;
-    let vy = (v * 59) % 256;
-    zsCtx.moveTo(vx, vy);
-    for (let s = 0; s < 5; s++) {
-      vx += Math.sin(v + s * 1.3) * 14;
-      vy += 12;
-      zsCtx.lineTo(vx, vy);
-    }
-    zsCtx.stroke();
-  }
-  // Crimson blood splatters & grime
-  for (let b = 0; b < 22; b++) {
-    zsCtx.fillStyle = b % 2 === 0 ? 'rgba(138, 18, 22, 0.62)' : 'rgba(78, 12, 14, 0.55)';
-    zsCtx.beginPath();
-    zsCtx.ellipse((b * 71) % 256, (b * 43) % 256, 9 + (b % 10), 6 + (b % 7), (b % 4) * 0.5, 0, Math.PI * 2);
-    zsCtx.fill();
-  }
-  const zombieSkin = finalizeTexture(zsCanvas, 1, 1, maxAnisotropy);
-
-  // 20. Zombie Skin Bump/Roughness Map (linear grayscale height detail)
   const zbCanvas = document.createElement('canvas');
-  zbCanvas.width = 256;
-  zbCanvas.height = 256;
+  zbCanvas.width = 512;
+  zbCanvas.height = 512;
   const zbCtx = zbCanvas.getContext('2d')!;
+  const zrCanvas = document.createElement('canvas');
+  zrCanvas.width = 512;
+  zrCanvas.height = 512;
+  const zrCtx = zrCanvas.getContext('2d')!;
+
+  zsCtx.fillStyle = '#7e8c74';
+  zsCtx.fillRect(0, 0, 512, 512);
   zbCtx.fillStyle = '#808080';
-  zbCtx.fillRect(0, 0, 256, 256);
-  for (let i = 0; i < 320; i++) {
-    const shade = 95 + ((i * 29) % 70);
-    zbCtx.fillStyle = `rgb(${shade}, ${shade}, ${shade})`;
-    zbCtx.fillRect((i * 41) % 256, (i * 67) % 256, 5, 4);
+  zbCtx.fillRect(0, 0, 512, 512);
+  zrCtx.fillStyle = '#d4d4d4'; // Dry matte necrotic skin
+  zrCtx.fillRect(0, 0, 512, 512);
+
+  // Bruised necrotic mottling & livor mortis patches
+  for (let i = 0; i < 84; i++) {
+    const mx = (i * 83) % 512;
+    const my = (i * 127) % 512;
+    const rx = 28 + (i % 22);
+    const ry = 16 + (i % 14);
+    zsCtx.fillStyle =
+      i % 3 === 0
+        ? 'rgba(54, 42, 62, 0.34)'
+        : i % 2 === 0
+          ? 'rgba(84, 96, 66, 0.38)'
+          : 'rgba(156, 166, 140, 0.28)';
+    zsCtx.beginPath();
+    zsCtx.ellipse(mx, my, rx, ry, (i % 5) * 0.4, 0, Math.PI * 2);
+    zsCtx.fill();
   }
-  zbCtx.strokeStyle = 'rgba(40, 40, 40, 0.55)';
-  zbCtx.lineWidth = 2;
-  for (let v = 0; v < 18; v++) {
+  // Skin pores & necrotic pitting in bump map
+  for (let i = 0; i < 900; i++) {
+    const shade = 95 + ((i * 29) % 72);
+    zbCtx.fillStyle = `rgb(${shade}, ${shade}, ${shade})`;
+    zbCtx.fillRect((i * 67) % 512, (i * 113) % 512, 4, 4);
+  }
+  // Dark branching necrotic veins (raised slightly in bump)
+  zsCtx.strokeStyle = 'rgba(26, 32, 38, 0.56)';
+  zsCtx.lineWidth = 2.0;
+  zbCtx.strokeStyle = 'rgba(195, 195, 195, 0.65)';
+  zbCtx.lineWidth = 2.4;
+  for (let v = 0; v < 28; v++) {
+    let vx = (v * 59) % 512;
+    let vy = (v * 97) % 512;
+    zsCtx.beginPath();
     zbCtx.beginPath();
-    let vx = (v * 37) % 256;
-    let vy = (v * 59) % 256;
+    zsCtx.moveTo(vx, vy);
     zbCtx.moveTo(vx, vy);
-    for (let s = 0; s < 5; s++) {
-      vx += Math.sin(v + s * 1.3) * 14;
-      vy += 12;
+    for (let s = 0; s < 6; s++) {
+      vx += Math.sin(v + s * 1.3) * 22;
+      vy += 20;
+      zsCtx.lineTo(vx, vy);
       zbCtx.lineTo(vx, vy);
     }
+    zsCtx.stroke();
     zbCtx.stroke();
   }
-  const zombieSkinBump = new THREE.CanvasTexture(zbCanvas);
-  zombieSkinBump.colorSpace = THREE.NoColorSpace;
-  zombieSkinBump.wrapS = THREE.RepeatWrapping;
-  zombieSkinBump.wrapT = THREE.RepeatWrapping;
-  zombieSkinBump.anisotropy = Math.min(8, maxAnisotropy);
-  zombieSkinBump.needsUpdate = true;
+  // Open lacerations & wet crimson blood splatters (glossy dark in roughnessMap!)
+  for (let b = 0; b < 36; b++) {
+    const bx = (b * 103 + 29) % 512;
+    const by = (b * 79 + 17) % 512;
+    const rx = 14 + (b % 16);
+    const ry = 8 + (b % 10);
+    const rot = (b % 5) * 0.45;
+    zsCtx.fillStyle = b % 2 === 0 ? 'rgba(136, 14, 18, 0.72)' : 'rgba(72, 10, 12, 0.66)';
+    zsCtx.beginPath();
+    zsCtx.ellipse(bx, by, rx, ry, rot, 0, Math.PI * 2);
+    zsCtx.fill();
+
+    // Wet blood patches shine under golden-hour & flashlight specular!
+    zrCtx.fillStyle = b % 2 === 0 ? 'rgba(42, 42, 42, 0.9)' : 'rgba(68, 68, 68, 0.85)';
+    zrCtx.beginPath();
+    zrCtx.ellipse(bx, by, rx, ry, rot, 0, Math.PI * 2);
+    zrCtx.fill();
+
+    // Recessed wound groove in bump
+    zbCtx.fillStyle = 'rgba(42, 42, 42, 0.65)';
+    zbCtx.beginPath();
+    zbCtx.ellipse(bx, by, rx * 0.7, ry * 0.55, rot, 0, Math.PI * 2);
+    zbCtx.fill();
+  }
+  const zombieSkin = finalizeTexture(zsCanvas, 1, 1, maxAnisotropy);
+  const zombieSkinBump = finalizeLinearTexture(zbCanvas, 1, 1, maxAnisotropy);
+  const zombieSkinRoughness = finalizeLinearTexture(zrCanvas, 1, 1, maxAnisotropy);
 
   // 21. Ragged Grimy Clothing Fabric Texture
   const zcCanvas = document.createElement('canvas');
@@ -743,74 +1425,102 @@ export function createProceduralTextures(maxAnisotropy: number): ProceduralTextu
   zcCtx.fillStyle = '#c8c4bc';
   zcCtx.fillRect(0, 0, 256, 256);
   for (let y = 0; y < 256; y += 4) {
-    zcCtx.fillStyle = y % 8 === 0 ? 'rgba(60, 56, 48, 0.16)' : 'rgba(255, 255, 255, 0.1)';
+    zcCtx.fillStyle = y % 8 === 0 ? 'rgba(54, 50, 44, 0.2)' : 'rgba(255, 255, 255, 0.12)';
     zcCtx.fillRect(0, y, 256, 2);
   }
   for (let x = 0; x < 256; x += 4) {
-    zcCtx.fillStyle = x % 8 === 0 ? 'rgba(50, 46, 40, 0.14)' : 'rgba(240, 236, 228, 0.08)';
+    zcCtx.fillStyle = x % 8 === 0 ? 'rgba(46, 42, 36, 0.18)' : 'rgba(240, 236, 228, 0.1)';
     zcCtx.fillRect(x, 0, 2, 256);
   }
-  for (let i = 0; i < 34; i++) {
-    zcCtx.fillStyle = i % 3 === 0 ? 'rgba(115, 22, 22, 0.45)' : 'rgba(54, 46, 36, 0.35)';
+  for (let i = 0; i < 42; i++) {
+    zcCtx.fillStyle = i % 3 === 0 ? 'rgba(112, 16, 18, 0.52)' : 'rgba(48, 40, 32, 0.38)';
     zcCtx.beginPath();
-    zcCtx.ellipse((i * 57) % 256, (i * 89) % 256, 16, 11, 0.4, 0, Math.PI * 2);
+    zcCtx.ellipse((i * 57) % 256, (i * 89) % 256, 16, 10, 0.4, 0, Math.PI * 2);
     zcCtx.fill();
   }
   const zombieCloth = finalizeTexture(zcCanvas, 1, 1, maxAnisotropy);
 
-  // 22. Infected Dog Dark Charred-Sable Fur, Mange & Blood Lesion Texture
+  // 22. Infected Dog Sleek Charred-Sable Doberman Coat + Flayed Muscle Lesions + Bump + Wet Gore Roughness (512x512)
   const dfCanvas = document.createElement('canvas');
-  dfCanvas.width = 256;
-  dfCanvas.height = 256;
+  dfCanvas.width = 512;
+  dfCanvas.height = 512;
   const dfCtx = dfCanvas.getContext('2d')!;
-  dfCtx.fillStyle = '#2d241e';
-  dfCtx.fillRect(0, 0, 256, 256);
-  for (let i = 0; i < 420; i++) {
-    const fx = (i * 37) % 256;
-    const fy = (i * 73) % 256;
+  const dbCanvas = document.createElement('canvas');
+  dbCanvas.width = 512;
+  dbCanvas.height = 512;
+  const dbCtx = dbCanvas.getContext('2d')!;
+  const drCanvas = document.createElement('canvas');
+  drCanvas.width = 512;
+  drCanvas.height = 512;
+  const drCtx = drCanvas.getContext('2d')!;
+
+  dfCtx.fillStyle = '#201916';
+  dfCtx.fillRect(0, 0, 512, 512);
+  dbCtx.fillStyle = '#7c7c7c';
+  dbCtx.fillRect(0, 0, 512, 512);
+  drCtx.fillStyle = '#bcbcbc'; // Sleek short fur coat
+  drCtx.fillRect(0, 0, 512, 512);
+
+  // Subtle dark charcoal & mahogany Doberman coat fur strokes
+  for (let i = 0; i < 1400; i++) {
+    const fx = (i * 53) % 512;
+    const fy = (i * 97) % 512;
     dfCtx.strokeStyle =
-      i % 3 === 0 ? 'rgba(18, 14, 12, 0.7)' : i % 3 === 1 ? 'rgba(84, 66, 52, 0.42)' : 'rgba(42, 32, 26, 0.56)';
+      i % 4 === 0
+        ? 'rgba(14, 11, 10, 0.78)'
+        : i % 4 === 1
+          ? 'rgba(72, 48, 34, 0.36)'
+          : 'rgba(34, 26, 22, 0.62)';
     dfCtx.lineWidth = 1.6;
     dfCtx.beginPath();
     dfCtx.moveTo(fx, fy);
-    dfCtx.lineTo(fx + ((i % 5) - 2) * 2, fy + 10 + (i % 6));
+    dfCtx.lineTo(fx + ((i % 5) - 2) * 1.8, fy + 12 + (i % 7));
     dfCtx.stroke();
-  }
-  // Patchy mange & raw crimson flesh tears
-  for (let w = 0; w < 24; w++) {
-    const wx = (w * 61 + 19) % 256;
-    const wy = (w * 89 + 11) % 256;
-    dfCtx.fillStyle = w % 2 === 0 ? 'rgba(128, 20, 22, 0.78)' : 'rgba(72, 14, 14, 0.68)';
-    dfCtx.beginPath();
-    dfCtx.ellipse(wx, wy, 12 + (w % 10), 8 + (w % 6), (w % 3) * 0.6, 0, Math.PI * 2);
-    dfCtx.fill();
-  }
-  const dogFurRot = finalizeTexture(dfCanvas, 1, 1, maxAnisotropy);
 
-  // 23. Infected Dog Fur & Tendon Bump Map (NoColorSpace)
-  const dbCanvas = document.createElement('canvas');
-  dbCanvas.width = 256;
-  dbCanvas.height = 256;
-  const dbCtx = dbCanvas.getContext('2d')!;
-  dbCtx.fillStyle = '#7c7c7c';
-  dbCtx.fillRect(0, 0, 256, 256);
-  for (let i = 0; i < 520; i++) {
-    const fx = (i * 43) % 256;
-    const fy = (i * 67) % 256;
-    const v = 90 + ((i * 31) % 110);
-    dbCtx.strokeStyle = `rgb(${v}, ${v}, ${v})`;
-    dbCtx.lineWidth = 1.5;
+    const bv = 92 + ((i * 31) % 116);
+    dbCtx.strokeStyle = `rgb(${bv}, ${bv}, ${bv})`;
+    dbCtx.lineWidth = 1.6;
     dbCtx.beginPath();
     dbCtx.moveTo(fx, fy);
-    dbCtx.lineTo(fx + ((i % 3) - 1) * 2, fy + 9);
+    dbCtx.lineTo(fx + ((i % 3) - 1) * 1.8, fy + 11);
     dbCtx.stroke();
   }
-  const dogFurBump = new THREE.CanvasTexture(dbCanvas);
-  dogFurBump.colorSpace = THREE.NoColorSpace;
-  dogFurBump.wrapS = THREE.RepeatWrapping;
-  dogFurBump.wrapT = THREE.RepeatWrapping;
-  dogFurBump.anisotropy = Math.min(8, maxAnisotropy);
-  dogFurBump.needsUpdate = true;
+  // Raw flayed crimson muscle tears with pale fascia streaks & wet specular roughness
+  for (let w = 0; w < 28; w++) {
+    const wx = (w * 97 + 23) % 512;
+    const wy = (w * 131 + 19) % 512;
+    const rx = 20 + (w % 18);
+    const ry = 12 + (w % 10);
+    const rot = (w % 4) * 0.5;
+    dfCtx.fillStyle = w % 2 === 0 ? 'rgba(138, 18, 22, 0.85)' : 'rgba(84, 12, 16, 0.78)';
+    dfCtx.beginPath();
+    dfCtx.ellipse(wx, wy, rx, ry, rot, 0, Math.PI * 2);
+    dfCtx.fill();
+
+    // Striated muscle fibers inside wound
+    dfCtx.strokeStyle = 'rgba(210, 110, 104, 0.5)';
+    dfCtx.lineWidth = 1.4;
+    dfCtx.beginPath();
+    dfCtx.moveTo(wx - rx * 0.6, wy);
+    dfCtx.lineTo(wx + rx * 0.6, wy + 2);
+    dfCtx.stroke();
+
+    // Glossy wet flesh in roughness map
+    drCtx.fillStyle = 'rgba(48, 48, 48, 0.9)';
+    drCtx.beginPath();
+    drCtx.ellipse(wx, wy, rx, ry, rot, 0, Math.PI * 2);
+    drCtx.fill();
+
+    // Torn hide rim in bump map
+    dbCtx.strokeStyle = '#dcdcdc';
+    dbCtx.lineWidth = 2.4;
+    dbCtx.beginPath();
+    dbCtx.ellipse(wx, wy, rx, ry, rot, 0, Math.PI * 2);
+    dbCtx.stroke();
+  }
+  const dogFurRot = finalizeTexture(dfCanvas, 1, 1, maxAnisotropy);
+  const dogFurBump = finalizeLinearTexture(dbCanvas, 1, 1, maxAnisotropy);
+  const dogFurRoughness = finalizeLinearTexture(drCanvas, 1, 1, maxAnisotropy);
 
   // 24. Glowing SAFE HOUSE Banner Sign Texture (Taj Mahal UV Gate)
   const shSignCanvas = document.createElement('canvas');
@@ -1788,14 +2498,41 @@ export function createProceduralTextures(maxAnisotropy: number): ProceduralTextu
     railwayIcfBlue,
     railwayCreamExpress,
     railwayGaribGreen,
+    marbleBump,
+    marbleRoughness,
+    sandstoneBump,
+    sandstoneRoughness,
+    grassBump,
+    grassRoughness,
+    waterRippleBump,
+    zombieSkinRoughness,
+    dogFurRoughness,
+    nightHunterCarapace,
+    nightHunterCarapaceBump,
+    nightHunterCarapaceRoughness,
+    bazaarWallBump,
+    bazaarWallRoughness,
+    woodBump,
+    rustedMetalBump,
+    rustedMetalRoughness,
     dispose: () => {
       marble.dispose();
+      marbleBump.dispose();
+      marbleRoughness.dispose();
       sandstone.dispose();
+      sandstoneBump.dispose();
+      sandstoneRoughness.dispose();
       courtyardTile.dispose();
       woodPlank.dispose();
+      woodBump.dispose();
       rustedMetal.dispose();
+      rustedMetalBump.dispose();
+      rustedMetalRoughness.dispose();
       bazaarWall.dispose();
+      bazaarWallBump.dispose();
+      bazaarWallRoughness.dispose();
       poolWater.dispose();
+      waterRippleBump.dispose();
       contactShadow.dispose();
       chainLink.dispose();
       blueTarp.dispose();
@@ -1803,18 +2540,25 @@ export function createProceduralTextures(maxAnisotropy: number): ProceduralTextu
       domeRibs.dispose();
       tealWindow.dispose();
       nightHunterMuscle.dispose();
+      nightHunterCarapace.dispose();
+      nightHunterCarapaceBump.dispose();
+      nightHunterCarapaceRoughness.dispose();
       diamondPlate.dispose();
       skinDetail.dispose();
       wristWrapTape.dispose();
       tacticalGlove.dispose();
       charbaghGrass.dispose();
+      grassBump.dispose();
+      grassRoughness.dispose();
       baseballBatWood.dispose();
       batGripTape.dispose();
       zombieSkin.dispose();
       zombieSkinBump.dispose();
+      zombieSkinRoughness.dispose();
       zombieCloth.dispose();
       dogFurRot.dispose();
       dogFurBump.dispose();
+      dogFurRoughness.dispose();
       safeHouseSign.dispose();
       pietraDura.dispose();
       charbaghFlowerbed.dispose();

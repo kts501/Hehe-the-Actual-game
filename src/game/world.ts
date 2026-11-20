@@ -37,11 +37,17 @@ const _batchEuler = new THREE.Euler();
 const _batchScale = new THREE.Vector3(1, 1, 1);
 const _batchMatrix = new THREE.Matrix4();
 
+export interface WorldBuildOptions {
+  isIntelIntegrated?: boolean;
+}
+
 export function buildAgraWorld(
   scene: THREE.Scene,
   textures: ProceduralTextureSet,
   isSoftwareGl: boolean,
+  options?: WorldBuildOptions,
 ): WorldBuildResult {
+  const isIntelIntegrated = Boolean(options?.isIntelIntegrated);
   const worldGroup = new THREE.Group();
   scene.add(worldGroup);
 
@@ -170,18 +176,23 @@ export function buildAgraWorld(
   const marbleMat = trackMat(
     new THREE.MeshStandardMaterial({
       map: textures.marble,
-      bumpMap: textures.stoneBump,
-      bumpScale: 0.012,
-      color: 0xf4efe6,
-      roughness: 0.36,
-      metalness: 0.05,
+      bumpMap: textures.marbleBump,
+      bumpScale: 0.015,
+      roughnessMap: textures.marbleRoughness,
+      color: 0xffffff,
+      roughness: 0.22,
+      metalness: 0.08,
     }),
   );
   const marbleTrimMat = trackMat(
     new THREE.MeshStandardMaterial({
-      color: 0xd9d2c5,
-      roughness: 0.58,
-      metalness: 0.04,
+      map: textures.marble,
+      bumpMap: textures.marbleBump,
+      bumpScale: 0.015,
+      roughnessMap: textures.marbleRoughness,
+      color: 0xe8e2d8,
+      roughness: 0.28,
+      metalness: 0.06,
     }),
   );
   const pietraDuraMat = trackMat(
@@ -223,6 +234,8 @@ export function buildAgraWorld(
   const parkourWallMat = trackMat(
     new THREE.MeshStandardMaterial({
       map: textures.parkourWallPaint,
+      bumpMap: textures.woodBump,
+      bumpScale: 0.02,
       color: 0xffffff,
       roughness: 0.8,
       metalness: 0.05,
@@ -230,10 +243,11 @@ export function buildAgraWorld(
   );
   const yamunaWaterMat = trackMat(
     new THREE.MeshStandardMaterial({
-      map: textures.poolWater,
-      color: 0x1b4d63,
-      roughness: 0.16,
-      metalness: 0.36,
+      color: 0x1c3d4a,
+      bumpMap: textures.waterRippleBump,
+      bumpScale: 0.038,
+      roughness: 0.08,
+      metalness: 0.75,
     }),
   );
   const brassLampMat = trackMat(
@@ -279,23 +293,23 @@ export function buildAgraWorld(
   const sandstoneMat = trackMat(
     new THREE.MeshStandardMaterial({
       map: textures.sandstone,
-      bumpMap: textures.stoneBump,
-      bumpScale: 0.032,
-      roughnessMap: textures.stoneRoughness,
-      color: 0xa25a46,
-      roughness: 0.92,
+      bumpMap: textures.sandstoneBump,
+      bumpScale: 0.04,
+      roughnessMap: textures.sandstoneRoughness,
+      color: 0xffffff,
+      roughness: 0.86,
       metalness: 0.02,
     }),
   );
   const pavilionSandstoneMat = trackMat(
     new THREE.MeshStandardMaterial({
       map: textures.sandstone,
-      bumpMap: textures.stoneBump,
-      bumpScale: 0.028,
-      roughnessMap: textures.stoneRoughness,
-      color: 0x8d4537,
-      roughness: 0.9,
-      metalness: 0.03,
+      bumpMap: textures.sandstoneBump,
+      bumpScale: 0.04,
+      roughnessMap: textures.sandstoneRoughness,
+      color: 0xeddcd4,
+      roughness: 0.86,
+      metalness: 0.02,
     }),
   );
   const courtyardMat = trackMat(
@@ -312,8 +326,11 @@ export function buildAgraWorld(
   const charbaghLawnMat = trackMat(
     new THREE.MeshStandardMaterial({
       map: textures.charbaghGrass,
-      color: 0x4b6e32,
-      roughness: 0.94,
+      bumpMap: textures.grassBump,
+      bumpScale: 0.03,
+      roughnessMap: textures.grassRoughness,
+      color: 0xffffff,
+      roughness: 0.92,
       metalness: 0.0,
     }),
   );
@@ -327,6 +344,8 @@ export function buildAgraWorld(
   const woodMat = trackMat(
     new THREE.MeshStandardMaterial({
       map: textures.woodPlank,
+      bumpMap: textures.woodBump,
+      bumpScale: 0.026,
       color: 0x8e613e,
       roughness: 0.84,
       metalness: 0.04,
@@ -342,8 +361,11 @@ export function buildAgraWorld(
   const rustMat = trackMat(
     new THREE.MeshStandardMaterial({
       map: textures.rustedMetal,
+      bumpMap: textures.rustedMetalBump,
+      bumpScale: 0.036,
+      roughnessMap: textures.rustedMetalRoughness,
       color: 0x676b70,
-      roughness: 0.56,
+      roughness: 0.88,
       metalness: 0.72,
     }),
   );
@@ -365,33 +387,33 @@ export function buildAgraWorld(
   const plasterMat = trackMat(
     new THREE.MeshStandardMaterial({
       map: textures.bazaarWall,
-      bumpMap: textures.stoneBump,
-      bumpScale: 0.022,
-      roughnessMap: textures.stoneRoughness,
+      bumpMap: textures.bazaarWallBump,
+      bumpScale: 0.028,
+      roughnessMap: textures.bazaarWallRoughness,
       color: 0xcab08c,
-      roughness: 0.9,
+      roughness: 0.92,
       metalness: 0.02,
     }),
   );
   const plasterAltMat = trackMat(
     new THREE.MeshStandardMaterial({
       map: textures.bazaarWall,
-      bumpMap: textures.stoneBump,
-      bumpScale: 0.022,
-      roughnessMap: textures.stoneRoughness,
+      bumpMap: textures.bazaarWallBump,
+      bumpScale: 0.028,
+      roughnessMap: textures.bazaarWallRoughness,
       color: 0xb58668,
-      roughness: 0.9,
+      roughness: 0.92,
       metalness: 0.02,
     }),
   );
   const plasterTealMat = trackMat(
     new THREE.MeshStandardMaterial({
       map: textures.bazaarWall,
-      bumpMap: textures.stoneBump,
-      bumpScale: 0.022,
-      roughnessMap: textures.stoneRoughness,
+      bumpMap: textures.bazaarWallBump,
+      bumpScale: 0.028,
+      roughnessMap: textures.bazaarWallRoughness,
       color: 0x5c7c79,
-      roughness: 0.88,
+      roughness: 0.9,
       metalness: 0.03,
     }),
   );
@@ -581,12 +603,14 @@ export function buildAgraWorld(
   const leftWalkway = new THREE.Mesh(trackGeo(new THREE.PlaneGeometry(6.8, 92)), sandstoneMat);
   leftWalkway.rotation.x = -Math.PI / 2;
   leftWalkway.position.set(-8.2, 0.015, -10);
+  leftWalkway.castShadow = true;
   leftWalkway.receiveShadow = true;
   worldGroup.add(leftWalkway);
 
   const rightWalkway = new THREE.Mesh(trackGeo(new THREE.PlaneGeometry(6.8, 92)), sandstoneMat);
   rightWalkway.rotation.x = -Math.PI / 2;
   rightWalkway.position.set(8.2, 0.015, -10);
+  rightWalkway.castShadow = true;
   rightWalkway.receiveShadow = true;
   worldGroup.add(rightWalkway);
 
@@ -598,6 +622,7 @@ export function buildAgraWorld(
     );
     crossPath.rotation.x = -Math.PI / 2;
     crossPath.position.set(0, 0.016, cz);
+    crossPath.castShadow = true;
     crossPath.receiveShadow = true;
     worldGroup.add(crossPath);
   });
@@ -643,7 +668,7 @@ export function buildAgraWorld(
       1,
       1,
       ld,
-      false,
+      true,
       true,
     );
 
@@ -727,22 +752,25 @@ export function buildAgraWorld(
   const poolGeo = trackGeo(new THREE.PlaneGeometry(8.8, 76));
 
   if (!isSoftwareGl) {
+    const reflectorSize = isIntelIntegrated ? 256 : 512;
+    const reflectorInterval = isIntelIntegrated ? 4 : 2;
     const reflector = new Reflector(poolGeo, {
       clipBias: 0.003,
-      textureWidth: 512,
-      textureHeight: 512,
+      textureWidth: reflectorSize,
+      textureHeight: reflectorSize,
       color: 0x89a9ad,
     });
     reflector.rotation.x = -Math.PI / 2;
     reflector.position.set(0, 0.03, -12);
 
-    // Throttle Reflector scene re-render to every 2nd frame (doubles FPS!)
+    // Throttle Reflector scene re-render & skip offscreen pass when camera is inside Haveli/Railway Station
     const origOnBeforeRender = reflector.onBeforeRender.bind(reflector);
     let reflectFrame = 0;
     reflector.onBeforeRender = (renderer, scn, cam, geometry, material, group) => {
-      if (reflectFrame++ % 2 === 0) {
-        origOnBeforeRender(renderer, scn, cam, geometry, material, group);
-      }
+      const idx = reflectFrame++;
+      if (idx > 0 && idx % reflectorInterval !== 0) return;
+      if (cam.position.z < -92 || cam.position.z > 42 || Math.abs(cam.position.x) > 48) return;
+      origOnBeforeRender(renderer, scn, cam, geometry, material, group);
     };
 
     worldGroup.add(reflector);
@@ -752,26 +780,30 @@ export function buildAgraWorld(
       poolGeo,
       trackMat(
         new THREE.MeshStandardMaterial({
-          color: 0x1a464e,
-          roughness: 0.14,
-          metalness: 0.48,
+          color: 0x1c3d4a,
+          bumpMap: textures.waterRippleBump,
+          bumpScale: 0.038,
+          roughness: 0.08,
+          metalness: 0.75,
         }),
       ),
     );
     poolBase.rotation.x = -Math.PI / 2;
     poolBase.position.set(0, 0.03, -12);
+    poolBase.receiveShadow = true;
     worldGroup.add(poolBase);
   }
 
-  // Subtle translucent water tint over mirror pool
+  // Glossy reflective water ripple surface over mirror pool
   const poolSheenMat = trackMat(
     new THREE.MeshStandardMaterial({
-      map: textures.poolWater,
-      color: 0x4ea6b5,
+      color: 0x1c3d4a,
+      bumpMap: textures.waterRippleBump,
+      bumpScale: 0.038,
       transparent: true,
-      opacity: isSoftwareGl ? 0.45 : 0.12,
+      opacity: isSoftwareGl ? 0.92 : 0.42,
       roughness: 0.08,
-      metalness: 0.2,
+      metalness: 0.75,
       depthWrite: false,
       polygonOffset: true,
       polygonOffsetFactor: -1,
@@ -780,6 +812,7 @@ export function buildAgraWorld(
   const poolSheen = new THREE.Mesh(poolGeo, poolSheenMat);
   poolSheen.rotation.x = -Math.PI / 2;
   poolSheen.position.set(0, 0.042, -12);
+  poolSheen.receiveShadow = true;
   worldGroup.add(poolSheen);
 
   // White Marble Pool Curbs bordering the sandstone walkways
@@ -1037,7 +1070,7 @@ export function buildAgraWorld(
     [-11.8, 11.8].forEach((cx) => {
       if (cx === 11.8 && cz === -46) return; // Clear space for Taj Gate Watchtower
       const s = 0.94 + ((idx * 17) % 5) * 0.06;
-      pushStaticGeo(cypressTrunkGeo, trunkMat, cx, 0.5 * s, cz, 0, 0, 0, s, s, s, false, true);
+      pushStaticGeo(cypressTrunkGeo, trunkMat, cx, 0.5 * s, cz, 0, 0, 0, s, s, s, true, true);
       pushStaticGeo(cypressCanopyGeo, cypressMat, cx, 0.7 * s, cz, 0, idx * 0.7, 0, s, s, s, true, true);
       colliders.push({
         id: `cypress_${cx}_${cz}`,
@@ -1113,9 +1146,9 @@ export function buildAgraWorld(
     [-29.5, -96.5],
     [29.5, -96.5],
   ].forEach(([bx, bz]) => {
-    pushStaticGeo(burjBodyGeo, pavilionSandstoneMat, bx, 4.8, bz, 0, Math.PI / 8, 0, 1, 1, 1, false, true);
-    pushStaticGeo(burjDomeGeo, marbleMat, bx, 9.2, bz, 0, 0, 0, 1, 1.08, 1, false, true);
-    pushStaticGeo(trackGeo(new THREE.ConeGeometry(0.16, 1.4, 6)), goldMat, bx, 11.6, bz, 0, 0, 0, 1, 1, 1, false, false);
+    pushStaticGeo(burjBodyGeo, pavilionSandstoneMat, bx, 4.8, bz, 0, Math.PI / 8, 0, 1, 1, 1, true, true);
+    pushStaticGeo(burjDomeGeo, marbleMat, bx, 9.2, bz, 0, 0, 0, 1, 1.08, 1, true, true);
+    pushStaticGeo(trackGeo(new THREE.ConeGeometry(0.16, 1.4, 6)), goldMat, bx, 11.6, bz, 0, 0, 0, 1, 1, 1, true, true);
   });
 
   // Vast White Marble Plinth (world Z: -59.5 to -93.5, X: -25 to +25, Y: 1.0 to 3.0)
@@ -1160,7 +1193,7 @@ export function buildAgraWorld(
 
   // Inner vaulted semi-arch recess inside Pishtaq
   const innerPortalArchGeo = createMughalArchFrameGeo(6.8, 9.4, 4.6, 7.6, 1.2);
-  pushStaticGeo(innerPortalArchGeo, pietraDuraMat, 0, 3.0, -65.9, 0, 0, 0, 1, 1, 1, false, true);
+  pushStaticGeo(innerPortalArchGeo, pietraDuraMat, 0, 3.0, -65.9, 0, 0, 0, 1, 1, 1, true, true);
 
   // Slender Guldasta Lotus Pinnacles crowning the Pishtaq & Chamfer Corners
   const guldastaShaftGeo = trackGeo(new THREE.CylinderGeometry(0.18, 0.24, 4.4, 8));
@@ -1174,28 +1207,28 @@ export function buildAgraWorld(
     [-10.4, 16.2, -86.2],
     [10.4, 16.2, -86.2],
   ].forEach(([gx, gy, gz]) => {
-    pushStaticGeo(guldastaShaftGeo, marbleTrimMat, gx, gy + 1.4, gz, 0, 0, 0, 1, 1, 1, false, true);
-    pushStaticGeo(guldastaBudGeo, marbleMat, gx, gy + 3.7, gz, 0, 0, 0, 1, 1.25, 1, false, false);
-    pushStaticGeo(guldastaSpireGeo, goldMat, gx, gy + 4.3, gz, 0, 0, 0, 1, 1, 1, false, false);
+    pushStaticGeo(guldastaShaftGeo, marbleTrimMat, gx, gy + 1.4, gz, 0, 0, 0, 1, 1, 1, true, true);
+    pushStaticGeo(guldastaBudGeo, marbleMat, gx, gy + 3.7, gz, 0, 0, 0, 1, 1.25, 1, true, true);
+    pushStaticGeo(guldastaSpireGeo, goldMat, gx, gy + 4.3, gz, 0, 0, 0, 1, 1, 1, true, true);
   });
 
   // Flanking 2-Tier Pointed Mughal Arched Alcoves (Lower & Upper Wings + 45° Chamfer Corners)
   const wingNicheGeo = createMughalArchFrameGeo(3.6, 5.4, 2.2, 4.2, 0.85);
   [-8.0, 8.0].forEach((nx) => {
     // Lower tier arched niche
-    pushStaticGeo(wingNicheGeo, marbleMat, nx, 3.0, -65.6, 0, 0, 0, 1, 1, 1, false, true);
+    pushStaticGeo(wingNicheGeo, marbleMat, nx, 3.0, -65.6, 0, 0, 0, 1, 1, 1, true, true);
     addBox(worldGroup, 2.4, 4.2, 0.3, nx, 5.2, -66.1, sanctuarySlateMat);
     // Upper tier arched niche
-    pushStaticGeo(wingNicheGeo, marbleMat, nx, 9.2, -65.6, 0, 0, 0, 1, 1, 1, false, true);
+    pushStaticGeo(wingNicheGeo, marbleMat, nx, 9.2, -65.6, 0, 0, 0, 1, 1, 1, true, true);
     addBox(worldGroup, 2.4, 4.2, 0.3, nx, 11.4, -66.1, sanctuarySlateMat);
     addBox(worldGroup, 3.6, 0.55, 0.9, nx, 8.95, -65.6, pietraDuraMat);
   });
 
   // East, West & North Facade Pishtaqs + Chamfered 45° Corner Alcoves
   const sidePishtaqGeo = createMughalArchFrameGeo(9.2, 13.8, 5.2, 10.6, 1.2);
-  pushStaticGeo(sidePishtaqGeo, marbleMat, -10.8, 3.0, -76.5, 0, Math.PI / 2, 0, 1, 1, 1, false, true);
-  pushStaticGeo(sidePishtaqGeo, marbleMat, 10.8, 3.0, -76.5, 0, -Math.PI / 2, 0, 1, 1, 1, false, true);
-  pushStaticGeo(sidePishtaqGeo, marbleMat, 0, 3.0, -86.6, 0, 0, 0, 1, 1, 1, false, true);
+  pushStaticGeo(sidePishtaqGeo, marbleMat, -10.8, 3.0, -76.5, 0, Math.PI / 2, 0, 1, 1, 1, true, true);
+  pushStaticGeo(sidePishtaqGeo, marbleMat, 10.8, 3.0, -76.5, 0, -Math.PI / 2, 0, 1, 1, 1, true, true);
+  pushStaticGeo(sidePishtaqGeo, marbleMat, 0, 3.0, -86.6, 0, 0, 0, 1, 1, 1, true, true);
 
   [
     [-10.3, -66.8, Math.PI / 4],
@@ -1204,8 +1237,8 @@ export function buildAgraWorld(
     [10.3, -86.2, (-Math.PI * 3) / 4],
   ].forEach(([cx, cz, ry]) => {
     addBox(worldGroup, 3.8, 12.8, 3.8, cx, 9.4, cz, marbleTrimMat, { rotY: ry });
-    pushStaticGeo(wingNicheGeo, marbleMat, cx, 3.0, cz, 0, ry, 0, 0.88, 1, 1.5, false, true);
-    pushStaticGeo(wingNicheGeo, marbleMat, cx, 9.2, cz, 0, ry, 0, 0.88, 1, 1.5, false, true);
+    pushStaticGeo(wingNicheGeo, marbleMat, cx, 3.0, cz, 0, ry, 0, 0.88, 1, 1.5, true, true);
+    pushStaticGeo(wingNicheGeo, marbleMat, cx, 9.2, cz, 0, ry, 0, 0.88, 1, 1.5, true, true);
   });
 
   // Octagonal Checkered Inlaid Marble Floor inside chamber (y = 3.02m)
@@ -1340,12 +1373,12 @@ export function buildAgraWorld(
   ];
   const onionDomeGeo = trackGeo(new THREE.LatheGeometry(domePoints, 26));
   pushStaticGeo(onionDomeGeo, marbleMat, 0, 16.0, -76.5, 0, 0, 0, 1, 1, 1, true, true);
-  pushStaticGeo(trackGeo(new THREE.CylinderGeometry(5.65, 5.85, 2.4, 24)), pietraDuraMat, 0, 17.0, -76.5, 0, 0, 0, 1, 1, 1, false, true);
+  pushStaticGeo(trackGeo(new THREE.CylinderGeometry(5.65, 5.85, 2.4, 24)), pietraDuraMat, 0, 17.0, -76.5, 0, 0, 0, 1, 1, 1, true, true);
   // Inverted lotus petal crown + multi-tiered golden kalash spire
-  pushStaticGeo(trackGeo(new THREE.ConeGeometry(1.15, 1.1, 14)), marbleTrimMat, 0, 27.9, -76.5, 0, 0, 0, 1, 1, 1, false, false);
-  pushStaticGeo(trackGeo(new THREE.CylinderGeometry(0.12, 0.36, 4.4, 8)), goldMat, 0, 30.2, -76.5, 0, 0, 0, 1, 1, 1, false, false);
+  pushStaticGeo(trackGeo(new THREE.ConeGeometry(1.15, 1.1, 14)), marbleTrimMat, 0, 27.9, -76.5, 0, 0, 0, 1, 1, 1, true, true);
+  pushStaticGeo(trackGeo(new THREE.CylinderGeometry(0.12, 0.36, 4.4, 8)), goldMat, 0, 30.2, -76.5, 0, 0, 0, 1, 1, 1, true, true);
   [29.1, 29.9, 30.65].forEach((ky, idx) => {
-    pushStaticGeo(trackGeo(new THREE.SphereGeometry(0.58 - idx * 0.14, 10, 8)), goldMat, 0, ky, -76.5, 0, 0, 0, 1, 1, 1, false, false);
+    pushStaticGeo(trackGeo(new THREE.SphereGeometry(0.58 - idx * 0.14, 10, 8)), goldMat, 0, ky, -76.5, 0, 0, 0, 1, 1, 1, true, true);
   });
 
   // 4 Open 8-Pillared Rooftop Chhatri Kiosks (authentic octagonal colonnade + chhajja eaves + dome)
@@ -1359,14 +1392,14 @@ export function buildAgraWorld(
     [-6.8, -83.4],
     [6.8, -83.4],
   ].forEach(([kx, kz]) => {
-    pushStaticGeo(trackGeo(new THREE.CylinderGeometry(1.9, 2.0, 0.32, 8)), marbleTrimMat, kx, 16.16, kz, 0, 0, 0, 1, 1, 1, false, true);
+    pushStaticGeo(trackGeo(new THREE.CylinderGeometry(1.9, 2.0, 0.32, 8)), marbleTrimMat, kx, 16.16, kz, 0, 0, 0, 1, 1, 1, true, true);
     for (let c = 0; c < 8; c++) {
       const ca = (c / 8) * Math.PI * 2;
-      pushStaticGeo(chhatriPillarGeo, marbleMat, kx + Math.cos(ca) * 1.55, 17.5, kz + Math.sin(ca) * 1.55, 0, 0, 0, 1, 1, 1, false, true);
+      pushStaticGeo(chhatriPillarGeo, marbleMat, kx + Math.cos(ca) * 1.55, 17.5, kz + Math.sin(ca) * 1.55, 0, 0, 0, 1, 1, 1, true, true);
     }
-    pushStaticGeo(chhatriEaveGeo, marbleTrimMat, kx, 18.8, kz, 0, Math.PI / 8, 0, 1, 1, 1, false, true);
-    pushStaticGeo(chhatriDomeGeo, marbleMat, kx, 19.3, kz, 0, 0, 0, 1, 1.08, 1, false, true);
-    pushStaticGeo(kFinialGeo, goldMat, kx, 21.6, kz, 0, 0, 0, 1, 1, 1, false, false);
+    pushStaticGeo(chhatriEaveGeo, marbleTrimMat, kx, 18.8, kz, 0, Math.PI / 8, 0, 1, 1, 1, true, true);
+    pushStaticGeo(chhatriDomeGeo, marbleMat, kx, 19.3, kz, 0, 0, 0, 1, 1.08, 1, true, true);
+    pushStaticGeo(kFinialGeo, goldMat, kx, 21.6, kz, 0, 0, 0, 1, 1, 1, true, true);
   });
 
   // 4 Tall 3-Tier Octagonal Corner Minarets with Carved Balconies, Corbel Rings & Open Chhatri Lanterns
@@ -1397,16 +1430,16 @@ export function buildAgraWorld(
     pushStaticGeo(minBaseGeo, marbleTrimMat, mx, 3.0 + 1.1, mz, 0, Math.PI / 8, 0, 1, 1, 1, true, true);
     tierGeos.forEach((tg) => {
       pushStaticGeo(tg.shaft, marbleMat, mx, 3.0 + tg.y, mz, 0, Math.PI / 8, 0, 1, 1, 1, true, true);
-      pushStaticGeo(tg.corbel, pietraDuraMat, mx, 3.0 + tg.y + tg.h / 2 - 0.2, mz, 0, Math.PI / 8, 0, 1, 1, 1, false, true);
-      pushStaticGeo(tg.balcony, marbleTrimMat, mx, 3.0 + tg.y + tg.h / 2 + 0.18, mz, 0, Math.PI / 8, 0, 1, 1, 1, false, true);
+      pushStaticGeo(tg.corbel, pietraDuraMat, mx, 3.0 + tg.y + tg.h / 2 - 0.2, mz, 0, Math.PI / 8, 0, 1, 1, 1, true, true);
+      pushStaticGeo(tg.balcony, marbleTrimMat, mx, 3.0 + tg.y + tg.h / 2 + 0.18, mz, 0, Math.PI / 8, 0, 1, 1, 1, true, true);
     });
     // Top open 6-pillar minaret lantern
     for (let p = 0; p < 6; p++) {
       const pa = (p / 6) * Math.PI * 2;
-      pushStaticGeo(minLanternPostGeo, marbleMat, mx + Math.cos(pa) * 0.92, 3.0 + 22.2, mz + Math.sin(pa) * 0.92, 0, 0, 0, 1, 1, 1, false, false);
+      pushStaticGeo(minLanternPostGeo, marbleMat, mx + Math.cos(pa) * 0.92, 3.0 + 22.2, mz + Math.sin(pa) * 0.92, 0, 0, 0, 1, 1, 1, true, true);
     }
-    pushStaticGeo(minCupolaGeo, marbleMat, mx, 3.0 + 23.4, mz, 0, 0, 0, 1, 1.06, 1, false, false);
-    pushStaticGeo(minSpireGeo, goldMat, mx, 3.0 + 25.3, mz, 0, 0, 0, 1, 1, 1, false, false);
+    pushStaticGeo(minCupolaGeo, marbleMat, mx, 3.0 + 23.4, mz, 0, 0, 0, 1, 1.06, 1, true, true);
+    pushStaticGeo(minSpireGeo, goldMat, mx, 3.0 + 25.3, mz, 0, 0, 0, 1, 1, 1, true, true);
 
     colliders.push({
       id: `minaret_${mx}_${mz}`,
@@ -1449,26 +1482,26 @@ export function buildAgraWorld(
     const faceSign = idx === 0 ? 1 : -1;
     // Main red sandstone pavilion hall
     addBox(worldGroup, 11, 9.2, 22, px, 4.6, -74, pavilionSandstoneMat, {
-      castShadow: false,
+      castShadow: true,
       receiveShadow: true,
     });
     // Central arched pishtaq projection facing inward/south
     addBox(worldGroup, 11.8, 11.4, 8.0, px, 5.7, -74, pavilionSandstoneMat, {
-      castShadow: false,
+      castShadow: true,
       receiveShadow: true,
     });
     // White marble trim frieze & corner roof chhatris
-    addBox(worldGroup, 12.1, 0.7, 22.4, px, 9.4, -74, marbleTrimMat, { castShadow: false });
+    addBox(worldGroup, 12.1, 0.7, 22.4, px, 9.4, -74, marbleTrimMat, { castShadow: true, receiveShadow: true });
     // Central white marble dome + flanking smaller domes (matching left skyline of image!)
-    pushStaticGeo(sideDomeGeo, marbleMat, px, 12.2, -74, 0, 0, 0, 1, 1.08, 1, false, true);
-    pushStaticGeo(kFinialGeo, goldMat, px, 15.6, -74, 0, 0, 0, 1.2, 1.3, 1.2, false, false);
+    pushStaticGeo(sideDomeGeo, marbleMat, px, 12.2, -74, 0, 0, 0, 1, 1.08, 1, true, true);
+    pushStaticGeo(kFinialGeo, goldMat, px, 15.6, -74, 0, 0, 0, 1.2, 1.3, 1.2, true, true);
     [-6.8, 6.8].forEach((dz) => {
-      pushStaticGeo(sideSmallDomeGeo, marbleMat, px, 10.6, -74 + dz, 0, 0, 0, 1, 1.05, 1, false, true);
-      pushStaticGeo(kFinialGeo, goldMat, px, 12.8, -74 + dz, 0, 0, 0, 0.9, 1.0, 0.9, false, false);
+      pushStaticGeo(sideSmallDomeGeo, marbleMat, px, 10.6, -74 + dz, 0, 0, 0, 1, 1.05, 1, true, true);
+      pushStaticGeo(kFinialGeo, goldMat, px, 12.8, -74 + dz, 0, 0, 0, 0.9, 1.0, 0.9, true, true);
     });
     // South-facing facade arch & corner turret
-    addBox(worldGroup, 5.2, 6.2, 0.5, px, 4.2, -62.9, sanctuarySlateMat, { castShadow: false });
-    addBox(worldGroup, 1.4, 11.8, 1.4, px - faceSign * 5.2, 5.9, -63.2, pavilionSandstoneMat, { castShadow: false });
+    addBox(worldGroup, 5.2, 6.2, 0.5, px, 4.2, -62.9, sanctuarySlateMat, { castShadow: true, receiveShadow: true });
+    addBox(worldGroup, 1.4, 11.8, 1.4, px - faceSign * 5.2, 5.9, -63.2, pavilionSandstoneMat, { castShadow: true, receiveShadow: true });
     pushStaticGeo(
       trackGeo(new THREE.SphereGeometry(0.9, 10, 8)),
       marbleMat,
@@ -1481,8 +1514,8 @@ export function buildAgraWorld(
       1,
       1,
       1,
-      false,
-      false,
+      true,
+      true,
     );
   });
 
@@ -2779,6 +2812,8 @@ export function buildAgraWorld(
   const haveliWoodDarkMat = trackMat(
     new THREE.MeshStandardMaterial({
       map: textures.woodPlank,
+      bumpMap: textures.woodBump,
+      bumpScale: 0.024,
       color: 0x472d1c,
       roughness: 0.58,
       metalness: 0.06,
@@ -2794,22 +2829,31 @@ export function buildAgraWorld(
   const haveliOchreMat = trackMat(
     new THREE.MeshStandardMaterial({
       map: textures.bazaarWall,
+      bumpMap: textures.bazaarWallBump,
+      bumpScale: 0.026,
+      roughnessMap: textures.bazaarWallRoughness,
       color: 0xd98a3c,
-      roughness: 0.88,
+      roughness: 0.9,
       metalness: 0.02,
     }),
   );
   const haveliPeachMat = trackMat(
     new THREE.MeshStandardMaterial({
       map: textures.bazaarWall,
+      bumpMap: textures.bazaarWallBump,
+      bumpScale: 0.026,
+      roughnessMap: textures.bazaarWallRoughness,
       color: 0xd69b86,
-      roughness: 0.88,
+      roughness: 0.9,
       metalness: 0.02,
     }),
   );
   const haveliTerracottaMat = trackMat(
     new THREE.MeshStandardMaterial({
       map: textures.sandstone,
+      bumpMap: textures.sandstoneBump,
+      bumpScale: 0.032,
+      roughnessMap: textures.sandstoneRoughness,
       color: 0x9e5a47,
       roughness: 0.9,
       metalness: 0.02,
@@ -3461,8 +3505,11 @@ export function buildAgraWorld(
   const stPlatformDeckMat = trackMat(
     new THREE.MeshStandardMaterial({
       map: textures.courtyardTile,
+      bumpMap: textures.stoneBump,
+      bumpScale: 0.026,
+      roughnessMap: textures.stoneRoughness,
       color: 0x6b7280,
-      roughness: 0.62,
+      roughness: 0.72,
       metalness: 0.08,
     }),
   );
@@ -3476,9 +3523,12 @@ export function buildAgraWorld(
   const stCanopySheetMat = trackMat(
     new THREE.MeshStandardMaterial({
       map: textures.rustedMetal,
+      bumpMap: textures.rustedMetalBump,
+      bumpScale: 0.032,
+      roughnessMap: textures.rustedMetalRoughness,
       color: 0x94a3b8,
-      roughness: 0.56,
-      metalness: 0.42,
+      roughness: 0.82,
+      metalness: 0.48,
     }),
   );
   const stFobBlueMat = trackMat(
@@ -5021,7 +5071,7 @@ export function buildAgraWorld(
   // =========================================================================
   // 9. ATMOSPHERIC DUST/ASH MOTES, EMERGENCY BARREL FLARES & EXTRACTION BEACON
   // =========================================================================
-  const dustCount = isSoftwareGl ? 140 : 280;
+  const dustCount = isSoftwareGl ? 140 : isIntelIntegrated ? 200 : 280;
   const dustPositions = new Float32Array(dustCount * 3);
   const dustPhase = new Float32Array(dustCount);
   for (let i = 0; i < dustCount; i++) {
@@ -5032,6 +5082,8 @@ export function buildAgraWorld(
   }
   const dustGeo = trackGeo(new THREE.BufferGeometry());
   dustGeo.setAttribute('position', new THREE.BufferAttribute(dustPositions, 3));
+  dustGeo.setAttribute('aPhase', new THREE.BufferAttribute(dustPhase, 1));
+  const dustElapsedUniform = { value: 0 };
   const dustMat = trackMat(
     new THREE.PointsMaterial({
       map: textures.dustMote,
@@ -5043,6 +5095,18 @@ export function buildAgraWorld(
       depthWrite: false,
     }),
   );
+  dustMat.onBeforeCompile = (shader) => {
+    shader.uniforms.uElapsed = dustElapsedUniform;
+    shader.vertexShader = shader.vertexShader
+      .replace('#include <common>', '#include <common>\nattribute float aPhase;\nuniform float uElapsed;')
+      .replace(
+        '#include <begin_vertex>',
+        `#include <begin_vertex>
+        transformed.y = 0.4 + mod(transformed.y - 0.4 + uElapsed * 0.27, 15.1);
+        transformed.x += sin(uElapsed * 0.55 + aPhase) * 0.65;
+        transformed.z += cos(uElapsed * 0.48 + aPhase) * 0.65;`,
+      );
+  };
   const dustPoints = new THREE.Points(dustGeo, dustMat);
   dustPoints.frustumCulled = false;
   worldGroup.add(dustPoints);
@@ -5096,11 +5160,30 @@ export function buildAgraWorld(
     darkMetalMat,
   );
   flareCanister.position.y = 0.26;
+  flareCanister.castShadow = !isSoftwareGl;
+  flareCanister.receiveShadow = true;
   extractionGroup.add(flareCanister);
+
+  const flareTipMat = trackMat(
+    new THREE.MeshStandardMaterial({
+      color: 0x34d399,
+      emissive: 0x34d399,
+      emissiveIntensity: 0,
+      roughness: 0.2,
+      metalness: 0.1,
+    }),
+  );
+  const flareTip = new THREE.Mesh(
+    trackGeo(new THREE.SphereGeometry(0.16, 12, 10)),
+    flareTipMat,
+  );
+  flareTip.position.y = 0.56;
+  flareTip.visible = false;
+  extractionGroup.add(flareTip);
 
   const extractionBeamMat = trackMat(
     new THREE.MeshBasicMaterial({
-      color: 0x10b981,
+      color: new THREE.Color(0.25, 2.2, 1.35),
       transparent: true,
       opacity: 0.0,
       blending: THREE.AdditiveBlending,
@@ -5118,7 +5201,7 @@ export function buildAgraWorld(
 
   const extractionRingMat = trackMat(
     new THREE.MeshBasicMaterial({
-      color: 0x34d399,
+      color: new THREE.Color(0.35, 2.4, 1.5),
       transparent: true,
       opacity: 0.0,
       blending: THREE.AdditiveBlending,
@@ -5144,10 +5227,12 @@ export function buildAgraWorld(
     extractionActive = active;
     extractionBeam.visible = active;
     extractionRing.visible = active;
+    flareTip.visible = active;
     if (!active) {
       extractionBeamMat.opacity = 0;
       extractionRingMat.opacity = 0;
       extractionLight.intensity = 0;
+      flareTipMat.emissiveIntensity = 0;
     }
   };
 
@@ -5155,6 +5240,12 @@ export function buildAgraWorld(
   const updateWorldProps = (elapsed: number): void => {
     const dt = Math.max(0.001, Math.min(0.05, elapsed - lastPropsElapsed));
     lastPropsElapsed = elapsed;
+
+    // Animate Charbagh reflecting pool & Yamuna ripple bump UV coordinates smoothly
+    textures.waterRippleBump.offset.x = (textures.waterRippleBump.offset.x + dt * 0.03) % 1;
+    textures.waterRippleBump.offset.y = (textures.waterRippleBump.offset.y + dt * 0.02) % 1;
+    textures.poolWater.offset.x = (textures.poolWater.offset.x + dt * 0.015) % 1;
+    textures.poolWater.offset.y = (textures.poolWater.offset.y + dt * 0.01) % 1;
 
     // Spin Haveli ceiling fan & Railway platform fans smoothly
     haveliFanGroup.rotation.y = elapsed * 2.5;
@@ -5195,17 +5286,8 @@ export function buildAgraWorld(
     cratePillarMat.opacity = 0.13 + Math.sin(elapsed * 2.4) * 0.04;
     uvBarrierMat.opacity = 0.12 + Math.sin(elapsed * 3.1) * 0.035;
 
-    // Drift floating atmospheric dust/ash motes gently
-    const posAttr = dustGeo.getAttribute('position') as THREE.BufferAttribute;
-    for (let i = 0; i < dustCount; i++) {
-      const ph = dustPhase[i];
-      let py = posAttr.getY(i) + 0.0045;
-      if (py > 15.5) py = 0.4;
-      const px = posAttr.getX(i) + Math.sin(elapsed * 0.55 + ph) * 0.006;
-      const pz = posAttr.getZ(i) + Math.cos(elapsed * 0.48 + ph) * 0.006;
-      posAttr.setXYZ(i, px, py, pz);
-    }
-    posAttr.needsUpdate = true;
+    // Drift floating atmospheric dust/ash motes gently on GPU (zero CPU buffer uploads)
+    dustElapsedUniform.value = elapsed;
 
     // Flicker emergency burn barrels
     for (let i = 0; i < flickerLights.length; i++) {
@@ -5220,10 +5302,11 @@ export function buildAgraWorld(
 
     if (extractionActive) {
       const pulse = 0.5 + 0.5 * Math.sin(elapsed * 4.8);
-      extractionBeamMat.opacity = 0.24 + pulse * 0.14;
-      extractionRingMat.opacity = 0.45 + pulse * 0.35;
+      flareTipMat.emissiveIntensity = 3.2 + pulse * 1.4;
+      extractionBeamMat.opacity = 0.28 + pulse * 0.16;
+      extractionRingMat.opacity = 0.52 + pulse * 0.35;
       extractionRing.scale.setScalar(0.95 + pulse * 0.18);
-      extractionLight.intensity = 5.5 + pulse * 3.5;
+      extractionLight.intensity = 6.2 + pulse * 3.8;
     }
   };
 

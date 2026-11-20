@@ -645,6 +645,59 @@ function render3DMinimap(
     );
   }
 
+  // 1B. Territory Sector Zones & Flagpoles in 3D Space
+  if (telemetry.territories && telemetry.territories.length > 0) {
+    for (let ti = 0; ti < telemetry.territories.length; ti++) {
+      const t = telemetry.territories[ti];
+      const segs = 22;
+      const ringPts: Vec3[] = [];
+      for (let s = 0; s < segs; s++) {
+        const ang = (s / segs) * Math.PI * 2;
+        ringPts.push({
+          x: t.x + Math.cos(ang) * t.radius,
+          y: 0.14,
+          z: t.z + Math.sin(ang) * t.radius,
+        });
+      }
+      drawProjectedPoly(
+        ctx,
+        ringPts,
+        px,
+        py,
+        pz,
+        cosYaw,
+        sinYaw,
+        w,
+        h,
+        focal,
+        t.captured ? 'rgba(56, 189, 248, 0.16)' : 'rgba(220, 38, 38, 0.16)',
+        t.captured ? 'rgba(56, 189, 248, 0.78)' : 'rgba(239, 68, 68, 0.72)',
+        1.2,
+      );
+
+      const cBase = toCameraSpace(t.x, 0.2, t.z, px, py, pz, cosYaw, sinYaw);
+      const cTop = toCameraSpace(t.x, 4.8, t.z, px, py, pz, cosYaw, sinYaw);
+      if (cBase.depth >= NEAR_PLANE && cTop.depth >= NEAR_PLANE) {
+        const sBase = projectCamPt(cBase, w, h, focal);
+        const sTop = projectCamPt(cTop, w, h, focal);
+        ctx.beginPath();
+        ctx.moveTo(sBase.x, sBase.y);
+        ctx.lineTo(sTop.x, sTop.y);
+        ctx.strokeStyle = t.captured ? '#38bdf8' : '#ef4444';
+        ctx.lineWidth = 1.6;
+        ctx.stroke();
+
+        ctx.beginPath();
+        ctx.moveTo(sTop.x, sTop.y - 3);
+        ctx.lineTo(sTop.x + 6, sTop.y - 1);
+        ctx.lineTo(sTop.x, sTop.y + 1.5);
+        ctx.closePath();
+        ctx.fillStyle = t.captured ? '#38bdf8' : '#dc2626';
+        ctx.fill();
+      }
+    }
+  }
+
   // 2. Active Pink/Magenta GPS Route Ribbon on the 3D ground plane
   const obj = getActiveObjective(telemetry);
   const routePts = computeAgraGpsRoute(px, pz, obj.x, obj.z);
@@ -770,7 +823,13 @@ function render3DMinimap(
     const s = projectCamPt(c, w, h, focal);
     if (s.x < -8 || s.x > w + 8 || s.y < -8 || s.y > h + 8) continue;
 
-    if (e.kind === 'runner') {
+    if (e.kind === 'night_runner') {
+      ctx.beginPath();
+      ctx.arc(s.x, s.y, 6.0 + pulse * 3.5, 0, Math.PI * 2);
+      ctx.strokeStyle = `rgba(255, 34, 0, ${0.55 + pulse * 0.45})`;
+      ctx.lineWidth = 1.8;
+      ctx.stroke();
+    } else if (e.kind === 'runner') {
       ctx.beginPath();
       ctx.arc(s.x, s.y, 4.5 + pulse * 3, 0, Math.PI * 2);
       ctx.strokeStyle = `rgba(239, 68, 68, ${0.45 + pulse * 0.45})`;
@@ -778,12 +837,42 @@ function render3DMinimap(
       ctx.stroke();
     }
     ctx.beginPath();
-    ctx.arc(s.x, s.y, e.kind === 'brute' ? 3.2 : 2.3, 0, Math.PI * 2);
-    ctx.fillStyle = e.kind === 'runner' || e.alerted ? '#ef4444' : '#f59e0b';
+    ctx.arc(s.x, s.y, e.kind === 'brute' ? 3.2 : e.kind === 'night_runner' ? 3.0 : 2.3, 0, Math.PI * 2);
+    ctx.fillStyle =
+      e.kind === 'night_runner'
+        ? '#ff2200'
+        : e.kind === 'runner' || e.alerted
+          ? '#ef4444'
+          : '#f59e0b';
     ctx.fill();
     ctx.strokeStyle = 'rgba(0,0,0,0.7)';
     ctx.lineWidth = 0.8;
     ctx.stroke();
+  }
+
+  // 6B. Allied Survivor Blips in 3D (#00d8ff)
+  if (telemetry.allies && telemetry.allies.length > 0) {
+    for (let i = 0; i < telemetry.allies.length; i++) {
+      const a = telemetry.allies[i];
+      const cam = toCameraSpace(a.x, 0.9, a.z, px, py, pz, cosYaw, sinYaw);
+      if (cam.depth < NEAR_PLANE) continue;
+      const s = projectCamPt(cam, w, h, focal);
+      if (s.x < -8 || s.x > w + 8 || s.y < -8 || s.y > h + 8) continue;
+
+      ctx.beginPath();
+      ctx.arc(s.x, s.y, 4.8, 0, Math.PI * 2);
+      ctx.strokeStyle = 'rgba(0, 216, 255, 0.45)';
+      ctx.lineWidth = 1.4;
+      ctx.stroke();
+
+      ctx.beginPath();
+      ctx.arc(s.x, s.y, 3.1, 0, Math.PI * 2);
+      ctx.fillStyle = '#00d8ff';
+      ctx.fill();
+      ctx.strokeStyle = '#083344';
+      ctx.lineWidth = 1.0;
+      ctx.stroke();
+    }
   }
 
   // 7. Uncollected Antizin Crates in 3D (elevation stem + cyan diamond)
@@ -905,6 +994,26 @@ function render2DMinimap(
     }
   }
 
+  // 1B. Territory Boundaries & Flagpoles in 2D Blueprint Space
+  if (telemetry.territories && telemetry.territories.length > 0) {
+    for (let ti = 0; ti < telemetry.territories.length; ti++) {
+      const t = telemetry.territories[ti];
+      ctx.beginPath();
+      ctx.arc(t.x, t.z, t.radius, 0, Math.PI * 2);
+      ctx.fillStyle = t.captured ? 'rgba(56, 189, 248, 0.16)' : 'rgba(220, 38, 38, 0.14)';
+      ctx.fill();
+      ctx.strokeStyle = t.captured ? 'rgba(56, 189, 248, 0.82)' : 'rgba(239, 68, 68, 0.78)';
+      ctx.lineWidth = 0.75;
+      ctx.stroke();
+
+      // Flagpole marker at center
+      ctx.beginPath();
+      ctx.arc(t.x, t.z, 1.35, 0, Math.PI * 2);
+      ctx.fillStyle = t.captured ? '#38bdf8' : '#ef4444';
+      ctx.fill();
+    }
+  }
+
   // 2. Flat 2D Building Footprints (no 3D extrusion)
   for (let i = 0; i < AGRA_BUILDINGS_3D.length; i++) {
     const b = AGRA_BUILDINGS_3D[i];
@@ -989,7 +1098,13 @@ function render2DMinimap(
     const s = worldTo2D(e.x, e.z);
     if (s.x < -8 || s.x > w + 8 || s.y < -8 || s.y > h + 8) continue;
 
-    if (e.kind === 'runner') {
+    if (e.kind === 'night_runner') {
+      ctx.beginPath();
+      ctx.arc(s.x, s.y, 6.0 + pulse * 3.5, 0, Math.PI * 2);
+      ctx.strokeStyle = `rgba(255, 34, 0, ${0.55 + pulse * 0.45})`;
+      ctx.lineWidth = 1.8;
+      ctx.stroke();
+    } else if (e.kind === 'runner') {
       ctx.beginPath();
       ctx.arc(s.x, s.y, 4.5 + pulse * 3, 0, Math.PI * 2);
       ctx.strokeStyle = `rgba(239, 68, 68, ${0.45 + pulse * 0.45})`;
@@ -997,12 +1112,40 @@ function render2DMinimap(
       ctx.stroke();
     }
     ctx.beginPath();
-    ctx.arc(s.x, s.y, e.kind === 'brute' ? 3.2 : 2.3, 0, Math.PI * 2);
-    ctx.fillStyle = e.kind === 'runner' || e.alerted ? '#ef4444' : '#f59e0b';
+    ctx.arc(s.x, s.y, e.kind === 'brute' ? 3.2 : e.kind === 'night_runner' ? 3.0 : 2.3, 0, Math.PI * 2);
+    ctx.fillStyle =
+      e.kind === 'night_runner'
+        ? '#ff2200'
+        : e.kind === 'runner' || e.alerted
+          ? '#ef4444'
+          : '#f59e0b';
     ctx.fill();
     ctx.strokeStyle = 'rgba(0,0,0,0.75)';
     ctx.lineWidth = 0.8;
     ctx.stroke();
+  }
+
+  // 6B. Allied Survivor Blips in 2D (#00d8ff)
+  if (telemetry.allies && telemetry.allies.length > 0) {
+    for (let i = 0; i < telemetry.allies.length; i++) {
+      const a = telemetry.allies[i];
+      const s = worldTo2D(a.x, a.z);
+      if (s.x < -8 || s.x > w + 8 || s.y < -8 || s.y > h + 8) continue;
+
+      ctx.beginPath();
+      ctx.arc(s.x, s.y, 4.8, 0, Math.PI * 2);
+      ctx.strokeStyle = 'rgba(0, 216, 255, 0.45)';
+      ctx.lineWidth = 1.4;
+      ctx.stroke();
+
+      ctx.beginPath();
+      ctx.arc(s.x, s.y, 3.1, 0, Math.PI * 2);
+      ctx.fillStyle = '#00d8ff';
+      ctx.fill();
+      ctx.strokeStyle = '#083344';
+      ctx.lineWidth = 1.0;
+      ctx.stroke();
+    }
   }
 
   // 7. Uncollected Antizin Crate Markers

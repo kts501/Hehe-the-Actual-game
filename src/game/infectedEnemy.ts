@@ -8,6 +8,8 @@ export type ScreamerAiState =
   | 'STAGGER'
   | 'KNOCKDOWN'
   | 'GRABBED'
+  | 'IMPALED_DEAD'
+  | 'DEAD_RAGDOLL'
   | 'DEAD';
 
 export type MeleeSwingDirection = 'left_to_right' | 'right_to_left' | 'overhead';
@@ -91,7 +93,7 @@ function createJaggedGarmentGeo(
  * sunken orbital hollows, and 3 asymmetric mutation nodules on the upper-left temple.
  */
 function createGauntCraniumGeo(): THREE.BufferGeometry {
-  const geo = new THREE.SphereGeometry(0.112, 16, 14);
+  const geo = new THREE.SphereGeometry(0.112, 20, 16);
   const pos = geo.attributes.position;
 
   for (let i = 0; i < pos.count; i++) {
@@ -169,9 +171,159 @@ function createGauntCraniumGeo(): THREE.BufferGeometry {
       z += 0.014;
     }
 
+    // Shift into headGroup local coordinates (crown top ~+0.156m)
+    y += 0.024;
+
+    // Cut off / clip bottom underside cleanly at the upper palate/gumline (y = -0.025m)
+    // and vault the central oral roof upward so no solid skull sphere hangs behind the mouth.
+    if (y < -0.025) {
+      const inOralRoof = z > 0.008 && z < 0.082 && Math.abs(x) < 0.044;
+      if (inOralRoof) {
+        const roofArch = (1 - Math.pow(x / 0.044, 2)) * Math.sin(THREE.MathUtils.clamp((z - 0.008) / 0.074, 0, 1) * Math.PI);
+        y = -0.025 + roofArch * 0.021;
+      } else {
+        y = -0.025;
+      }
+    }
+
     pos.setXYZ(i, x, y, z);
   }
 
+  geo.computeVertexNormals();
+  return geo;
+}
+
+/**
+ * Recessed open-front oral palate & deep throat cavity (#120406) tucked behind the upper teeth
+ * so looking into the wide-open mouth shows genuine 3D dark throat depth.
+ */
+function createOralThroatCavityGeo(): THREE.BufferGeometry {
+  const segU = 12; // left-to-right arc around the back of the mouth
+  const segV = 8; // vaulted palate top down to deep pharynx floor
+  const positions: number[] = [];
+  const indices: number[] = [];
+
+  for (let v = 0; v <= segV; v++) {
+    const tv = v / segV; // 0 = palate roof, 1 = deep throat floor
+    const pitch = THREE.MathUtils.lerp(0.18, Math.PI * 0.88, tv);
+    const sinP = Math.sin(pitch);
+    const cosP = Math.cos(pitch);
+
+    for (let u = 0; u <= segU; u++) {
+      const tu = u / segU; // 0 = left cheek wall (+Z), 0.5 = rear pharynx (-Z), 1 = right cheek wall (+Z)
+      const az = THREE.MathUtils.lerp(Math.PI * 0.58, Math.PI * 1.42, tu);
+      const x = Math.sin(az) * sinP * 0.041;
+      const y = -0.029 + cosP * 0.026;
+      const z = 0.056 + Math.cos(az) * sinP * 0.046;
+      positions.push(x, y, z);
+    }
+  }
+
+  const stride = segU + 1;
+  for (let v = 0; v < segV; v++) {
+    for (let u = 0; u < segU; u++) {
+      const a = v * stride + u;
+      const b = a + 1;
+      const c = a + stride;
+      const d = c + 1;
+      indices.push(a, b, c, b, d, c);
+    }
+  }
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geo.setIndex(indices);
+  geo.computeVertexNormals();
+  return geo;
+}
+
+/**
+ * Sculpted independent U-shaped lower mandible (`mandibleMesh`) with a hollowed-out center floor,
+ * rising side mandibular rami, and gaunt angular chin.
+ */
+function createMandibleGeo(): THREE.BufferGeometry {
+  const uSteps = 22;
+  const ringSegs = 10;
+  const positions: number[] = [];
+  const indices: number[] = [];
+
+  const spinePts: THREE.Vector3[] = [];
+  const rxArr: number[] = [];
+  const ryArr: number[] = [];
+
+  for (let i = 0; i <= uSteps; i++) {
+    const s = -1 + (2 * i) / uSteps; // -1 (left condyle) -> 0 (chin) -> +1 (right condyle)
+    const u = Math.abs(s);
+    const x = Math.sign(s) * Math.sin(u * Math.PI * 0.52) * 0.055;
+    const z = 0.094 - Math.pow(u, 1.5) * 0.090;
+    // Chin front (-0.048) -> jaw angle (-0.036) -> condyle hinge (0.0)
+    const ramusRise = u > 0.52 ? Math.pow((u - 0.52) / 0.48, 1.2) : 0;
+    const y = THREE.MathUtils.lerp(-0.048, -0.035, Math.min(1, u / 0.52)) + ramusRise * 0.035;
+
+    spinePts.push(new THREE.Vector3(x, y, z));
+    rxArr.push(THREE.MathUtils.lerp(0.0135, 0.0088, u));
+    ryArr.push(THREE.MathUtils.lerp(0.0195, 0.0115, u));
+  }
+
+  const tangent = new THREE.Vector3();
+  const up = new THREE.Vector3(0, 1, 0);
+  const side = new THREE.Vector3();
+  const normalUp = new THREE.Vector3();
+
+  for (let i = 0; i <= uSteps; i++) {
+    const prev = spinePts[Math.max(0, i - 1)];
+    const next = spinePts[Math.min(uSteps, i + 1)];
+    tangent.subVectors(next, prev).normalize();
+    side.crossVectors(tangent, up);
+    if (side.lengthSq() < 1e-5) side.set(1, 0, 0);
+    else side.normalize();
+    normalUp.crossVectors(side, tangent).normalize();
+
+    const p = spinePts[i];
+    const rx = rxArr[i];
+    const ry = ryArr[i];
+    const s = -1 + (2 * i) / uSteps;
+    const chinSharpness = Math.max(0, 1 - Math.abs(s) / 0.26);
+
+    for (let r = 0; r < ringSegs; r++) {
+      const theta = (r / ringSegs) * Math.PI * 2;
+      const cosT = Math.cos(theta);
+      const sinT = Math.sin(theta);
+
+      // Angular chin ridge at bottom-front of the U
+      const chinDrop = sinT < -0.2 ? chinSharpness * (-sinT - 0.2) * 0.008 : 0;
+      const vx = p.x + side.x * (cosT * rx) + normalUp.x * (sinT * ry);
+      const vy = p.y + side.y * (cosT * rx) + normalUp.y * (sinT * ry) - chinDrop;
+      const vz = p.z + side.z * (cosT * rx) + normalUp.z * (sinT * ry) + chinDrop * 0.45;
+      positions.push(vx, vy, vz);
+    }
+  }
+
+  for (let i = 0; i < uSteps; i++) {
+    const row0 = i * ringSegs;
+    const row1 = (i + 1) * ringSegs;
+    for (let r = 0; r < ringSegs; r++) {
+      const next = (r + 1) % ringSegs;
+      indices.push(row0 + r, row1 + r, row0 + next, row0 + next, row1 + r, row1 + next);
+    }
+  }
+
+  const startCenter = positions.length / 3;
+  positions.push(spinePts[0].x, spinePts[0].y, spinePts[0].z);
+  for (let r = 0; r < ringSegs; r++) {
+    indices.push(startCenter, r, (r + 1) % ringSegs);
+  }
+  const endCenter = positions.length / 3;
+  const last = spinePts[uSteps];
+  positions.push(last.x, last.y, last.z);
+  const topRow = uSteps * ringSegs;
+  for (let r = 0; r < ringSegs; r++) {
+    indices.push(endCenter, topRow + ((r + 1) % ringSegs), topRow + r);
+  }
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geo.setIndex(indices);
   geo.computeVertexNormals();
   return geo;
 }
@@ -248,18 +400,21 @@ export class InfectedEnemy {
   public readonly hairGroup = new THREE.Group();
 
   // State Machine & Physics Properties
+  public readonly isElite: boolean;
   public aiState: ScreamerAiState = 'IDLE';
   public readonly velocity = new THREE.Vector3();
   public angularVelocity = 0;
   public isGrounded = true;
-  public health = 100;
-  public maxHealth = 100;
+  public health = 110;
+  public maxHealth = 110;
   public yaw = 0;
   public readonly homePos = new THREE.Vector3();
   public alerted = false;
   public attackCooldown = 0;
   public groanTimer = 2 + Math.random() * 5;
   public respawnTimer = 0;
+  private readonly flankAngle: number;
+  private pounceCooldown = 0;
 
   // Timers & Reaction Kinematics
   private animPhase = Math.random() * 12;
@@ -277,9 +432,12 @@ export class InfectedEnemy {
 
   private chaseAttackWindup = -1; // >= 0 while swinging claws in CHASE
   private screamPulse = 0;
-  private jawAngleRad = 0.26; // ~15 deg default
+  private jawAngleRad = 0.68; // ~39 deg wide open default
   private deadTimer = 0;
   private hasTriggeredChaseScreech = false;
+  private impaledStage: 'WINDUP' | 'LIMP' = 'WINDUP';
+  private ragdollRollZ = 0.22;
+  private ragdollFallProg = 0;
 
   // Secondary Hair Jiggle Physics State
   private readonly hairLocks: HairLockSpec[] = [];
@@ -308,14 +466,22 @@ export class InfectedEnemy {
     y: number,
     z: number,
     initialYaw = 0,
+    isElite = id % 5 === 0,
   ) {
     this.id = id;
+    this.isElite = isElite;
+    this.flankAngle = ((id % 5) - 2) * 0.34;
+    this.maxHealth = isElite ? 165 : 110;
+    this.health = this.maxHealth;
     this.homePos.set(x, y, z);
     this.yaw = initialYaw;
 
-    this.root.name = `Screamer_${id}`;
+    this.root.name = isElite ? `EliteVolatile_${id}` : `Screamer_${id}`;
     this.root.position.set(x, y, z);
     this.root.rotation.y = initialYaw;
+    if (isElite) {
+      this.root.scale.setScalar(1.07);
+    }
 
     const trackGeo = <T extends THREE.BufferGeometry>(g: T): T => {
       this.disposables.push(g);
@@ -333,8 +499,8 @@ export class InfectedEnemy {
       new THREE.MeshStandardMaterial({
         map: textures.zombieSkin,
         bumpMap: textures.zombieSkinBump,
-        bumpScale: 0.022,
-        color: InfectedEnemy.BASE_SKIN_HEX,
+        bumpScale: 0.024,
+        color: isElite ? 0x624f4e : InfectedEnemy.BASE_SKIN_HEX,
         roughness: 0.72,
         metalness: 0.04,
         flatShading: false,
@@ -384,11 +550,21 @@ export class InfectedEnemy {
 
     const cataractEyeMat = trackMat(
       new THREE.MeshStandardMaterial({
-        color: 0xd8d2c5,
-        emissive: 0x331100,
-        emissiveIntensity: 0.35,
-        roughness: 0.28,
+        color: this.isElite ? 0xff7b29 : 0xd8d2c5,
+        emissive: this.isElite ? 0xff3b14 : 0x331100,
+        emissiveIntensity: this.isElite ? 2.6 : 0.35,
+        roughness: 0.25,
         metalness: 0.02,
+        flatShading: false,
+      }),
+    );
+
+    const throatCavityMat = trackMat(
+      new THREE.MeshStandardMaterial({
+        color: 0x120406,
+        roughness: 0.95,
+        metalness: 0.02,
+        side: THREE.DoubleSide,
         flatShading: false,
       }),
     );
@@ -790,20 +966,20 @@ export class InfectedEnemy {
     this.chest.add(this.neck);
 
     const neckCore = new THREE.Mesh(
-      trackGeo(smoothGeo(new THREE.CylinderGeometry(0.054, 0.066, 0.135, 12))),
+      trackGeo(smoothGeo(new THREE.CylinderGeometry(0.044, 0.06, 0.125, 12))),
       this.skinMat,
     );
-    neckCore.position.y = 0.05;
-    neckCore.rotation.x = 0.16;
+    neckCore.position.set(0, 0.046, -0.014);
+    neckCore.rotation.x = 0.12;
     this.neck.add(neckCore);
 
     // 4 Angled neck sinew cords converging toward clavicle notch & back skull
-    const sinewGeo = trackGeo(smoothGeo(new THREE.CylinderGeometry(0.011, 0.014, 0.145, 7)));
+    const sinewGeo = trackGeo(smoothGeo(new THREE.CylinderGeometry(0.011, 0.014, 0.135, 7)));
     const sinewConfigs: Array<{ pos: [number, number, number]; rot: [number, number, number] }> = [
-      { pos: [-0.036, 0.052, 0.034], rot: [0.22, 0, 0.28] },
-      { pos: [0.036, 0.052, 0.034], rot: [0.22, 0, -0.28] },
-      { pos: [-0.032, 0.055, -0.032], rot: [-0.14, 0, 0.18] },
-      { pos: [0.032, 0.055, -0.032], rot: [-0.14, 0, -0.18] },
+      { pos: [-0.036, 0.05, 0.014], rot: [0.18, 0, 0.28] },
+      { pos: [0.036, 0.05, 0.014], rot: [0.18, 0, -0.28] },
+      { pos: [-0.032, 0.052, -0.038], rot: [-0.14, 0, 0.18] },
+      { pos: [0.032, 0.052, -0.038], rot: [-0.14, 0, -0.18] },
     ];
     sinewConfigs.forEach((sc) => {
       const s = new THREE.Mesh(sinewGeo, sinewSkinMat);
@@ -814,15 +990,17 @@ export class InfectedEnemy {
 
     // -------------------------------------------------------------------------
     // 1.1 DETAILED VOLATILE / SCREAMER HEAD SCULPT (~0.28m tall x 0.20m wide)
+    // Only the clipped upper cranium (upperSkullMesh) and hinged U-jaw (jawPivot) exist.
     // -------------------------------------------------------------------------
     this.headGroup.position.set(0, 0.145, 0.042);
     this.neck.add(this.headGroup);
 
-    const craniumGeo = trackGeo(createGauntCraniumGeo());
-    const cranium = new THREE.Mesh(craniumGeo, this.skinMat);
-    cranium.position.set(0, 0.024, 0);
-    cranium.castShadow = true;
-    this.headGroup.add(cranium);
+    const upperSkullGeo = trackGeo(createGauntCraniumGeo());
+    const upperSkullMesh = new THREE.Mesh(upperSkullGeo, this.skinMat);
+    upperSkullMesh.name = 'upperSkullMesh';
+    upperSkullMesh.position.set(0, 0, 0);
+    upperSkullMesh.castShadow = true;
+    this.headGroup.add(upperSkullMesh);
 
     // 3 Asymmetric scarred mutation nodules & vein ridges across upper-left temple (matches reference)
     const noduleGeo = trackGeo(smoothGeo(new THREE.SphereGeometry(0.022, 10, 8)));
@@ -872,14 +1050,14 @@ export class InfectedEnemy {
       this.headGroup.add(ridge);
     });
 
-    // Recessed oral cavern inside upper skull behind stretched mouth
-    const oralCav = new THREE.Mesh(
-      trackGeo(smoothGeo(new THREE.SphereGeometry(0.052, 10, 8))),
-      nasalCavMat,
+    // Deep recessed dark-crimson/black interior throat & palate cavity (#120406, roughness: 0.95)
+    // open toward +Z behind the upper teeth so the mouth cavity has true unobstructed 3D depth.
+    const throatPalateMesh = new THREE.Mesh(
+      trackGeo(createOralThroatCavityGeo()),
+      throatCavityMat,
     );
-    oralCav.scale.set(1.0, 1.35, 0.85);
-    oralCav.position.set(0, -0.05, 0.055);
-    this.headGroup.add(oralCav);
+    throatPalateMesh.name = 'throatPalateCavity';
+    this.headGroup.add(throatPalateMesh);
 
     // Sculpted gaunt C-shaped ears (#7A746E)
     const earOuterGeo = trackGeo(smoothGeo(new THREE.TorusGeometry(0.022, 0.0065, 6, 10, Math.PI * 1.45)));
@@ -902,92 +1080,79 @@ export class InfectedEnemy {
 
     // Upper Maxilla Gums (#3D1218) + 7 Sharp Irregular Yellowed-Ivory Upper Teeth (#CFC4A8)
     const upperGumArc = new THREE.Mesh(
-      trackGeo(smoothGeo(new THREE.TorusGeometry(0.044, 0.012, 6, 12, Math.PI))),
+      trackGeo(smoothGeo(new THREE.TorusGeometry(0.044, 0.011, 6, 14, Math.PI))),
       gumsMat,
     );
     upperGumArc.rotation.x = Math.PI / 2;
-    upperGumArc.position.set(0, -0.036, 0.068);
+    upperGumArc.position.set(0, -0.026, 0.064);
     this.headGroup.add(upperGumArc);
 
     const upperToothGeo = trackGeo(smoothGeo(new THREE.ConeGeometry(0.0046, 0.024, 5)));
     const upperToothAngles = [-1.15, -0.78, -0.42, 0.0, 0.42, 0.78, 1.15];
     upperToothAngles.forEach((ang, idx) => {
       const tx = Math.sin(ang) * 0.043;
-      const tz = 0.068 + Math.cos(ang) * 0.046;
+      const tz = 0.064 + Math.cos(ang) * 0.046;
       const t = new THREE.Mesh(upperToothGeo, teethMat);
       const scaleH = idx === 1 || idx === 5 ? 1.24 : 0.85 + ((idx * 7) % 3) * 0.14;
       t.scale.set(0.95, scaleH, 0.95);
-      t.position.set(tx, -0.046, tz);
+      t.position.set(tx, -0.038, tz);
       t.rotation.x = Math.PI + ((idx % 2 === 0 ? 1 : -1) * 0.08);
       t.rotation.z = (idx - 3) * 0.05;
       this.headGroup.add(t);
     });
 
     // -------------------------------------------------------------------------
-    // Hyper-Extended Unhinged Lower Jaw (`jawPivot`) + Gums + 7 Lower Teeth + Tongue
+    // Hyper-Extended Unhinged Lower Jaw (`jawPivot` -> hollowed U-shaped `mandibleMesh`)
     // -------------------------------------------------------------------------
-    this.jawPivot.position.set(0, -0.026, 0.015);
-    this.jawPivot.rotation.x = 0.26;
+    this.jawPivot.position.set(0, -0.024, 0.016);
+    this.jawPivot.rotation.x = 0.68;
     this.headGroup.add(this.jawPivot);
 
-    // Elongated mandibular rami descending diagonally to gaunt angular chin
-    const ramusGeo = trackGeo(smoothGeo(new THREE.CapsuleGeometry(0.014, 0.085, 5, 8)));
-    [-1, 1].forEach((side) => {
-      const ramus = new THREE.Mesh(ramusGeo, this.skinMat);
-      ramus.position.set(side * 0.056, -0.042, 0.032);
-      ramus.rotation.x = 0.82;
-      ramus.rotation.z = side * 0.22;
-      this.jawPivot.add(ramus);
-    });
-
-    const chinBody = new THREE.Mesh(
-      trackGeo(smoothGeo(new THREE.SphereGeometry(0.038, 10, 8))),
-      this.skinMat,
-    );
-    chinBody.scale.set(0.95, 0.9, 1.15);
-    chinBody.position.set(0, -0.082, 0.082);
-    this.jawPivot.add(chinBody);
+    const mandibleMesh = new THREE.Mesh(trackGeo(createMandibleGeo()), this.skinMat);
+    mandibleMesh.name = 'mandibleMesh';
+    mandibleMesh.castShadow = true;
+    this.jawPivot.add(mandibleMesh);
 
     const lowerGumArc = new THREE.Mesh(
-      trackGeo(smoothGeo(new THREE.TorusGeometry(0.039, 0.011, 6, 12, Math.PI))),
+      trackGeo(smoothGeo(new THREE.TorusGeometry(0.039, 0.0095, 6, 14, Math.PI))),
       gumsMat,
     );
     lowerGumArc.rotation.x = Math.PI / 2;
-    lowerGumArc.position.set(0, -0.066, 0.055);
+    lowerGumArc.position.set(0, -0.026, 0.052);
     this.jawPivot.add(lowerGumArc);
 
     const tongue = new THREE.Mesh(
-      trackGeo(smoothGeo(new THREE.CapsuleGeometry(0.018, 0.055, 4, 8))),
+      trackGeo(smoothGeo(new THREE.CapsuleGeometry(0.015, 0.052, 4, 8))),
       tongueMat,
     );
-    tongue.rotation.x = Math.PI / 2 - 0.12;
-    tongue.scale.set(1.08, 1.0, 0.45);
-    tongue.position.set(0, -0.056, 0.062);
+    tongue.rotation.x = Math.PI / 2 - 0.14;
+    tongue.scale.set(1.04, 1.0, 0.42);
+    tongue.position.set(0, -0.029, 0.052);
     this.jawPivot.add(tongue);
 
     const lowerToothGeo = trackGeo(smoothGeo(new THREE.ConeGeometry(0.0044, 0.022, 5)));
     const lowerToothAngles = [-1.1, -0.72, -0.36, 0.0, 0.36, 0.72, 1.1];
     lowerToothAngles.forEach((ang, idx) => {
       const tx = Math.sin(ang) * 0.039;
-      const tz = 0.055 + Math.cos(ang) * 0.042;
+      const tz = 0.052 + Math.cos(ang) * 0.041;
       const t = new THREE.Mesh(lowerToothGeo, teethMat);
       const scaleH = idx === 1 || idx === 5 ? 1.2 : 0.8 + ((idx * 5) % 3) * 0.15;
       t.scale.set(0.95, scaleH, 0.95);
-      t.position.set(tx, -0.056, tz);
+      t.position.set(tx, -0.016, tz);
       t.rotation.x = (idx % 2 === 0 ? 1 : -1) * 0.08;
       t.rotation.z = (idx - 3) * -0.05;
       this.jawPivot.add(t);
     });
 
-    // 6 Stretching Fleshy Oral Tendon / Saliva Strands (updated dynamically in update())
+    // 6 Stretching Fleshy Oral Tendon / Saliva Strands along BOTH SIDES of the gaping mouth
     const tendonGeo = trackGeo(smoothGeo(new THREE.CylinderGeometry(1, 1, 1, 6, 1)));
     const tendonPairs: Array<[THREE.Vector3, THREE.Vector3, number]> = [
-      [new THREE.Vector3(-0.044, -0.038, 0.064), new THREE.Vector3(-0.041, -0.064, 0.048), 0.0036],
-      [new THREE.Vector3(-0.032, -0.038, 0.095), new THREE.Vector3(-0.03, -0.064, 0.084), 0.0029],
-      [new THREE.Vector3(-0.011, -0.04, 0.112), new THREE.Vector3(-0.013, -0.065, 0.096), 0.0025],
-      [new THREE.Vector3(0.015, -0.04, 0.111), new THREE.Vector3(0.012, -0.065, 0.095), 0.0028],
-      [new THREE.Vector3(0.035, -0.038, 0.092), new THREE.Vector3(0.032, -0.064, 0.08), 0.0034],
-      [new THREE.Vector3(0.044, -0.038, 0.062), new THREE.Vector3(0.042, -0.064, 0.046), 0.004],
+      [new THREE.Vector3(-0.046, -0.026, 0.046), new THREE.Vector3(-0.044, -0.028, 0.036), 0.0038],
+      [new THREE.Vector3(-0.043, -0.027, 0.064), new THREE.Vector3(-0.041, -0.03, 0.054), 0.0032],
+      [new THREE.Vector3(-0.035, -0.028, 0.082), new THREE.Vector3(-0.033, -0.032, 0.072), 0.0028],
+      [new THREE.Vector3(0.035, -0.028, 0.082), new THREE.Vector3(0.033, -0.032, 0.072), 0.0028],
+      [new THREE.Vector3(0.043, -0.027, 0.064), new THREE.Vector3(0.041, -0.03, 0.054), 0.0032],
+      [new THREE.Vector3(0.046, -0.026, 0.046), new THREE.Vector3(0.044, -0.028, 0.036), 0.0038],
     ];
     tendonPairs.forEach(([upperAnchor, lowerAnchor, baseRadius]) => {
       const mesh = new THREE.Mesh(tendonGeo, tendonMat);
@@ -1075,9 +1240,23 @@ export class InfectedEnemy {
     this.syncTendons();
   }
 
+  public get isWindingUp(): boolean {
+    return this.aiState === 'CHASE' && this.chaseAttackWindup >= 0;
+  }
+
+  public get windupProgress(): number {
+    return this.chaseAttackWindup >= 0 ? Math.max(0, this.chaseAttackWindup / 0.42) : 0;
+  }
+
   public getHeadWorldPosition(out = new THREE.Vector3()): THREE.Vector3 {
     this.root.updateMatrixWorld(true);
     return this.headGroup.getWorldPosition(out);
+  }
+
+  public getMouthWorldPosition(out = new THREE.Vector3()): THREE.Vector3 {
+    this.root.updateMatrixWorld(true);
+    out.set(0, -0.055, 0.095);
+    return this.headGroup.localToWorld(out);
   }
 
   public reset(x: number, y: number, z: number, yaw = 0): void {
@@ -1100,14 +1279,17 @@ export class InfectedEnemy {
     this.chaseAttackWindup = -1;
     this.deadTimer = 0;
     this.hasTriggeredChaseScreech = false;
+    this.impaledStage = 'WINDUP';
+    this.ragdollRollZ = 0.22;
+    this.ragdollFallProg = 0;
     this.hairFirstFrame = true;
-    this.jawAngleRad = 0.26;
+    this.jawAngleRad = 0.68;
     this.skinMat.color.setHex(InfectedEnemy.BASE_SKIN_HEX);
     this.bruiseSkinMat.color.setHex(InfectedEnemy.BASE_BRUISE_HEX);
 
     this.spine.rotation.set(0.28, 0, 0);
     this.headGroup.rotation.set(0, 0, 0);
-    this.jawPivot.rotation.set(0.26, 0, 0);
+    this.jawPivot.rotation.set(0.68, 0, 0);
     this.leftShoulder.rotation.set(0, 0, 0);
     this.rightShoulder.rotation.set(0, 0, 0);
     this.leftElbow.rotation.set(0, 0, 0);
@@ -1119,13 +1301,41 @@ export class InfectedEnemy {
     this.syncTendons();
   }
 
-  public applyStagger(directionVec: THREE.Vector3, swingDir: MeleeSwingDirection = 'left_to_right'): void {
-    if (this.aiState === 'DEAD') return;
+  public canBeHeadGrabbed(): boolean {
+    if (
+      this.aiState === 'DEAD' ||
+      this.aiState === 'IMPALED_DEAD' ||
+      this.aiState === 'DEAD_RAGDOLL' ||
+      this.aiState === 'GRABBED'
+    ) {
+      return false;
+    }
+    return this.health < this.maxHealth * 0.65 || this.aiState === 'STAGGER' || this.aiState === 'KNOCKDOWN';
+  }
+
+  public applyStagger(
+    directionVec: THREE.Vector3,
+    swingDir: MeleeSwingDirection = 'left_to_right',
+    forceBreakWindup = false,
+  ): void {
+    if (
+      this.aiState === 'DEAD' ||
+      this.aiState === 'IMPALED_DEAD' ||
+      this.aiState === 'DEAD_RAGDOLL'
+    ) {
+      return;
+    }
     this.alerted = true;
+    this.hitFlashTimer = 0.08;
+
+    // Resist light stagger during active claw/lunge wind-up unless heavy break
+    if (this.chaseAttackWindup >= 0 && !forceBreakWindup) {
+      return;
+    }
+
     this.chaseAttackWindup = -1;
     this.aiState = 'STAGGER';
     this.staggerTimer = this.staggerDuration;
-    this.hitFlashTimer = 0.08;
     this.screamPulse = 0.65;
 
     // 4.5 m/s backward pushback + subtle upward hop
@@ -1155,7 +1365,13 @@ export class InfectedEnemy {
   }
 
   public applyKnockdown(impulseVec: THREE.Vector3): void {
-    if (this.aiState === 'DEAD') return;
+    if (
+      this.aiState === 'DEAD' ||
+      this.aiState === 'IMPALED_DEAD' ||
+      this.aiState === 'DEAD_RAGDOLL'
+    ) {
+      return;
+    }
     this.alerted = true;
     this.chaseAttackWindup = -1;
     this.aiState = 'KNOCKDOWN';
@@ -1177,6 +1393,57 @@ export class InfectedEnemy {
     this.staggerTimer = 0;
     this.root.rotation.x = 0;
     this.root.rotation.z = 0;
+  }
+
+  public setImpaledWindup(): void {
+    this.aiState = 'IMPALED_DEAD';
+    this.impaledStage = 'WINDUP';
+    this.velocity.set(0, 0, 0);
+    this.angularVelocity = 0;
+    this.chaseAttackWindup = -1;
+    this.staggerTimer = 0;
+    this.root.rotation.x = 0;
+    this.root.rotation.z = 0;
+    this.headGroup.rotation.set(-0.35, 0, 0);
+    this.jawAngleRad = THREE.MathUtils.degToRad(48);
+    this.jawPivot.rotation.x = this.jawAngleRad;
+    this.syncTendons();
+  }
+
+  public setImpaledLimp(): void {
+    this.health = 0;
+    this.aiState = 'IMPALED_DEAD';
+    this.impaledStage = 'LIMP';
+    this.hitFlashTimer = 0.12;
+    this.screamPulse = 0;
+    this.velocity.set(0, 0, 0);
+    this.angularVelocity = 0;
+    this.chaseAttackWindup = -1;
+
+    this.headGroup.rotation.set(0.32, 0, 0.18);
+    this.jawAngleRad = THREE.MathUtils.degToRad(52);
+    this.jawPivot.rotation.x = this.jawAngleRad;
+    this.spine.rotation.set(0.38, 0, 0);
+    this.leftShoulder.rotation.set(0.05, 0, -0.06);
+    this.rightShoulder.rotation.set(0.05, 0, 0.06);
+    this.leftElbow.rotation.set(-0.15, 0, 0);
+    this.rightElbow.rotation.set(-0.15, 0, 0);
+    this.leftHip.rotation.set(0.12, 0, 0);
+    this.rightHip.rotation.set(0.18, 0, 0);
+    this.leftKnee.rotation.set(0.25, 0, 0);
+    this.rightKnee.rotation.set(0.35, 0, 0);
+    this.syncTendons();
+  }
+
+  public startDeadRagdoll(impulseVec: THREE.Vector3, rollZ = 0.22): void {
+    this.health = 0;
+    this.aiState = 'DEAD_RAGDOLL';
+    this.deadTimer = 0;
+    this.ragdollFallProg = 0;
+    this.ragdollRollZ = rollZ;
+    this.respawnTimer = 60;
+    this.chaseAttackWindup = -1;
+    this.velocity.copy(impulseVec);
   }
 
   public markDead(hitDir?: THREE.Vector3): void {
@@ -1206,10 +1473,11 @@ export class InfectedEnemy {
     if (dt <= 0) return;
 
     // 0.08s dark-red skin tint flash
+    const baseSkin = this.isElite ? 0x624f4e : InfectedEnemy.BASE_SKIN_HEX;
     if (this.hitFlashTimer > 0) {
       this.hitFlashTimer = Math.max(0, this.hitFlashTimer - dt);
       const flashT = this.hitFlashTimer / 0.08;
-      this.skinMat.color.setHex(InfectedEnemy.BASE_SKIN_HEX).lerp(
+      this.skinMat.color.setHex(baseSkin).lerp(
         new THREE.Color(InfectedEnemy.FLASH_SKIN_HEX),
         flashT,
       );
@@ -1218,11 +1486,12 @@ export class InfectedEnemy {
         flashT,
       );
     } else {
-      this.skinMat.color.setHex(InfectedEnemy.BASE_SKIN_HEX);
+      this.skinMat.color.setHex(baseSkin);
       this.bruiseSkinMat.color.setHex(InfectedEnemy.BASE_BRUISE_HEX);
     }
 
     this.attackCooldown = Math.max(0, this.attackCooldown - dt);
+    this.pounceCooldown = Math.max(0, this.pounceCooldown - dt);
     this.groanTimer -= dt;
     this.screamPulse = Math.max(0, this.screamPulse - dt * 1.6);
 
@@ -1237,8 +1506,8 @@ export class InfectedEnemy {
         Math.sin(t * 19) * 0.14,
         Math.cos(t * 24) * 0.09,
       );
-      // Jaw thrashes wide open (~48 deg)
-      this.jawAngleRad = THREE.MathUtils.degToRad(48) + Math.sin(t * 26) * 0.08;
+      // Jaw thrashes wide open (~49 deg / +0.85 rad)
+      this.jawAngleRad = 0.85 + Math.sin(t * 24) * 0.05;
       this.jawPivot.rotation.x = this.jawAngleRad;
 
       // Arms reach up frantically scraping at player's left forearm
@@ -1255,6 +1524,98 @@ export class InfectedEnemy {
 
       this.syncTendons();
       this.updateHairPhysics(dt);
+      return;
+    }
+
+    // -------------------------------------------------------------------------
+    // IMPALED_DEAD: wind-up head tilt -> lifeless slack corpse impaled on bat
+    // -------------------------------------------------------------------------
+    if (this.aiState === 'IMPALED_DEAD') {
+      if (this.impaledStage === 'WINDUP') {
+        const t = elapsed;
+        this.headGroup.rotation.set(-0.35 + Math.sin(t * 14) * 0.02, Math.sin(t * 12) * 0.04, 0);
+        this.jawAngleRad = 0.85;
+        this.jawPivot.rotation.x = this.jawAngleRad;
+        this.spine.rotation.set(0.24, Math.sin(t * 16) * 0.04, 0);
+        this.leftShoulder.rotation.set(-2.15 + Math.sin(t * 20) * 0.18, 0.22, -0.25);
+        this.leftElbow.rotation.set(-0.95, 0, 0);
+        this.rightShoulder.rotation.set(-2.1 + Math.cos(t * 22) * 0.18, -0.22, 0.22);
+        this.rightElbow.rotation.set(-1.0, 0, 0);
+        this.leftHip.rotation.set(-0.25 + Math.sin(t * 16) * 0.25, 0, -0.05);
+        this.leftKnee.rotation.set(0.65, 0, 0);
+        this.rightHip.rotation.set(-0.25 - Math.sin(t * 16) * 0.25, 0, 0.05);
+        this.rightKnee.rotation.set(0.65, 0, 0);
+      } else {
+        // Completely lifeless corpse impaled on the bat barrel (zero jaw twitching)
+        const sway = Math.sin(elapsed * 2.5) * 0.02;
+        this.headGroup.rotation.set(0.32, 0, 0.18 + sway * 0.5);
+        this.jawAngleRad = THREE.MathUtils.degToRad(52);
+        this.jawPivot.rotation.x = this.jawAngleRad;
+        this.spine.rotation.set(0.38, 0, sway * 0.35);
+        this.leftShoulder.rotation.set(0.05 + sway, 0, -0.06);
+        this.rightShoulder.rotation.set(0.05 - sway, 0, 0.06);
+        this.leftElbow.rotation.set(-0.15, 0, 0);
+        this.rightElbow.rotation.set(-0.15, 0, 0);
+        this.leftHip.rotation.set(0.12 + sway * 0.4, 0, 0);
+        this.rightHip.rotation.set(0.18 - sway * 0.4, 0, 0);
+        this.leftKnee.rotation.set(0.25, 0, 0);
+        this.rightKnee.rotation.set(0.35, 0, 0);
+      }
+      this.syncTendons();
+      this.updateHairPhysics(dt);
+      return;
+    }
+
+    // -------------------------------------------------------------------------
+    // DEAD_RAGDOLL: corpse flung off bat, collapses flat over its blood puddle
+    // -------------------------------------------------------------------------
+    if (this.aiState === 'DEAD_RAGDOLL') {
+      this.deadTimer += dt;
+      this.ragdollFallProg = Math.min(1, this.deadTimer / 0.34);
+      const ease = 1 - Math.pow(1 - this.ragdollFallProg, 2);
+
+      this.root.rotation.x = -ease * (Math.PI * 0.5);
+      this.root.rotation.z = ease * this.ragdollRollZ;
+
+      this.velocity.y -= 18 * dt;
+      this.velocity.x *= Math.exp(-4.5 * dt);
+      this.velocity.z *= Math.exp(-4.5 * dt);
+      this.root.position.x = THREE.MathUtils.clamp(this.root.position.x + this.velocity.x * dt, -105, 55);
+      this.root.position.z = THREE.MathUtils.clamp(this.root.position.z + this.velocity.z * dt, -53, 49);
+      this.root.position.y += this.velocity.y * dt;
+
+      const floorY = this.sampleSupportHeight(
+        this.root.position.x,
+        this.root.position.z,
+        this.root.position.y + 0.4,
+        colliders,
+      );
+      if (this.root.position.y <= floorY + 0.14) {
+        this.root.position.y = floorY + 0.14;
+        this.velocity.y = 0;
+        this.velocity.x *= Math.exp(-10 * dt);
+        this.velocity.z *= Math.exp(-10 * dt);
+      }
+
+      this.headGroup.rotation.set(0.24, 0, 0.16);
+      this.jawAngleRad = THREE.MathUtils.degToRad(52);
+      this.jawPivot.rotation.x = this.jawAngleRad;
+      this.spine.rotation.set(0.18, 0, 0);
+      this.leftShoulder.rotation.set(-0.22 * ease, 0, -0.25);
+      this.rightShoulder.rotation.set(-0.18 * ease, 0, 0.28);
+      this.leftElbow.rotation.set(-0.25, 0, 0);
+      this.rightElbow.rotation.set(-0.2, 0, 0);
+      this.leftHip.rotation.set(0.08, 0, -0.06);
+      this.rightHip.rotation.set(0.12, 0, 0.08);
+      this.leftKnee.rotation.set(0.32, 0, 0);
+      this.rightKnee.rotation.set(0.42, 0, 0);
+      this.syncTendons();
+      this.updateHairPhysics(dt);
+
+      this.respawnTimer -= dt;
+      if (this.respawnTimer <= 0) {
+        this.reset(this.homePos.x, this.homePos.y, this.homePos.z, Math.random() * Math.PI * 2);
+      }
       return;
     }
 
@@ -1322,7 +1683,7 @@ export class InfectedEnemy {
         this.staggerHeadYaw * 0.35 * snap,
         this.staggerSpineRoll * snap,
       );
-      this.jawAngleRad = THREE.MathUtils.lerp(this.jawAngleRad, 0.72, 1 - Math.exp(-16 * dt));
+      this.jawAngleRad = THREE.MathUtils.lerp(this.jawAngleRad, 0.85, 1 - Math.exp(-16 * dt));
       this.jawPivot.rotation.x = this.jawAngleRad;
 
       this.leftShoulder.rotation.set(-0.9 - snap * 0.5, 0, -0.35 * snap);
@@ -1360,7 +1721,7 @@ export class InfectedEnemy {
         this.root.rotation.x = -Math.PI * 0.5;
         // Writhe weakly on ground
         this.headGroup.rotation.y = Math.sin(elapsed * 4.5) * 0.22;
-        this.jawPivot.rotation.x = 0.42 + Math.abs(Math.sin(elapsed * 5)) * 0.14;
+        this.jawPivot.rotation.x = 0.68 + Math.abs(Math.sin(elapsed * 5)) * 0.1;
         if (this.knockdownTimer <= 0) {
           this.knockdownStage = 'GETTING_UP';
           this.knockdownTimer = 0.45;
@@ -1398,7 +1759,7 @@ export class InfectedEnemy {
       }
 
       if (this.aiState === 'IDLE') {
-        // Hunched forward (spine.rotation.x = 0.28 rad), eerie head twitch, subtle chest breathing, jaw ~15 deg
+        // Hunched forward (spine.rotation.x = 0.28 rad), eerie head twitch, subtle chest breathing, jaw +0.68 rad (~39 deg)
         this.velocity.x *= Math.exp(-8 * dt);
         this.velocity.z *= Math.exp(-8 * dt);
 
@@ -1416,7 +1777,7 @@ export class InfectedEnemy {
 
         this.jawAngleRad = THREE.MathUtils.lerp(
           this.jawAngleRad,
-          THREE.MathUtils.degToRad(15) + Math.abs(breath) * 0.05,
+          0.68 + Math.abs(breath) * 0.03,
           1 - Math.exp(-10 * dt),
         );
         this.jawPivot.rotation.x = this.jawAngleRad;
@@ -1436,15 +1797,16 @@ export class InfectedEnemy {
           onGroan();
         }
       } else {
-        // CHASE: face target, frantic hunched sprint (4.6 m/s) & outstretched claws, jaw open ~42 deg
-        const desiredYaw = Math.atan2(_toPlayer.x, _toPlayer.z);
-        this.yaw = lerpAngle(this.yaw, desiredYaw, dt * 8.5);
+        // CHASE: face target (+30% speed + pack flank offset + 3.2m lunge + Elite leaping pounces)
+        const flankBlend = horizDist > 2.8 && horizDist < 9.5 ? Math.min(1, (horizDist - 2.8) / 4.2) : 0;
+        const desiredYaw = Math.atan2(_toPlayer.x, _toPlayer.z) + this.flankAngle * flankBlend;
+        this.yaw = lerpAngle(this.yaw, desiredYaw, dt * (this.isElite ? 10.5 : 8.8));
 
-        const moveSpeed = 4.6;
-        const stopDist = isLured ? 1.65 : 1.75;
+        const moveSpeed = this.isElite ? 7.35 : 5.98;
+        const lungeTriggerDist = isLured ? 1.65 : 3.2;
 
         if (this.chaseAttackWindup >= 0) {
-          // Claw slash lunge animation in progress
+          // Claw slash lunge animation in progress with forward lunge burst
           this.chaseAttackWindup -= dt;
           const p = 1 - Math.max(0, this.chaseAttackWindup / 0.42);
           this.spine.rotation.set(0.42 - Math.sin(p * Math.PI) * 0.25, 0, 0);
@@ -1452,19 +1814,35 @@ export class InfectedEnemy {
           this.rightShoulder.rotation.set(-2.0 - Math.sin(p * Math.PI) * 0.9, 0, -0.15);
           this.leftElbow.rotation.set(-0.45, 0, 0);
           this.rightElbow.rotation.set(-0.45, 0, 0);
-          this.velocity.x *= Math.exp(-6 * dt);
-          this.velocity.z *= Math.exp(-6 * dt);
+          if (p > 0.45 && horizDist > 1.15) {
+            const burst = this.isElite ? 9.8 : 8.2;
+            this.velocity.x = Math.sin(this.yaw) * burst;
+            this.velocity.z = Math.cos(this.yaw) * burst;
+          } else {
+            this.velocity.x *= Math.exp(-6 * dt);
+            this.velocity.z *= Math.exp(-6 * dt);
+          }
 
           if (this.chaseAttackWindup <= 0) {
             this.chaseAttackWindup = -1;
-            this.attackCooldown = 0.95;
-            if (!isLured && horizDist < 2.45 && vertDist < 2.1) {
-              onPlayerHit(14, this.root.position);
+            this.attackCooldown = this.isElite ? 0.72 : 0.88;
+            if (!isLured && horizDist < 2.65 && vertDist < 2.2) {
+              onPlayerHit(this.isElite ? 32 : 25, this.root.position);
             }
           }
-        } else if (horizDist > stopDist) {
+        } else if (horizDist > lungeTriggerDist) {
           this.velocity.x = Math.sin(this.yaw) * moveSpeed;
           this.velocity.z = Math.cos(this.yaw) * moveSpeed;
+
+          // Elite Volatile Runner leaping pounce toward target when closing gap on ground
+          if (this.isElite && this.isGrounded && this.pounceCooldown <= 0 && horizDist > 4.2 && horizDist < 7.8 && vertDist < 2.5) {
+            this.velocity.y = 6.8;
+            this.velocity.x = Math.sin(this.yaw) * 11.4;
+            this.velocity.z = Math.cos(this.yaw) * 11.4;
+            this.pounceCooldown = 2.8;
+            this.screamPulse = 1.0;
+            onScreech();
+          }
 
           this.animPhase += dt * (4.0 + moveSpeed * 1.95);
           const stride = Math.sin(this.animPhase) * 0.68;
@@ -1493,16 +1871,17 @@ export class InfectedEnemy {
           this.velocity.x *= 0.7;
           this.velocity.z *= 0.7;
           if (!isLured && this.attackCooldown <= 0 && vertDist < 2.2) {
-            this.chaseAttackWindup = 0.42;
+            this.chaseAttackWindup = this.isElite ? 0.36 : 0.42;
             onScreech();
           }
         }
 
-        // Open jaw wide (42 deg base, snapping wider during windup/screech)
-        const targetJawDeg = this.chaseAttackWindup >= 0 || this.screamPulse > 0.2 ? 48 : 42;
+        // Open jaw wide (+0.68 rad default, wider +0.82 rad for Elite Split-Jaw, snapping to +0.92 rad during windup)
+        const baseJawRad = this.isElite ? 0.82 : 0.68;
+        const targetJawRad = this.chaseAttackWindup >= 0 || this.screamPulse > 0.2 ? (this.isElite ? 0.96 : 0.85) : baseJawRad;
         this.jawAngleRad = THREE.MathUtils.lerp(
           this.jawAngleRad,
-          THREE.MathUtils.degToRad(targetJawDeg) + Math.sin(elapsed * 16) * 0.05,
+          targetJawRad + Math.sin(elapsed * 16) * 0.03,
           1 - Math.exp(-14 * dt),
         );
         this.jawPivot.rotation.x = this.jawAngleRad;
@@ -1526,7 +1905,7 @@ export class InfectedEnemy {
     const bodyRadius = 0.44;
     for (let c = 0; c < colliders.length; c++) {
       const b = colliders[c];
-      if (!b.blocksZombies || b.ramp) continue;
+      if (b.disabled || !b.blocksZombies || b.ramp) continue;
       if (this.root.position.y >= b.maxY - 0.12 || this.root.position.y + 1.75 < b.minY) continue;
 
       const closestX = Math.max(b.minX, Math.min(this.root.position.x, b.maxX));
@@ -1542,7 +1921,7 @@ export class InfectedEnemy {
       }
     }
 
-    this.root.position.x = THREE.MathUtils.clamp(this.root.position.x, -43, 43);
+    this.root.position.x = THREE.MathUtils.clamp(this.root.position.x, -105, 55);
     this.root.position.z = THREE.MathUtils.clamp(this.root.position.z, -53, 49);
 
     // Support height check (ground y=0 OR building/platform rooftop under feet!)
@@ -1570,10 +1949,17 @@ export class InfectedEnemy {
     let groundY = 0;
     for (let i = 0; i < colliders.length; i++) {
       const b = colliders[i];
-      if (b.ramp) continue;
+      if (b.disabled) continue;
       if (x >= b.minX - 0.15 && x <= b.maxX + 0.15 && z >= b.minZ - 0.15 && z <= b.maxZ + 0.15) {
-        if (curY >= b.maxY - 0.55 && b.maxY > groundY) {
-          groundY = b.maxY;
+        let topY = b.maxY;
+        if (b.ramp) {
+          const coord = b.ramp.axis === 'x' ? x : z;
+          const span = b.ramp.highCoord - b.ramp.lowCoord;
+          const t = span !== 0 ? THREE.MathUtils.clamp((coord - b.ramp.lowCoord) / span, 0, 1) : 1;
+          topY = THREE.MathUtils.lerp(b.ramp.lowY, b.ramp.highY, t);
+        }
+        if (curY >= topY - 0.55 && topY > groundY) {
+          groundY = topY;
         }
       }
     }

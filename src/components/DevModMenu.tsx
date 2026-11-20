@@ -9,6 +9,7 @@ interface DevModMenuProps {
   onFillAwakening: () => void;
   onFullHeal: () => void;
   onClearNearbyEnemies: () => number;
+  onSpawnInfectedInFront: () => void;
 }
 
 export function DevModMenu({
@@ -18,6 +19,7 @@ export function DevModMenu({
   onFillAwakening,
   onFullHeal,
   onClearNearbyEnemies,
+  onSpawnInfectedInFront,
 }: DevModMenuProps) {
   const [unlocked, setUnlocked] = useState(false);
   const [pinPromptOpen, setPinPromptOpen] = useState(false);
@@ -200,6 +202,11 @@ export function DevModMenu({
   const handleClearEnemies = () => {
     const count = onClearNearbyEnemies();
     flashToast(count > 0 ? `Cleared ${count} Nearby Hostile${count > 1 ? 's' : ''}` : 'Perimeter Already Clear');
+  };
+
+  const handleSpawnInfected = () => {
+    onSpawnInfectedInFront();
+    flashToast('Screamer Spawned 2.6m Ahead');
   };
 
   return (
@@ -470,6 +477,15 @@ export function DevModMenu({
               >
                 <span>CLEAR NEARBY ENEMIES</span>
                 <span className="text-[10px] text-zinc-400">26m</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={handleSpawnInfected}
+                className="flex w-full items-center justify-between rounded-lg border border-rose-500/40 bg-rose-500/15 px-3 py-2 font-mono text-[11px] font-bold tracking-wider text-rose-200 transition hover:border-rose-400 hover:bg-rose-500/25"
+              >
+                <span>SPAWN INFECTED IN FRONT</span>
+                <span className="text-[10px] text-rose-300">[MMB]</span>
               </button>
             </div>
 

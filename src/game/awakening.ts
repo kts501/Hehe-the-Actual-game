@@ -129,7 +129,7 @@ export class AwakeningSystem {
     isReady: false,
     isActivating: false,
     isActive: false,
-    activeDuration: 25.0,
+    activeDuration: 15.0,
     animTimer: 0,
   };
 
@@ -167,7 +167,7 @@ export class AwakeningSystem {
     this.state.isReady = false;
     this.state.isActivating = false;
     this.state.isActive = false;
-    this.state.activeDuration = 25.0;
+    this.state.activeDuration = 15.0;
     this.state.animTimer = 0;
     this.cutsceneTimer = 0;
     this.savedCameraPitch = 0;
@@ -249,7 +249,7 @@ export class AwakeningSystem {
     this.stopTensionDrone();
     this.state.isActivating = false;
     this.state.isActive = true;
-    this.state.activeDuration = 25.0;
+    this.state.activeDuration = 15.0;
     this.state.charge = 100;
     this.state.isReady = false;
     this.state.animTimer = 0;

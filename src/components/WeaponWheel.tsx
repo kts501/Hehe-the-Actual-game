@@ -309,6 +309,14 @@ export const WeaponWheel: React.FC<WeaponWheelProps> = ({
             const scaleOffset = isSelected ? 1.05 : 1;
             const xPos = CX + (wedge.iconX - CX) * scaleOffset;
             const yPos = CY + (wedge.iconY - CY) * scaleOffset;
+            const slotKey =
+              wedge.slot === 'top'
+                ? '[1]'
+                : wedge.slot === 'bottom'
+                  ? '[2]'
+                  : wedge.slot === 'right'
+                    ? '[3]'
+                    : '[4]';
 
             return (
               <div
@@ -317,11 +325,20 @@ export const WeaponWheel: React.FC<WeaponWheelProps> = ({
                 style={{ left: xPos, top: yPos }}
               >
                 <WeaponSilhouetteIcon weaponId={weapon.id} active={isSelected} />
-                {isEquipped && !isSelected && (
-                  <span className="mt-0.5 text-[9px] font-bold tracking-[0.14em] text-amber-300/90 uppercase">
-                    Active
+                <div className="mt-0.5 flex items-center gap-1">
+                  <span
+                    className={`font-mono-num text-[10px] font-bold tracking-wider ${
+                      isSelected ? 'text-zinc-950' : 'text-zinc-300'
+                    }`}
+                  >
+                    {slotKey}
                   </span>
-                )}
+                  {isEquipped && !isSelected && (
+                    <span className="text-[9px] font-bold tracking-[0.14em] text-amber-300/90 uppercase">
+                      Active
+                    </span>
+                  )}
+                </div>
               </div>
             );
           })}

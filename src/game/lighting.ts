@@ -9,23 +9,23 @@ const _nightHorizon = new THREE.Color(0x0c1428); // Midnight blue horizon
 const _nightMid = new THREE.Color(0x070c1a); // Deep navy mid-sky
 const _nightZenith = new THREE.Color(0x040711); // Pitch starry zenith
 
-const _duskFog = new THREE.Color(0xc97b5d);
+const _duskFog = new THREE.Color('#6E6459');
 const _nightFog = new THREE.Color(0x090f1d);
 const _fogCurrent = new THREE.Color();
 
-const _sunColorDusk = new THREE.Color(0xffb066);
+const _sunColorDusk = new THREE.Color('#FFD49E');
 const _sunColorNight = new THREE.Color(0x4a6fa5);
 
-const _hemiSkyDusk = new THREE.Color(0x6d83b5);
-const _hemiGroundDusk = new THREE.Color(0x4a3228);
+const _hemiSkyDusk = new THREE.Color('#4A6B8C');
+const _hemiGroundDusk = new THREE.Color('#1E241E');
 const _hemiSkyNight = new THREE.Color(0x1c2b4d);
 const _hemiGroundNight = new THREE.Color(0x0c101b);
 
 const _sunDir = new THREE.Vector3();
 
-export const DUSK_START_HOUR = 18.75; // 18:45 Golden Dusk
-export const NIGHTFALL_START_TIME = 0.09375; // 21:00 Nightfall (18.75 + 0.09375 * 24 = 21.0)
-export const DAWN_START_TIME = 0.46875; // 06:00 Agra Dawn
+export const DUSK_START_HOUR = 15 + 58 / 60; // 3:58 PM — DAY 1 Golden-Hour Outbreak
+export const NIGHTFALL_START_TIME = 0.09375; // Nightfall transition
+export const DAWN_START_TIME = 0.46875; // Dawn transition
 
 export interface LightingUpdateInput {
   timeOfDay: number;
@@ -52,7 +52,7 @@ export class TimeOfDayLightingSystem {
   constructor(scene: THREE.Scene, isSoftwareGl: boolean) {
     this.scene = scene;
     this.scene.background = _duskFog.clone();
-    this.scene.fog = new THREE.FogExp2(_duskFog.getHex(), 0.0045);
+    this.scene.fog = new THREE.FogExp2('#6E6459', 0.016);
 
     this.skyMat = new THREE.ShaderMaterial({
       uniforms: {
@@ -133,13 +133,13 @@ export class TimeOfDayLightingSystem {
     this.skyMesh.frustumCulled = false;
     this.scene.add(this.skyMesh);
 
-    this.hemiLight = new THREE.HemisphereLight(_hemiSkyDusk.getHex(), _hemiGroundDusk.getHex(), 0.72);
+    this.hemiLight = new THREE.HemisphereLight(_hemiSkyDusk.getHex(), _hemiGroundDusk.getHex(), 0.88);
     this.scene.add(this.hemiLight);
 
     this.sunLight = new THREE.DirectionalLight(_sunColorDusk.getHex(), 2.2);
     this.sunLight.position.set(16, 15, -85);
     this.sunLight.castShadow = !isSoftwareGl;
-    this.sunLight.shadow.mapSize.set(1024, 1024);
+    this.sunLight.shadow.mapSize.set(2048, 2048);
     this.sunLight.shadow.camera.near = 5;
     this.sunLight.shadow.camera.far = 210;
     const d = 72;
@@ -158,9 +158,11 @@ export class TimeOfDayLightingSystem {
 
   public static formatClock24h(timeOfDay: number): string {
     const hoursFloat = (DUSK_START_HOUR + timeOfDay * 24) % 24;
-    const h = Math.floor(hoursFloat);
-    const m = Math.floor((hoursFloat - h) * 60);
-    return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+    const hr24 = Math.floor(hoursFloat);
+    const mn = Math.floor((hoursFloat - hr24) * 60);
+    const ampm = hr24 >= 12 ? 'PM' : 'AM';
+    const hr12 = hr24 % 12 === 0 ? 12 : hr24 % 12;
+    return `${hr12}:${String(mn).padStart(2, '0')} ${ampm} — DAY 1`;
   }
 
   public static getTimeLabel(timeOfDay: number): string {
@@ -205,22 +207,22 @@ export class TimeOfDayLightingSystem {
     this.skyMat.uniforms.uSunColor.value.lerpColors(_sunColorDusk, _sunColorNight, nightFactor);
     this.skyMat.uniforms.uSunIntensity.value = THREE.MathUtils.lerp(1.0, 0.22, nightFactor);
 
-    // Exponential Fog matching horizon transition (0.0045 dusk -> 0.0075 nightfall)
+    // Exponential Fog matching horizon transition (0.016 golden-hour haze -> 0.022 nightfall)
     _fogCurrent.lerpColors(_duskFog, _nightFog, nightFactor);
     (this.scene.background as THREE.Color).copy(_fogCurrent);
     if (this.scene.fog instanceof THREE.FogExp2) {
       this.scene.fog.color.copy(_fogCurrent);
-      this.scene.fog.density = THREE.MathUtils.lerp(0.0045, 0.0075, nightFactor);
+      this.scene.fog.density = THREE.MathUtils.lerp(0.016, 0.022, nightFactor);
     }
 
     // 3-Point Outdoor Sun & Hemisphere Bounce
     this.sunLight.color.lerpColors(_sunColorDusk, _sunColorNight, nightFactor);
-    this.sunLight.intensity = THREE.MathUtils.lerp(2.2, 0.45, nightFactor);
+    this.sunLight.intensity = THREE.MathUtils.lerp(2.2, 0.52, nightFactor);
     this.sunLight.position.copy(_sunDir).multiplyScalar(92);
 
     this.hemiLight.color.lerpColors(_hemiSkyDusk, _hemiSkyNight, nightFactor);
     this.hemiLight.groundColor.lerpColors(_hemiGroundDusk, _hemiGroundNight, nightFactor);
-    this.hemiLight.intensity = THREE.MathUtils.lerp(0.72, 0.38, nightFactor);
+    this.hemiLight.intensity = THREE.MathUtils.lerp(0.88, 0.4, nightFactor);
 
     // Safe-zone UV & floodlight scaling
     const uvPower = THREE.MathUtils.lerp(7.5, 14.5, nightFactor);

@@ -445,6 +445,60 @@ export class SoundEngine {
     osc.stop(now + 0.04);
   }
 
+  public playDoorToggle(opening: boolean): void {
+    const ctx = this.ready();
+    if (!ctx) return;
+    const now = ctx.currentTime;
+
+    // Crisp brass latch click
+    const click = ctx.createOscillator();
+    click.type = 'triangle';
+    click.frequency.setValueAtTime(opening ? 980 : 720, now);
+    click.frequency.exponentialRampToValueAtTime(opening ? 460 : 280, now + 0.045);
+    const clickGain = ctx.createGain();
+    clickGain.gain.setValueAtTime(0.14, now);
+    clickGain.gain.exponentialRampToValueAtTime(0.001, now + 0.05);
+    click.connect(clickGain);
+    clickGain.connect(ctx.destination);
+    click.start(now);
+    click.stop(now + 0.055);
+
+    // Subtle wooden hinge swing resonance or solid door thud on close
+    const swing = ctx.createOscillator();
+    swing.type = opening ? 'sawtooth' : 'sine';
+    swing.frequency.setValueAtTime(opening ? 190 : 125, now + 0.03);
+    swing.frequency.exponentialRampToValueAtTime(opening ? 275 : 48, now + (opening ? 0.26 : 0.16));
+    const lp = ctx.createBiquadFilter();
+    lp.type = 'lowpass';
+    lp.frequency.setValueAtTime(opening ? 580 : 320, now + 0.03);
+    const swingGain = ctx.createGain();
+    swingGain.gain.setValueAtTime(opening ? 0.06 : 0.22, now + 0.03);
+    swingGain.gain.exponentialRampToValueAtTime(0.001, now + (opening ? 0.28 : 0.18));
+    swing.connect(lp);
+    lp.connect(swingGain);
+    swingGain.connect(ctx.destination);
+    swing.start(now + 0.03);
+    swing.stop(now + 0.3);
+  }
+
+  public playMedkitUse(): void {
+    const ctx = this.ready();
+    if (!ctx) return;
+    const now = ctx.currentTime;
+    [523.25, 659.25, 783.99].forEach((freq, idx) => {
+      const osc = ctx.createOscillator();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(freq, now + idx * 0.07);
+      const gain = ctx.createGain();
+      gain.gain.setValueAtTime(0.12, now + idx * 0.07);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + idx * 0.07 + 0.28);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(now + idx * 0.07);
+      osc.stop(now + idx * 0.07 + 0.29);
+    });
+  }
+
   public playMantle(): void {
     const ctx = this.ready();
     if (!ctx || !this.noiseBuffer) return;
@@ -1692,6 +1746,373 @@ export class SoundEngine {
     gain.connect(ctx.destination);
     osc.start(now);
     osc.stop(now + 0.46);
+  }
+
+  public playBatFaceDriveAudio(): void {
+    const ctx = this.ready();
+    if (!ctx) return;
+    const now = ctx.currentTime;
+
+    // 1. 0.00s Heavy Wood Bat Thud (190Hz -> 55Hz triangle oscillator)
+    const thudOsc = ctx.createOscillator();
+    thudOsc.type = 'triangle';
+    thudOsc.frequency.setValueAtTime(190, now);
+    thudOsc.frequency.exponentialRampToValueAtTime(55, now + 0.18);
+
+    const thudGain = ctx.createGain();
+    thudGain.gain.setValueAtTime(0.55, now);
+    thudGain.gain.exponentialRampToValueAtTime(0.001, now + 0.21);
+
+    thudOsc.connect(thudGain);
+    thudGain.connect(ctx.destination);
+    thudOsc.start(now);
+    thudOsc.stop(now + 0.22);
+
+    // 2. 0.00s Skull & Jaw Bone-Crush Fracture Snap
+    if (this.noiseBuffer) {
+      const crushSrc = ctx.createBufferSource();
+      crushSrc.buffer = this.noiseBuffer;
+
+      const crushBp = ctx.createBiquadFilter();
+      crushBp.type = 'bandpass';
+      crushBp.frequency.setValueAtTime(1650, now);
+      crushBp.frequency.exponentialRampToValueAtTime(320, now + 0.15);
+      crushBp.Q.value = 1.8;
+
+      const crushGain = ctx.createGain();
+      crushGain.gain.setValueAtTime(0.54, now);
+      crushGain.gain.exponentialRampToValueAtTime(0.001, now + 0.16);
+
+      crushSrc.connect(crushBp);
+      crushBp.connect(crushGain);
+      crushGain.connect(ctx.destination);
+      crushSrc.start(now);
+      crushSrc.stop(now + 0.17);
+
+      // Crisp bone-crack transient
+      const snapSrc = ctx.createBufferSource();
+      snapSrc.buffer = this.noiseBuffer;
+      const snapHp = ctx.createBiquadFilter();
+      snapHp.type = 'highpass';
+      snapHp.frequency.setValueAtTime(2200, now);
+      const snapGain = ctx.createGain();
+      snapGain.gain.setValueAtTime(0.36, now);
+      snapGain.gain.exponentialRampToValueAtTime(0.001, now + 0.065);
+
+      snapSrc.connect(snapHp);
+      snapHp.connect(snapGain);
+      snapGain.connect(ctx.destination);
+      snapSrc.start(now);
+      snapSrc.stop(now + 0.075);
+
+      // 3. 0.02s Wet Gore & Flesh Squelch (bandpass sweep 1400Hz -> 380Hz, Q = 6.0)
+      const goreStart = now + 0.02;
+      const goreSrc = ctx.createBufferSource();
+      goreSrc.buffer = this.noiseBuffer;
+
+      const goreBp = ctx.createBiquadFilter();
+      goreBp.type = 'bandpass';
+      goreBp.frequency.setValueAtTime(1400, goreStart);
+      goreBp.frequency.exponentialRampToValueAtTime(380, goreStart + 0.24);
+      goreBp.Q.value = 6.0;
+
+      const goreGain = ctx.createGain();
+      goreGain.gain.setValueAtTime(0.001, goreStart);
+      goreGain.gain.linearRampToValueAtTime(0.42, goreStart + 0.025);
+      goreGain.gain.exponentialRampToValueAtTime(0.001, goreStart + 0.26);
+
+      goreSrc.connect(goreBp);
+      goreBp.connect(goreGain);
+      goreGain.connect(ctx.destination);
+      goreSrc.start(goreStart);
+      goreSrc.stop(goreStart + 0.28);
+
+      // 4. 0.75s Delayed Bat Extraction Squelch (bandpass sweep 350Hz -> 1100Hz)
+      const extStart = now + 0.75;
+      const extSrc = ctx.createBufferSource();
+      extSrc.buffer = this.noiseBuffer;
+
+      const extBp = ctx.createBiquadFilter();
+      extBp.type = 'bandpass';
+      extBp.frequency.setValueAtTime(350, extStart);
+      extBp.frequency.exponentialRampToValueAtTime(1100, extStart + 0.2);
+      extBp.Q.value = 5.5;
+
+      const extGain = ctx.createGain();
+      extGain.gain.setValueAtTime(0.001, extStart);
+      extGain.gain.linearRampToValueAtTime(0.36, extStart + 0.04);
+      extGain.gain.exponentialRampToValueAtTime(0.001, extStart + 0.24);
+
+      extSrc.connect(extBp);
+      extBp.connect(extGain);
+      extGain.connect(ctx.destination);
+      extSrc.start(extStart);
+      extSrc.stop(extStart + 0.26);
+
+      // Wet suction pop on bat extraction
+      const popOsc = ctx.createOscillator();
+      popOsc.type = 'sine';
+      popOsc.frequency.setValueAtTime(135, extStart + 0.03);
+      popOsc.frequency.exponentialRampToValueAtTime(290, extStart + 0.14);
+      const popGain = ctx.createGain();
+      popGain.gain.setValueAtTime(0.001, extStart + 0.03);
+      popGain.gain.linearRampToValueAtTime(0.18, extStart + 0.05);
+      popGain.gain.exponentialRampToValueAtTime(0.001, extStart + 0.16);
+      popOsc.connect(popGain);
+      popGain.connect(ctx.destination);
+      popOsc.start(extStart + 0.03);
+      popOsc.stop(extStart + 0.18);
+    }
+  }
+
+  public playNightRunnerShriek(): void {
+    const ctx = this.ready();
+    if (!ctx) return;
+    const now = ctx.currentTime;
+
+    const oscA = ctx.createOscillator();
+    const oscB = ctx.createOscillator();
+    oscA.type = 'sawtooth';
+    oscB.type = 'sawtooth';
+    oscA.frequency.setValueAtTime(420, now);
+    oscA.frequency.exponentialRampToValueAtTime(1120, now + 0.12);
+    oscA.frequency.exponentialRampToValueAtTime(340, now + 0.45);
+    oscB.frequency.setValueAtTime(445, now);
+    oscB.frequency.exponentialRampToValueAtTime(1185, now + 0.12);
+    oscB.frequency.exponentialRampToValueAtTime(365, now + 0.45);
+
+    const bp = ctx.createBiquadFilter();
+    bp.type = 'bandpass';
+    bp.frequency.setValueAtTime(1350, now);
+    bp.Q.value = 3.2;
+
+    const gain = ctx.createGain();
+    gain.gain.setValueAtTime(0.001, now);
+    gain.gain.linearRampToValueAtTime(0.32, now + 0.03);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.48);
+
+    oscA.connect(bp);
+    oscB.connect(bp);
+    bp.connect(gain);
+    gain.connect(ctx.destination);
+    oscA.start(now);
+    oscB.start(now);
+    oscA.stop(now + 0.5);
+    oscB.stop(now + 0.5);
+  }
+
+  public playStruggleHeartbeat(): void {
+    const ctx = this.ready();
+    if (!ctx) return;
+    const now = ctx.currentTime;
+
+    for (const [offset, peak] of [
+      [0, 0.34],
+      [0.14, 0.24],
+    ] as const) {
+      const t0 = now + offset;
+      const osc = ctx.createOscillator();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(68, t0);
+      osc.frequency.exponentialRampToValueAtTime(34, t0 + 0.12);
+
+      const gain = ctx.createGain();
+      gain.gain.setValueAtTime(0.001, t0);
+      gain.gain.linearRampToValueAtTime(peak, t0 + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.001, t0 + 0.14);
+
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(t0);
+      osc.stop(t0 + 0.16);
+    }
+  }
+
+  public playCrushCrunch(): void {
+    const ctx = this.ready();
+    if (!ctx) return;
+    const now = ctx.currentTime;
+
+    const sub = ctx.createOscillator();
+    sub.type = 'triangle';
+    sub.frequency.setValueAtTime(150, now);
+    sub.frequency.exponentialRampToValueAtTime(32, now + 0.28);
+
+    const subGain = ctx.createGain();
+    subGain.gain.setValueAtTime(0.65, now);
+    subGain.gain.exponentialRampToValueAtTime(0.001, now + 0.32);
+
+    sub.connect(subGain);
+    subGain.connect(ctx.destination);
+    sub.start(now);
+    sub.stop(now + 0.34);
+
+    if (this.noiseBuffer) {
+      const crunch = ctx.createBufferSource();
+      crunch.buffer = this.noiseBuffer;
+      const bp = ctx.createBiquadFilter();
+      bp.type = 'bandpass';
+      bp.frequency.setValueAtTime(1950, now);
+      bp.frequency.exponentialRampToValueAtTime(280, now + 0.24);
+      bp.Q.value = 1.6;
+
+      const gain = ctx.createGain();
+      gain.gain.setValueAtTime(0.58, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.26);
+
+      crunch.connect(bp);
+      bp.connect(gain);
+      gain.connect(ctx.destination);
+      crunch.start(now);
+      crunch.stop(now + 0.28);
+    }
+  }
+
+  public playLowStaminaBreath(): void {
+    const ctx = this.ready();
+    if (!ctx || !this.noiseBuffer) return;
+    const now = ctx.currentTime;
+
+    const src = ctx.createBufferSource();
+    src.buffer = this.noiseBuffer;
+
+    const bp = ctx.createBiquadFilter();
+    bp.type = 'bandpass';
+    bp.frequency.setValueAtTime(620, now);
+    bp.frequency.exponentialRampToValueAtTime(310, now + 0.24);
+    bp.Q.value = 2.0;
+
+    const gain = ctx.createGain();
+    gain.gain.setValueAtTime(0.001, now);
+    gain.gain.linearRampToValueAtTime(0.18, now + 0.04);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.26);
+
+    src.connect(bp);
+    bp.connect(gain);
+    gain.connect(ctx.destination);
+    src.start(now);
+    src.stop(now + 0.28);
+  }
+
+  public playPulleyClick(): void {
+    const ctx = this.ready();
+    if (!ctx) return;
+    const now = ctx.currentTime;
+
+    const osc = ctx.createOscillator();
+    osc.type = 'triangle';
+    osc.frequency.setValueAtTime(1320, now);
+    osc.frequency.exponentialRampToValueAtTime(520, now + 0.045);
+
+    const gain = ctx.createGain();
+    gain.gain.setValueAtTime(0.16, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.05);
+
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start(now);
+    osc.stop(now + 0.06);
+  }
+
+  public playLiberationChord(): void {
+    const ctx = this.ready();
+    if (!ctx) return;
+    const now = ctx.currentTime;
+
+    // D4 (293.66 Hz), A4 (440.00 Hz), F#5 (739.99 Hz) major fifth chord
+    const freqs = [293.66, 440.0, 739.99];
+    for (let i = 0; i < freqs.length; i++) {
+      const osc = ctx.createOscillator();
+      osc.type = 'triangle';
+      osc.frequency.setValueAtTime(freqs[i], now + i * 0.035);
+
+      const gain = ctx.createGain();
+      gain.gain.setValueAtTime(0.001, now + i * 0.035);
+      gain.gain.linearRampToValueAtTime(0.16, now + i * 0.035 + 0.05);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + i * 0.035 + 1.4);
+
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(now + i * 0.035);
+      osc.stop(now + i * 0.035 + 1.45);
+    }
+  }
+
+  public playTacticalWhistle(): void {
+    const ctx = this.ready();
+    if (!ctx) return;
+    const now = ctx.currentTime;
+
+    const osc = ctx.createOscillator();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(1180, now);
+    osc.frequency.exponentialRampToValueAtTime(1520, now + 0.18);
+
+    const osc2 = ctx.createOscillator();
+    osc2.type = 'triangle';
+    osc2.frequency.setValueAtTime(2360, now);
+    osc2.frequency.exponentialRampToValueAtTime(3040, now + 0.18);
+
+    const gain = ctx.createGain();
+    gain.gain.setValueAtTime(0.001, now);
+    gain.gain.linearRampToValueAtTime(0.16, now + 0.02);
+    gain.gain.setValueAtTime(0.16, now + 0.12);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.19);
+
+    const gain2 = ctx.createGain();
+    gain2.gain.setValueAtTime(0.001, now);
+    gain2.gain.linearRampToValueAtTime(0.045, now + 0.02);
+    gain2.gain.exponentialRampToValueAtTime(0.001, now + 0.18);
+
+    osc.connect(gain);
+    osc2.connect(gain2);
+    gain.connect(ctx.destination);
+    gain2.connect(ctx.destination);
+    osc.start(now);
+    osc2.start(now);
+    osc.stop(now + 0.2);
+    osc2.stop(now + 0.2);
+  }
+
+  public playAllyPipeImpact(): void {
+    const ctx = this.ready();
+    if (!ctx) return;
+    const now = ctx.currentTime;
+
+    // 220 Hz -> 65 Hz triangle thud
+    const thud = ctx.createOscillator();
+    thud.type = 'triangle';
+    thud.frequency.setValueAtTime(220, now);
+    thud.frequency.exponentialRampToValueAtTime(65, now + 0.14);
+
+    const thudGain = ctx.createGain();
+    thudGain.gain.setValueAtTime(0.28, now);
+    thudGain.gain.exponentialRampToValueAtTime(0.001, now + 0.16);
+
+    thud.connect(thudGain);
+    thudGain.connect(ctx.destination);
+    thud.start(now);
+    thud.stop(now + 0.17);
+
+    // Metallic pipe clang overtones
+    for (const [freq, peak, dur] of [
+      [880, 0.09, 0.18],
+      [1420, 0.06, 0.14],
+    ] as const) {
+      const clang = ctx.createOscillator();
+      clang.type = 'sine';
+      clang.frequency.setValueAtTime(freq, now);
+      clang.frequency.exponentialRampToValueAtTime(freq * 0.94, now + dur);
+
+      const cGain = ctx.createGain();
+      cGain.gain.setValueAtTime(peak, now);
+      cGain.gain.exponentialRampToValueAtTime(0.001, now + dur);
+
+      clang.connect(cGain);
+      cGain.connect(ctx.destination);
+      clang.start(now);
+      clang.stop(now + dur + 0.02);
+    }
   }
 
   public stopContinuousLoops(): void {

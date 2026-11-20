@@ -15,12 +15,19 @@ export interface WorldBuildResult {
   uvGlowMeshes: THREE.Mesh[];
   stringBulbMats: THREE.MeshStandardMaterial[];
   tajGateCenter: THREE.Vector3;
+  extractionPoint: THREE.Vector3;
   guardTowerCenter: THREE.Vector3;
   tajSafeZone: { minX: number; maxX: number; minZ: number; maxZ: number };
   spawnPos: THREE.Vector3;
   spawnYaw: number;
+  setExtractionActive: (active: boolean) => void;
   updateGuard: (elapsed: number, playerPos: THREE.Vector3, radioOpen: boolean) => void;
   updateWorldProps: (elapsed: number) => void;
+  getNearbyDoorPrompt: (playerPos: THREE.Vector3) => string;
+  toggleNearestDoor: (playerPos: THREE.Vector3) => { label: string; open: boolean } | null;
+  isNearHaveliMedkit: (playerPos: THREE.Vector3) => boolean;
+  tryUseHaveliMedkit: (playerPos: THREE.Vector3) => boolean;
+  resetInteractiveWorld: () => void;
   dispose: () => void;
 }
 
@@ -163,8 +170,10 @@ export function buildAgraWorld(
   const marbleMat = trackMat(
     new THREE.MeshStandardMaterial({
       map: textures.marble,
+      bumpMap: textures.stoneBump,
+      bumpScale: 0.012,
       color: 0xf4efe6,
-      roughness: 0.34,
+      roughness: 0.36,
       metalness: 0.05,
     }),
   );
@@ -270,25 +279,34 @@ export function buildAgraWorld(
   const sandstoneMat = trackMat(
     new THREE.MeshStandardMaterial({
       map: textures.sandstone,
+      bumpMap: textures.stoneBump,
+      bumpScale: 0.032,
+      roughnessMap: textures.stoneRoughness,
       color: 0xa25a46,
-      roughness: 0.86,
+      roughness: 0.92,
       metalness: 0.02,
     }),
   );
   const pavilionSandstoneMat = trackMat(
     new THREE.MeshStandardMaterial({
       map: textures.sandstone,
+      bumpMap: textures.stoneBump,
+      bumpScale: 0.028,
+      roughnessMap: textures.stoneRoughness,
       color: 0x8d4537,
-      roughness: 0.84,
+      roughness: 0.9,
       metalness: 0.03,
     }),
   );
   const courtyardMat = trackMat(
     new THREE.MeshStandardMaterial({
-      map: textures.courtyardTile,
-      color: 0x6b5c4d,
-      roughness: 0.92,
-      metalness: 0.02,
+      map: textures.courtyardAsphalt,
+      bumpMap: textures.courtyardAsphaltBump,
+      bumpScale: 0.045,
+      roughnessMap: textures.courtyardAsphaltRoughness,
+      color: 0xbab2a8,
+      roughness: 0.95,
+      metalness: 0.06,
     }),
   );
   const charbaghLawnMat = trackMat(
@@ -347,24 +365,33 @@ export function buildAgraWorld(
   const plasterMat = trackMat(
     new THREE.MeshStandardMaterial({
       map: textures.bazaarWall,
+      bumpMap: textures.stoneBump,
+      bumpScale: 0.022,
+      roughnessMap: textures.stoneRoughness,
       color: 0xcab08c,
-      roughness: 0.88,
+      roughness: 0.9,
       metalness: 0.02,
     }),
   );
   const plasterAltMat = trackMat(
     new THREE.MeshStandardMaterial({
       map: textures.bazaarWall,
+      bumpMap: textures.stoneBump,
+      bumpScale: 0.022,
+      roughnessMap: textures.stoneRoughness,
       color: 0xb58668,
-      roughness: 0.88,
+      roughness: 0.9,
       metalness: 0.02,
     }),
   );
   const plasterTealMat = trackMat(
     new THREE.MeshStandardMaterial({
       map: textures.bazaarWall,
+      bumpMap: textures.stoneBump,
+      bumpScale: 0.022,
+      roughnessMap: textures.stoneRoughness,
       color: 0x5c7c79,
-      roughness: 0.85,
+      roughness: 0.88,
       metalness: 0.03,
     }),
   );
@@ -530,9 +557,9 @@ export function buildAgraWorld(
   outerGround.receiveShadow = true;
   worldGroup.add(outerGround);
 
-  const courtyardFloor = new THREE.Mesh(trackGeo(new THREE.PlaneGeometry(126, 162)), courtyardMat);
+  const courtyardFloor = new THREE.Mesh(trackGeo(new THREE.PlaneGeometry(186, 166)), courtyardMat);
   courtyardFloor.rotation.x = -Math.PI / 2;
-  courtyardFloor.position.set(0, 0, -16);
+  courtyardFloor.position.set(-18, 0, -16);
   courtyardFloor.receiveShadow = true;
   worldGroup.add(courtyardFloor);
   climbableMeshes.push(courtyardFloor);
@@ -2396,6 +2423,8 @@ export function buildAgraWorld(
     [15.4, 3.2, -0.68, -0.08],
     [-15.4, -22.5, 1.15, 0.05],
     [15.2, -30.5, -0.45, -0.05],
+    [-49.5, -13.5, 0.12, 0.0],
+    [-50.2, 16.5, -0.25, 0.0],
   ];
 
   const _tukM4 = new THREE.Matrix4();
@@ -2481,7 +2510,7 @@ export function buildAgraWorld(
     [-38, 12, 1.3],
     [-38, -28, 1.25],
     [44, -22, 1.3],
-    [45, 22, 1.2],
+    [53.5, 16.5, 1.15],
   ];
   const banyanTrunkGeo = trackGeo(new THREE.CylinderGeometry(0.28, 0.45, 3.6, 7));
   const banyanCrownGeo = trackGeo(new THREE.DodecahedronGeometry(1.9, 0));
@@ -2510,7 +2539,7 @@ export function buildAgraWorld(
   frondGeo.translate(0, 0, 1.5);
   [
     [-39, 44],
-    [30, 42],
+    [21.5, 43.5],
     [-42, -55],
     [42, -55],
   ].forEach(([px, pz], idx) => {
@@ -2520,11 +2549,15 @@ export function buildAgraWorld(
     }
   });
 
-  // Outer Quarantine Perimeter Walls (wallrunnable!)
-  addBox(worldGroup, 116, 4.5, 2.0, 0, 2.25, 52, sandstoneMat, { collide: true, mantleable: false, wallrunnable: true });
-  addBox(worldGroup, 2.0, 4.5, 152, -46, 2.25, -20, sandstoneMat, { collide: true, mantleable: false, wallrunnable: true });
-  addBox(worldGroup, 2.0, 4.5, 152, 46, 2.25, -20, sandstoneMat, { collide: true, mantleable: false, wallrunnable: true });
-  addBox(worldGroup, 94, 4.5, 2.0, 0, 2.25, -99, sandstoneMat, { collide: true, mantleable: false, wallrunnable: true });
+  // Outer Quarantine Perimeter Walls (expanded east for Agra Haveli & west for Agra Cantt Railway Station)
+  addBox(worldGroup, 168, 4.5, 2.0, -25, 2.25, 52, sandstoneMat, { collide: true, mantleable: false, wallrunnable: true });
+  // Open Forecourt Gateway along x = -46 leaving z = -26..+26 wide open into Station Forecourt!
+  addBox(worldGroup, 2.0, 4.5, 52, -46, 2.25, -52, sandstoneMat, { collide: true, mantleable: false, wallrunnable: true });
+  addBox(worldGroup, 2.0, 4.5, 26, -46, 2.25, 39, sandstoneMat, { collide: true, mantleable: false, wallrunnable: true });
+  // Outer West Railway Yard Boundary Wall at x = -108
+  addBox(worldGroup, 2.0, 4.5, 152, -108, 2.25, -24, sandstoneMat, { collide: true, mantleable: false, wallrunnable: true });
+  addBox(worldGroup, 2.0, 4.5, 152, 58, 2.25, -20, sandstoneMat, { collide: true, mantleable: false, wallrunnable: true });
+  addBox(worldGroup, 168, 4.5, 2.0, -25, 2.25, -99, sandstoneMat, { collide: true, mantleable: false, wallrunnable: true });
 
   // =========================================================================
   // 7B. TAJ UV GATE WATCHTOWER, SANDBAGS, CLIMBABLE LADDER & HAVILDAR VIKRAM
@@ -2699,6 +2732,1688 @@ export function buildAgraWorld(
     exitY: wtDeckY + 0.14,
     exitZ: ladZ,
   });
+
+  // =========================================================================
+  // 6B. EXPLORABLE 2-STORY AGRA HAVELI & TAJ GANJ TERRACED HOUSES
+  // =========================================================================
+  const haveliWallMat = trackMat(
+    new THREE.MeshStandardMaterial({
+      color: 0xe6dcc8,
+      roughness: 0.78,
+      metalness: 0.02,
+    }),
+  );
+  const haveliMintTrimMat = trackMat(
+    new THREE.MeshStandardMaterial({
+      color: 0x94c9ab,
+      roughness: 0.62,
+      metalness: 0.04,
+    }),
+  );
+  const haveliFloorMat = trackMat(
+    new THREE.MeshStandardMaterial({
+      map: textures.polishedCreamTile,
+      color: 0xf6f0e4,
+      roughness: 0.16,
+      metalness: 0.08,
+    }),
+  );
+  const haveliDoorMat = trackMat(
+    new THREE.MeshStandardMaterial({
+      map: textures.haveliDoorWood,
+      color: 0xffffff,
+      roughness: 0.44,
+      metalness: 0.06,
+    }),
+  );
+  const haveliWindowMat = trackMat(
+    new THREE.MeshStandardMaterial({
+      map: textures.blueMullionWindow,
+      color: 0xdff6ff,
+      emissive: 0x3b82a6,
+      emissiveIntensity: 0.45,
+      roughness: 0.2,
+      metalness: 0.15,
+    }),
+  );
+  const haveliWoodDarkMat = trackMat(
+    new THREE.MeshStandardMaterial({
+      map: textures.woodPlank,
+      color: 0x472d1c,
+      roughness: 0.58,
+      metalness: 0.06,
+    }),
+  );
+  const haveliBookshelfMat = trackMat(
+    new THREE.MeshStandardMaterial({
+      color: 0x1e3a5f,
+      roughness: 0.64,
+      metalness: 0.08,
+    }),
+  );
+  const haveliOchreMat = trackMat(
+    new THREE.MeshStandardMaterial({
+      map: textures.bazaarWall,
+      color: 0xd98a3c,
+      roughness: 0.88,
+      metalness: 0.02,
+    }),
+  );
+  const haveliPeachMat = trackMat(
+    new THREE.MeshStandardMaterial({
+      map: textures.bazaarWall,
+      color: 0xd69b86,
+      roughness: 0.88,
+      metalness: 0.02,
+    }),
+  );
+  const haveliTerracottaMat = trackMat(
+    new THREE.MeshStandardMaterial({
+      map: textures.sandstone,
+      color: 0x9e5a47,
+      roughness: 0.9,
+      metalness: 0.02,
+    }),
+  );
+  const haveliSconceGlowMat = trackMat(
+    new THREE.MeshStandardMaterial({
+      color: 0xfff3d1,
+      emissive: 0xfbbf24,
+      emissiveIntensity: 2.2,
+      roughness: 0.25,
+    }),
+  );
+  const haveliWaterTankMat = trackMat(
+    new THREE.MeshStandardMaterial({
+      color: 0x1d4ed8,
+      roughness: 0.48,
+      metalness: 0.1,
+    }),
+  );
+
+  // Interactive Doors Registry
+  interface InteractiveDoorPivot {
+    group: THREE.Group;
+    closedY: number;
+    openY: number;
+  }
+  interface InteractiveDoorObj {
+    id: string;
+    label: string;
+    pivots: InteractiveDoorPivot[];
+    collider: BoxCollider;
+    centerPos: THREE.Vector3;
+    open: boolean;
+    currentProgress: number;
+  }
+  const interactiveDoors: InteractiveDoorObj[] = [];
+
+  const registerInteractiveDoor = (opts: {
+    id: string;
+    label: string;
+    x: number;
+    yBase: number;
+    z: number;
+    width: number;
+    height: number;
+    axis: 'z' | 'x'; // 'z' means wall runs along Z (door spans Z, faces X); 'x' means wall runs along X (door spans X, faces Z)
+    doubleLeaf?: boolean;
+    openSign?: 1 | -1;
+  }): void => {
+    const { id, label, x, yBase, z, width, height, axis, doubleLeaf = false, openSign = 1 } = opts;
+    const thick = 0.09;
+    const frameThick = 0.12;
+
+    // Dark timber door surround frame
+    if (axis === 'z') {
+      pushStaticGeo(unitBoxGeo, haveliWoodDarkMat, x, yBase + height * 0.5, z - width * 0.5 - 0.05, 0, 0, 0, 0.42, height, frameThick, true, true);
+      pushStaticGeo(unitBoxGeo, haveliWoodDarkMat, x, yBase + height * 0.5, z + width * 0.5 + 0.05, 0, 0, 0, 0.42, height, frameThick, true, true);
+      pushStaticGeo(unitBoxGeo, haveliWoodDarkMat, x, yBase + height + 0.06, z, 0, 0, 0, 0.44, frameThick, width + 0.22, true, true);
+    } else {
+      pushStaticGeo(unitBoxGeo, haveliWoodDarkMat, x - width * 0.5 - 0.05, yBase + height * 0.5, z, 0, 0, 0, frameThick, height, 0.42, true, true);
+      pushStaticGeo(unitBoxGeo, haveliWoodDarkMat, x + width * 0.5 + 0.05, yBase + height * 0.5, z, 0, 0, 0, frameThick, height, 0.42, true, true);
+      pushStaticGeo(unitBoxGeo, haveliWoodDarkMat, x, yBase + height + 0.06, z, 0, 0, 0, width + 0.22, frameThick, 0.44, true, true);
+    }
+
+    const pivots: InteractiveDoorPivot[] = [];
+    const handleGeo = trackGeo(new THREE.BoxGeometry(0.06, 0.18, 0.04));
+
+    const buildLeaf = (hingeX: number, hingeZ: number, leafW: number, dirSign: 1 | -1, swingSign: 1 | -1) => {
+      const pivot = new THREE.Group();
+      pivot.position.set(hingeX, yBase + height * 0.5, hingeZ);
+      worldGroup.add(pivot);
+
+      const leafGeo = trackGeo(
+        axis === 'z'
+          ? new THREE.BoxGeometry(thick, height - 0.04, leafW)
+          : new THREE.BoxGeometry(leafW, height - 0.04, thick),
+      );
+      const leafMesh = new THREE.Mesh(leafGeo, haveliDoorMat);
+      if (axis === 'z') {
+        leafMesh.position.z = dirSign * (leafW * 0.5);
+      } else {
+        leafMesh.position.x = dirSign * (leafW * 0.5);
+      }
+      leafMesh.castShadow = !isSoftwareGl;
+      leafMesh.receiveShadow = true;
+      pivot.add(leafMesh);
+
+      const knob = new THREE.Mesh(handleGeo, goldMat);
+      if (axis === 'z') {
+        knob.position.set(thick * 0.55, -0.05, dirSign * (leafW - 0.14));
+      } else {
+        knob.position.set(dirSign * (leafW - 0.14), -0.05, thick * 0.55);
+      }
+      pivot.add(knob);
+
+      const knobBack = knob.clone();
+      if (axis === 'z') knobBack.position.x = -thick * 0.55;
+      else knobBack.position.z = -thick * 0.55;
+      pivot.add(knobBack);
+
+      pivots.push({
+        group: pivot,
+        closedY: 0,
+        openY: swingSign * (Math.PI * 0.52),
+      });
+    };
+
+    if (doubleLeaf) {
+      const leafW = width * 0.5 - 0.02;
+      if (axis === 'z') {
+        buildLeaf(x, z - width * 0.5, leafW, 1, (openSign) as 1 | -1);
+        buildLeaf(x, z + width * 0.5, leafW, -1, (-openSign) as 1 | -1);
+      } else {
+        buildLeaf(x - width * 0.5, z, leafW, 1, (-openSign) as 1 | -1);
+        buildLeaf(x + width * 0.5, z, leafW, -1, (openSign) as 1 | -1);
+      }
+    } else {
+      const leafW = width - 0.03;
+      if (axis === 'z') {
+        buildLeaf(x, z - width * 0.5, leafW, 1, openSign);
+      } else {
+        buildLeaf(x - width * 0.5, z, leafW, 1, openSign);
+      }
+    }
+
+    const collider: BoxCollider = {
+      id,
+      minX: x - (axis === 'z' ? 0.18 : width * 0.5),
+      maxX: x + (axis === 'z' ? 0.18 : width * 0.5),
+      minY: yBase,
+      maxY: yBase + height,
+      minZ: z - (axis === 'z' ? width * 0.5 : 0.18),
+      maxZ: z + (axis === 'z' ? width * 0.5 : 0.18),
+      mantleable: false,
+      blocksZombies: true,
+      disabled: false,
+    };
+    colliders.push(collider);
+
+    interactiveDoors.push({
+      id,
+      label,
+      pivots,
+      collider,
+      centerPos: new THREE.Vector3(x, yBase + 1.0, z),
+      open: false,
+      currentProgress: 0,
+    });
+  };
+
+  // Agra Haveli Bounds: X = 34.0..50.0, Z = 27.0..43.0
+  // Ground slab top = 0.24m, Second Floor top = 4.00m (slab 3.72..4.00), Roof top = 7.40m (slab 7.12..7.40)
+  addBox(worldGroup, 16.4, 0.24, 16.4, 42.0, 0.12, 35.0, sandstoneMat, {
+    collide: true,
+    mantleable: false,
+    id: 'haveli_plinth',
+  });
+  // Polished Cream Porcelain Interior Floor
+  const haveliTilePlane = new THREE.Mesh(trackGeo(new THREE.PlaneGeometry(15.6, 15.6)), haveliFloorMat);
+  haveliTilePlane.rotation.x = -Math.PI / 2;
+  haveliTilePlane.position.set(42.0, 0.244, 35.0);
+  haveliTilePlane.receiveShadow = true;
+  worldGroup.add(haveliTilePlane);
+
+  // Entry Porch Step (West Door at x = 34.0, z = 34.0)
+  addBox(worldGroup, 1.8, 0.14, 3.8, 33.1, 0.07, 34.0, sandstoneMat, {
+    collide: true,
+    mantleable: false,
+    id: 'haveli_front_step',
+  });
+
+  // Helper for Haveli walls (ground to roof or custom heights)
+  const addHaveliWall = (x: number, yMin: number, yMax: number, z: number, w: number, d: number, id?: string) => {
+    const h = yMax - yMin;
+    addBox(worldGroup, w, h, d, x, yMin + h * 0.5, z, haveliWallMat, {
+      collide: true,
+      mantleable: false,
+      blocksZombies: true,
+      id,
+    });
+  };
+
+  // --- EXTERIOR PERIMETER WALLS (with proper doorway and window gaps) ---
+  // 1. WEST WALL (x = 34.0, z = 27.0..43.0)
+  // Front Double Door opening at z = 32.8..35.2, y = 0.24..2.94
+  addHaveliWall(34.0, 0.24, 7.40, 29.8, 0.36, 5.8, 'haveli_w_n');   // z = 26.9..32.7
+  addHaveliWall(34.0, 0.24, 7.40, 39.2, 0.36, 7.8, 'haveli_w_s');   // z = 35.3..43.1
+  addHaveliWall(34.0, 2.94, 7.40, 34.0, 0.36, 2.6, 'haveli_w_hdr'); // lintel over front doors
+
+  // Exterior Mint Canopy & Trim Band on West Facade
+  addBox(worldGroup, 1.5, 0.16, 4.2, 33.25, 3.12, 34.0, haveliMintTrimMat, { collide: false });
+  addBox(worldGroup, 0.42, 0.24, 16.3, 34.0, 4.02, 35.0, haveliMintTrimMat, { collide: false });
+
+  // 2. SOUTH WALL (z = 43.0, x = 34.0..50.0)
+  addHaveliWall(42.0, 0.24, 7.40, 43.0, 16.2, 0.36, 'haveli_s_wall');
+  addBox(worldGroup, 15.6, 0.24, 0.08, 42.0, 4.12, 42.78, haveliMintTrimMat, { collide: false });
+
+  // 3. EAST WALL (x = 50.0, z = 27.0..43.0) with centered dark-mullioned living room window (z = 32.0..35.4, y = 1.35..2.85)
+  addHaveliWall(50.0, 0.24, 7.40, 29.4, 0.36, 5.1, 'haveli_e_n');
+  addHaveliWall(50.0, 0.24, 7.40, 39.3, 0.36, 7.6, 'haveli_e_s');
+  addHaveliWall(50.0, 0.24, 1.35, 33.7, 0.36, 3.5, 'haveli_e_win_bot');
+  addHaveliWall(50.0, 2.85, 7.40, 33.7, 0.36, 3.5, 'haveli_e_win_top');
+  pushStaticGeo(unitBoxGeo, haveliWoodDarkMat, 49.96, 2.1, 33.7, 0, 0, 0, 0.12, 1.54, 3.44, false, true);
+  pushStaticGeo(unitBoxGeo, tealWindowMat, 49.98, 2.1, 33.7, 0, 0, 0, 0.06, 1.42, 3.3, false, false);
+  // Interior Mint Trim Band on East Double-Height Wall (matches reference!)
+  addBox(worldGroup, 0.08, 0.24, 15.6, 49.78, 4.15, 35.0, haveliMintTrimMat, { collide: false });
+
+  // 4. NORTH WALL (z = 27.0, x = 34.0..50.0)
+  // Upper Veranda Doorway at x = 34.9..36.3, y = 4.00..6.35; Tall Staircase Blue-Mullion Window at x = 37.8..41.8, y = 2.35..6.35
+  addHaveliWall(34.45, 0.24, 7.40, 27.0, 0.9, 0.36, 'haveli_n_nw');    // x = 34.0..34.9
+  addHaveliWall(35.6, 0.24, 4.00, 27.0, 1.4, 0.36, 'haveli_n_door_lo'); // below upper terrace door
+  addHaveliWall(35.6, 6.35, 7.40, 27.0, 1.4, 0.36, 'haveli_n_door_hi'); // lintel above upper terrace door
+  addHaveliWall(37.05, 0.24, 7.40, 27.0, 1.5, 0.36, 'haveli_n_mid');   // x = 36.3..37.8
+  addHaveliWall(39.8, 0.24, 2.35, 27.0, 4.0, 0.36, 'haveli_n_win_bot'); // under tall staircase window
+  addHaveliWall(39.8, 6.35, 7.40, 27.0, 4.0, 0.36, 'haveli_n_win_top'); // above tall staircase window
+  addHaveliWall(46.0, 0.24, 7.40, 27.0, 8.4, 0.36, 'haveli_n_ne');    // x = 41.8..50.2
+  // Tall Blue-Mullioned Frosted Staircase Window (x = 37.8..41.8, y = 2.35..6.35)
+  pushStaticGeo(unitBoxGeo, haveliWindowMat, 39.8, 4.35, 27.0, 0, 0, 0, 4.0, 4.0, 0.08, false, false);
+  // Interior Mint Trim Band on North Double-Height Wall
+  addBox(worldGroup, 8.0, 0.24, 0.08, 45.8, 4.15, 27.22, haveliMintTrimMat, { collide: false });
+
+  // --- GROUND STUDY ROOM PARTITION (SW Corner: x = 34.2..42.4, z = 37.3..42.8) ---
+  // Partition wall along z = 37.3 with Interactive Study Door at x = 37.1..38.5 (y = 0.24..2.74)
+  addHaveliWall(35.65, 0.24, 3.72, 37.3, 2.9, 0.28, 'haveli_study_n1'); // x = 34.2..37.1
+  addHaveliWall(40.45, 0.24, 3.72, 37.3, 3.9, 0.28, 'haveli_study_n2'); // x = 38.5..42.4
+  addHaveliWall(37.8, 2.74, 3.72, 37.3, 1.4, 0.28, 'haveli_study_hdr'); // lintel over study door
+  // East partition wall of Ground Study (x = 42.4, z = 37.3..42.8)
+  addHaveliWall(42.4, 0.24, 3.72, 40.05, 0.28, 5.5, 'haveli_study_e');
+
+  // --- SECOND FLOOR DECKS (y = 3.72..4.00, top = 4.00m) ---
+  // 1. NW 2nd Floor Gallery at top of stairs (x = 34.2..37.2, z = 27.2..31.4)
+  addBox(worldGroup, 3.0, 0.28, 4.2, 35.7, 3.86, 29.3, haveliWallMat, {
+    collide: true,
+    mantleable: false,
+    blocksZombies: true,
+    id: 'haveli_2f_nw',
+  });
+  // 2. West Upper Catwalk bridging NW Gallery -> SW Upper Wing over front door (x = 34.2..36.8, z = 31.4..37.3)
+  addBox(worldGroup, 2.6, 0.28, 5.9, 35.5, 3.86, 34.35, haveliWallMat, {
+    collide: true,
+    mantleable: false,
+    blocksZombies: true,
+    id: 'haveli_2f_catwalk',
+  });
+  // 3. SW Upper Bedroom/Study Ceiling Deck (x = 34.2..42.4, z = 37.3..42.8)
+  addBox(worldGroup, 8.2, 0.28, 5.5, 38.3, 3.86, 40.05, haveliWallMat, {
+    collide: true,
+    mantleable: false,
+    blocksZombies: true,
+    id: 'haveli_2f_sw',
+  });
+  // 4. SE Overlooking Balcony protruding into Double-Height Atrium (x = 42.4..49.6, z = 38.6..42.8)
+  addBox(worldGroup, 7.2, 0.28, 4.2, 46.0, 3.86, 40.7, haveliWallMat, {
+    collide: true,
+    mantleable: false,
+    blocksZombies: true,
+    id: 'haveli_2f_balcony',
+  });
+  // Mint-green balcony fascia + dark wooden railing with carved balusters overlooking Living Hall!
+  addBox(worldGroup, 7.3, 0.34, 0.14, 46.0, 3.88, 38.58, haveliMintTrimMat, { collide: false });
+  addBox(worldGroup, 2.7, 0.34, 0.14, 38.2, 3.88, 31.4, haveliMintTrimMat, { collide: false });
+  addBox(worldGroup, 0.14, 0.34, 5.9, 36.8, 3.88, 34.35, haveliMintTrimMat, { collide: false });
+
+  // Upper Floor Polished Tile Overlays & Balcony Guard Rails
+  pushStaticGeo(unitBoxGeo, haveliFloorMat, 35.7, 4.003, 29.3, 0, 0, 0, 2.9, 0.01, 4.0, false, true);
+  pushStaticGeo(unitBoxGeo, haveliFloorMat, 35.5, 4.003, 34.35, 0, 0, 0, 2.4, 0.01, 5.8, false, true);
+  pushStaticGeo(unitBoxGeo, haveliFloorMat, 42.1, 4.003, 40.2, 0, 0, 0, 14.8, 0.01, 5.2, false, true);
+
+  // Guard railings along NW Gallery, West Catwalk, and SE Overlooking Balcony
+  const addBalconyRailing = (x1: number, z1: number, x2: number, z2: number, railY = 4.0) => {
+    const len = Math.hypot(x2 - x1, z2 - z1);
+    const midX = (x1 + x2) * 0.5;
+    const midZ = (z1 + z2) * 0.5;
+    const isX = Math.abs(x2 - x1) >= Math.abs(z2 - z1);
+    // Handrail + low curb + balusters
+    addBox(worldGroup, isX ? len : 0.1, 0.08, isX ? 0.1 : len, midX, railY + 0.96, midZ, haveliWoodDarkMat, { collide: false });
+    addBox(worldGroup, isX ? len : 0.12, 0.96, isX ? 0.12 : len, midX, railY + 0.48, midZ, haveliWoodDarkMat, {
+      collide: true,
+      mantleable: false,
+      blocksZombies: true,
+    });
+    const steps = Math.max(3, Math.floor(len / 0.48));
+    for (let s = 0; s <= steps; s++) {
+      const u = s / steps;
+      const bx = THREE.MathUtils.lerp(x1, x2, u);
+      const bz = THREE.MathUtils.lerp(z1, z2, u);
+      pushStaticGeo(unitBoxGeo, darkMetalMat, bx, railY + 0.48, bz, 0, 0, 0, 0.04, 0.9, 0.04, false, true);
+    }
+  };
+  addBalconyRailing(36.75, 31.45, 36.75, 38.55); // West Catwalk rail overlooking Living Hall
+  addBalconyRailing(42.4, 38.6, 49.6, 38.6);   // SE Overlooking Balcony rail!
+
+  // Upper Room Partition separating SW Upper Room from SE Overlooking Balcony (at x = 42.4, z = 38.6..42.8)
+  // Leaves Interactive Balcony Door #4 at z = 39.8..41.2 (y = 4.00..6.35)
+  addHaveliWall(42.4, 4.00, 7.12, 39.2, 0.28, 1.2, 'haveli_2f_part_n');
+  addHaveliWall(42.4, 4.00, 7.12, 42.05, 0.28, 1.7, 'haveli_2f_part_s');
+  addHaveliWall(42.4, 6.35, 7.12, 40.5, 0.28, 1.4, 'haveli_2f_part_hdr');
+
+  // --- WALKABLE L-SHAPED INTERIOR STAIRCASE (Flight 1 Eastbound -> Mid-Landing -> Flight 2 Westbound) ---
+  // Flight 1: x = 36.4 (y=0.24) -> x = 40.4 (y=2.12), z = 29.3..31.1
+  const flight1Count = 9;
+  for (let i = 0; i < flight1Count; i++) {
+    const t0 = i / flight1Count;
+    const t1 = (i + 1) / flight1Count;
+    const stepTop = THREE.MathUtils.lerp(0.24, 2.12, t1);
+    const stepX = THREE.MathUtils.lerp(36.4, 40.4, (t0 + t1) * 0.5);
+    const stepW = 4.0 / flight1Count;
+    pushStaticGeo(unitBoxGeo, haveliWallMat, stepX, stepTop * 0.5 + 0.12, 30.2, 0, 0, 0, stepW + 0.02, stepTop - 0.24, 1.8, true, true);
+    pushStaticGeo(unitBoxGeo, haveliMintTrimMat, stepX, stepTop - 0.02, 31.12, 0, 0, 0, stepW + 0.02, 0.09, 0.06, false, true);
+    if (i % 2 === 0) {
+      pushStaticGeo(unitBoxGeo, darkMetalMat, stepX, stepTop + 0.44, 31.08, 0, 0, 0, 0.04, 0.88, 0.04, false, false);
+    }
+  }
+  pushStaticGeo(unitBoxGeo, haveliWoodDarkMat, 38.4, 2.12, 31.08, 0, 0, 0.44, 4.45, 0.08, 0.08, false, true);
+  colliders.push({
+    id: 'haveli_stair_flight1',
+    minX: 36.4,
+    maxX: 40.4,
+    minY: 0.2,
+    maxY: 2.2,
+    minZ: 29.3,
+    maxZ: 31.1,
+    mantleable: false,
+    blocksZombies: false,
+    ramp: { axis: 'x', lowCoord: 36.4, highCoord: 40.4, lowY: 0.24, highY: 2.12 },
+  });
+
+  // Mid-Landing (x = 40.4..42.6, z = 27.2..31.1, top = 2.12m)
+  addBox(worldGroup, 2.2, 0.28, 3.9, 41.5, 1.98, 29.15, haveliWallMat, {
+    collide: true,
+    mantleable: false,
+    blocksZombies: true,
+    id: 'haveli_stair_midlanding',
+  });
+  addBox(worldGroup, 0.12, 0.96, 3.9, 42.55, 2.6, 29.15, haveliWoodDarkMat, {
+    collide: true,
+    mantleable: false,
+    blocksZombies: true,
+  });
+
+  // Flight 2: x = 40.4 (y=2.12) -> x = 36.8 (y=4.00), z = 27.3..29.1
+  const flight2Count = 9;
+  for (let i = 0; i < flight2Count; i++) {
+    const t0 = i / flight2Count;
+    const t1 = (i + 1) / flight2Count;
+    const stepTop = THREE.MathUtils.lerp(2.12, 4.00, t1);
+    const stepX = THREE.MathUtils.lerp(40.4, 36.8, (t0 + t1) * 0.5);
+    const stepW = 3.6 / flight2Count;
+    pushStaticGeo(unitBoxGeo, haveliWallMat, stepX, stepTop - 0.18, 28.2, 0, 0, 0, stepW + 0.02, 0.36, 1.8, true, true);
+    pushStaticGeo(unitBoxGeo, haveliMintTrimMat, stepX, stepTop - 0.02, 29.12, 0, 0, 0, stepW + 0.02, 0.09, 0.06, false, true);
+    if (i % 2 === 0) {
+      pushStaticGeo(unitBoxGeo, darkMetalMat, stepX, stepTop + 0.44, 29.08, 0, 0, 0, 0.04, 0.88, 0.04, false, false);
+    }
+  }
+  pushStaticGeo(unitBoxGeo, haveliWoodDarkMat, 38.6, 4.0, 29.08, 0, 0, -0.48, 4.05, 0.08, 0.08, false, true);
+  colliders.push({
+    id: 'haveli_stair_flight2',
+    minX: 36.8,
+    maxX: 40.4,
+    minY: 2.0,
+    maxY: 4.08,
+    minZ: 27.3,
+    maxZ: 29.1,
+    mantleable: false,
+    blocksZombies: false,
+    ramp: { axis: 'x', lowCoord: 40.4, highCoord: 36.8, lowY: 2.12, highY: 4.00 },
+  });
+
+  // --- ROOFTOP DECK (y = 7.12..7.40, top = 7.40m) & PARAPETS ---
+  addBox(worldGroup, 16.4, 0.28, 16.4, 42.0, 7.26, 35.0, sandstoneMat, {
+    collide: true,
+    mantleable: true,
+    blocksZombies: true,
+    id: 'haveli_roof_slab',
+  });
+  // Rooftop Parapet Walls (leave gap at NE stair exit x = 47.6..49.8, z = 27.0)
+  addBox(worldGroup, 16.2, 0.85, 0.28, 42.0, 7.82, 43.05, haveliPeachMat, { collide: true, mantleable: true });
+  addBox(worldGroup, 0.28, 0.85, 16.2, 34.0, 7.82, 35.0, haveliPeachMat, { collide: true, mantleable: true });
+  addBox(worldGroup, 0.28, 0.85, 16.2, 50.0, 7.82, 35.0, haveliPeachMat, { collide: true, mantleable: true });
+  addBox(worldGroup, 13.6, 0.85, 0.28, 40.8, 7.82, 27.0, haveliPeachMat, { collide: true, mantleable: true });
+  // Rooftop Water Tank & Parkour Edge Smudge
+  pushStaticGeo(trackGeo(new THREE.CylinderGeometry(0.68, 0.68, 1.35, 12)), haveliWaterTankMat, 36.2, 8.08, 40.5, 0, 0, 0, 1, 1, 1, true, true);
+  pushStaticGeo(smudgeGeo, parkourSmudgeMat, 42.0, 8.26, 27.0, 0, 0, 0, 4.5, 1, 1, false, false);
+
+  // --- 2ND FLOOR EXTERIOR VERANDA (z = 23.0..27.0, x = 33.4..49.8, top = 4.00m) + PARKOUR BRIDGE TO bldg_e1 ---
+  addBox(worldGroup, 16.4, 0.26, 4.0, 41.6, 3.87, 25.0, sandstoneMat, {
+    collide: true,
+    mantleable: true,
+    blocksZombies: true,
+    id: 'haveli_2f_veranda',
+  });
+  // Support Columns under Veranda
+  [33.8, 41.6, 49.4].forEach((vx) => {
+    addBox(worldGroup, 0.34, 3.74, 0.34, vx, 1.87, 23.2, sandstoneMat, { collide: true, mantleable: false });
+  });
+  // Veranda North Railing (gap at x = 33.4..35.0 for plank bridge to bldg_e1!)
+  addBox(worldGroup, 14.4, 0.92, 0.16, 42.5, 4.46, 23.08, haveliWoodDarkMat, { collide: true, mantleable: true });
+
+  // Exterior Stair from 2F Veranda (x = 43.8, y = 4.00) up to Haveli Rooftop (x = 49.4, y = 7.40) along z = 23.4..25.6
+  for (let i = 0; i < 12; i++) {
+    const t = (i + 1) / 12;
+    const sy = THREE.MathUtils.lerp(4.0, 7.4, t);
+    const sx = THREE.MathUtils.lerp(43.8, 49.4, (i + 0.5) / 12);
+    pushStaticGeo(unitBoxGeo, sandstoneMat, sx, sy - 0.14, 24.5, 0, 0, 0, 0.48, 0.28, 2.0, true, true);
+  }
+  colliders.push({
+    id: 'haveli_roof_stair',
+    minX: 43.8,
+    maxX: 49.4,
+    minY: 3.9,
+    maxY: 7.48,
+    minZ: 23.5,
+    maxZ: 25.6,
+    mantleable: false,
+    blocksZombies: false,
+    ramp: { axis: 'x', lowCoord: 43.8, highCoord: 49.4, lowY: 4.0, highY: 7.4 },
+  });
+
+  // Wooden Parkour Bridge linking bldg_e1 (x=27.5..32.5, h=3.9, z=18..28) -> Haveli 2F Veranda (x=33.4, y=4.0, z=24.8)
+  addBox(worldGroup, 2.4, 0.22, 2.5, 32.8, 3.95, 24.8, woodMat, {
+    collide: true,
+    mantleable: true,
+    blocksZombies: false,
+    id: 'bridge_e1_to_haveli',
+  });
+  pushStaticGeo(smudgeGeoZ, parkourSmudgeMat, 32.8, 4.075, 24.8, 0, 0, 0, 1, 1, 2.0, false, false);
+
+  // --- INDOOR FURNITURE, BOOKSHELF, LIGHTING & SPINNING CEILING FAN ---
+  // Coffee Table & Cushioned Divan Sofa + 4 Wooden Armchairs in Living Hall
+  addBox(worldGroup, 1.4, 0.44, 2.3, 44.6, 0.46, 36.2, haveliWoodDarkMat, { collide: true, mantleable: true });
+  addBox(worldGroup, 1.0, 0.46, 2.5, 46.8, 0.47, 36.2, haveliWoodDarkMat, { collide: true, mantleable: true });
+  addBox(worldGroup, 0.9, 0.14, 2.3, 46.8, 0.74, 36.2, marbleTrimMat, { collide: false });
+  [
+    [44.6, 32.2],
+    [44.6, 33.4],
+    [46.8, 32.2],
+    [46.8, 33.4],
+  ].forEach(([cx, cz]) => {
+    addBox(worldGroup, 0.72, 0.48, 0.72, cx, 0.48, cz, haveliWoodDarkMat, { collide: true, mantleable: true });
+    addBox(worldGroup, 0.12, 0.56, 0.72, cx + 0.3, 0.92, cz, haveliWoodDarkMat, { collide: false });
+  });
+  // Dark Blue Recessed Bookshelf along East Wall (x = 49.3, z = 37.2)
+  addBox(worldGroup, 0.7, 2.5, 2.8, 49.4, 1.49, 37.2, haveliBookshelfMat, { collide: true, mantleable: true });
+  // Study Desk + Supply Shelf in SW Ground Study Room
+  addBox(worldGroup, 2.1, 0.78, 0.95, 35.6, 0.63, 41.6, haveliWoodDarkMat, { collide: true, mantleable: true });
+
+  // Interactive First-Aid Medkits Registry (Haveli Study Desk + Train S7 Berth)
+  interface WorldMedkit {
+    pos: THREE.Vector3;
+    group: THREE.Group;
+    used: boolean;
+  }
+  const worldMedkits: WorldMedkit[] = [];
+  const medCrossMat = trackMat(
+    new THREE.MeshStandardMaterial({
+      color: 0xef4444,
+      emissive: 0xdc2626,
+      emissiveIntensity: 1.4,
+      roughness: 0.3,
+    }),
+  );
+  const medkitCaseGeo = trackGeo(new THREE.BoxGeometry(0.42, 0.18, 0.3));
+  const medCrossAGeo = trackGeo(new THREE.BoxGeometry(0.18, 0.03, 0.06));
+  const medCrossBGeo = trackGeo(new THREE.BoxGeometry(0.06, 0.03, 0.18));
+  const addInteractiveMedkit = (mx: number, my: number, mz: number) => {
+    const pos = new THREE.Vector3(mx, my, mz);
+    const group = new THREE.Group();
+    group.position.copy(pos);
+    worldGroup.add(group);
+    group.add(new THREE.Mesh(medkitCaseGeo, marbleMat));
+    const cA = new THREE.Mesh(medCrossAGeo, medCrossMat);
+    cA.position.y = 0.095;
+    group.add(cA);
+    const cB = new THREE.Mesh(medCrossBGeo, medCrossMat);
+    cB.position.y = 0.095;
+    group.add(cB);
+    worldMedkits.push({ pos, group, used: false });
+  };
+  addInteractiveMedkit(35.7, 1.15, 41.5); // Haveli Study Desk
+
+  // Warm Indoor Wall Sconces & Non-Shadow-Casting PointLights
+  pushStaticGeo(unitBoxGeo, haveliSconceGlowMat, 47.4, 3.3, 42.74, 0, 0, 0, 0.24, 0.28, 0.12, false, false);
+  pushStaticGeo(unitBoxGeo, haveliSconceGlowMat, 49.74, 3.1, 33.7, 0, 0, 0, 0.12, 0.18, 1.4, false, false);
+  const haveliMainLight = new THREE.PointLight(0xffe1b0, 3.2, 20, 1.5);
+  haveliMainLight.castShadow = false;
+  haveliMainLight.position.set(44.5, 5.4, 34.5);
+  worldGroup.add(haveliMainLight);
+
+  const haveliStudyLight = new THREE.PointLight(0xffdfb0, 2.1, 11, 1.6);
+  haveliStudyLight.castShadow = false;
+  haveliStudyLight.position.set(37.5, 3.2, 40.2);
+  worldGroup.add(haveliStudyLight);
+
+  // Slowly Spinning Double-Height Ceiling Fan at (44.8, 6.25, 33.4)
+  const haveliFanGroup = new THREE.Group();
+  haveliFanGroup.position.set(44.8, 6.25, 33.4);
+  worldGroup.add(haveliFanGroup);
+  const fanRod = new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.03, 0.03, 0.9, 8)), darkMetalMat);
+  fanRod.position.y = 0.45;
+  haveliFanGroup.add(fanRod);
+  const fanHub = new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.16, 0.18, 0.14, 12)), darkMetalMat);
+  haveliFanGroup.add(fanHub);
+  const fanBladeGeo = trackGeo(new THREE.BoxGeometry(0.95, 0.025, 0.18));
+  for (let b = 0; b < 4; b++) {
+    const blade = new THREE.Mesh(fanBladeGeo, haveliWoodDarkMat);
+    const ang = (b / 4) * Math.PI * 2;
+    blade.position.set(Math.cos(ang) * 0.56, 0, Math.sin(ang) * 0.56);
+    blade.rotation.y = -ang;
+    blade.rotation.x = 0.14;
+    haveliFanGroup.add(blade);
+  }
+
+  // Register the 4 Interactive Hinged Mint-and-Teak Doors
+  registerInteractiveDoor({
+    id: 'haveli_door_front',
+    label: 'Haveli Front Double Doors',
+    x: 34.0,
+    yBase: 0.24,
+    z: 34.0,
+    width: 2.38,
+    height: 2.66,
+    axis: 'z',
+    doubleLeaf: true,
+    openSign: -1,
+  });
+  registerInteractiveDoor({
+    id: 'haveli_door_study',
+    label: 'Study Room Door',
+    x: 37.8,
+    yBase: 0.24,
+    z: 37.3,
+    width: 1.36,
+    height: 2.46,
+    axis: 'x',
+    doubleLeaf: false,
+    openSign: 1,
+  });
+  registerInteractiveDoor({
+    id: 'haveli_door_veranda',
+    label: 'Upper Veranda Door',
+    x: 35.6,
+    yBase: 4.00,
+    z: 27.0,
+    width: 1.36,
+    height: 2.32,
+    axis: 'x',
+    doubleLeaf: false,
+    openSign: -1,
+  });
+  registerInteractiveDoor({
+    id: 'haveli_door_balcony',
+    label: 'Upper Balcony Door',
+    x: 42.4,
+    yBase: 4.00,
+    z: 40.5,
+    width: 1.36,
+    height: 2.32,
+    axis: 'z',
+    doubleLeaf: false,
+    openSign: 1,
+  });
+
+  // --- FLANKING TAJ GANJ TERRACED NEIGHBORHOOD HOUSES (matching photo 1) ---
+  const tajGanjHouses: Array<{
+    id: string;
+    x: number;
+    z: number;
+    w: number;
+    h: number;
+    d: number;
+    mat: THREE.Material;
+    hasTank?: boolean;
+  }> = [
+    { id: 'tg_house_ne', x: 53.6, z: 22.0, w: 5.8, h: 4.2, d: 7.2, mat: haveliOchreMat, hasTank: true },
+    { id: 'tg_house_se', x: 53.6, z: 36.5, w: 6.2, h: 5.6, d: 8.6, mat: haveliPeachMat, hasTank: true },
+    { id: 'tg_house_s1', x: 43.0, z: 46.8, w: 9.2, h: 4.1, d: 5.2, mat: haveliTerracottaMat, hasTank: false },
+    { id: 'tg_house_s2', x: 30.0, z: 47.2, w: 8.4, h: 3.6, d: 4.8, mat: haveliOchreMat, hasTank: true },
+  ];
+  tajGanjHouses.forEach((h) => {
+    addBox(worldGroup, h.w, h.h, h.d, h.x, h.h * 0.5, h.z, h.mat, {
+      collide: true,
+      mantleable: true,
+      wallrunnable: true,
+      blocksZombies: true,
+      id: h.id,
+    });
+    // Rooftop parapets & cornice trim
+    addBox(worldGroup, h.w + 0.2, 0.55, 0.22, h.x, h.h + 0.275, h.z - h.d * 0.5 + 0.11, marbleTrimMat);
+    addBox(worldGroup, h.w + 0.2, 0.55, 0.22, h.x, h.h + 0.275, h.z + h.d * 0.5 - 0.11, marbleTrimMat);
+    addBox(worldGroup, 0.22, 0.55, h.d, h.x - h.w * 0.5 + 0.11, h.h + 0.275, h.z, marbleTrimMat);
+    addBox(worldGroup, 0.22, 0.55, h.d, h.x + h.w * 0.5 - 0.11, h.h + 0.275, h.z, marbleTrimMat);
+    // Decorative recessed Taj Ganj facade windows
+    pushStaticGeo(unitBoxGeo, tealWindowMat, h.x - h.w * 0.5 - 0.04, h.h * 0.56, h.z - h.d * 0.22, 0, 0, 0, 0.08, 1.0, 0.9, false, false);
+    pushStaticGeo(unitBoxGeo, tealWindowMat, h.x - h.w * 0.5 - 0.04, h.h * 0.56, h.z + h.d * 0.22, 0, 0, 0, 0.08, 1.0, 0.9, false, false);
+    if (h.hasTank) {
+      pushStaticGeo(trackGeo(new THREE.CylinderGeometry(0.55, 0.55, 1.15, 10)), haveliWaterTankMat, h.x + 0.8, h.h + 0.58, h.z - 0.8, 0, 0, 0, 1, 1, 1, true, true);
+    }
+    pushStaticGeo(smudgeGeo, parkourSmudgeMat, h.x - h.w * 0.5 + 0.18, h.h + 0.565, h.z, 0, Math.PI / 2, 0, 2.2, 1, 1, false, false);
+  });
+
+  // =========================================================================
+  // 6C. AGRA CANTT & AGRA CITY RAILWAY STATION, FOOT-OVERBRIDGE & 3 TRAINS
+  // =========================================================================
+  const stBrickRedMat = trackMat(
+    new THREE.MeshStandardMaterial({
+      map: textures.railwayBrickRed,
+      color: 0xffffff,
+      roughness: 0.84,
+      metalness: 0.03,
+    }),
+  );
+  const stBrickWhiteMat = trackMat(
+    new THREE.MeshStandardMaterial({
+      map: textures.railwayWhiteBrick,
+      color: 0xffffff,
+      roughness: 0.82,
+      metalness: 0.03,
+    }),
+  );
+  const stTrimRedMat = trackMat(
+    new THREE.MeshStandardMaterial({
+      color: 0xb91c1c,
+      roughness: 0.72,
+      metalness: 0.06,
+    }),
+  );
+  const stRoofTileMat = trackMat(
+    new THREE.MeshStandardMaterial({
+      color: 0xc2412c,
+      roughness: 0.78,
+      metalness: 0.06,
+    }),
+  );
+  const stChhatriMat = trackMat(
+    new THREE.MeshStandardMaterial({
+      color: 0xc8372d,
+      roughness: 0.68,
+      metalness: 0.08,
+    }),
+  );
+  const stPlinthMat = trackMat(
+    new THREE.MeshStandardMaterial({
+      color: 0x5d463c,
+      roughness: 0.88,
+      metalness: 0.04,
+    }),
+  );
+  const stPlatformDeckMat = trackMat(
+    new THREE.MeshStandardMaterial({
+      map: textures.courtyardTile,
+      color: 0x6b7280,
+      roughness: 0.62,
+      metalness: 0.08,
+    }),
+  );
+  const stTactileYellowMat = trackMat(
+    new THREE.MeshStandardMaterial({
+      color: 0xeab308,
+      roughness: 0.74,
+      metalness: 0.05,
+    }),
+  );
+  const stCanopySheetMat = trackMat(
+    new THREE.MeshStandardMaterial({
+      map: textures.rustedMetal,
+      color: 0x94a3b8,
+      roughness: 0.56,
+      metalness: 0.42,
+    }),
+  );
+  const stFobBlueMat = trackMat(
+    new THREE.MeshStandardMaterial({
+      color: 0x1d4ed8,
+      roughness: 0.54,
+      metalness: 0.35,
+    }),
+  );
+  const stFobYellowMat = trackMat(
+    new THREE.MeshStandardMaterial({
+      color: 0xfacc15,
+      roughness: 0.52,
+      metalness: 0.25,
+    }),
+  );
+  const stRailSteelMat = trackMat(
+    new THREE.MeshStandardMaterial({
+      color: 0xcbd5e1,
+      roughness: 0.26,
+      metalness: 0.88,
+    }),
+  );
+  const stSleeperMat = trackMat(
+    new THREE.MeshStandardMaterial({
+      color: 0x64625e,
+      roughness: 0.92,
+      metalness: 0.04,
+    }),
+  );
+  const stBallastMat = trackMat(
+    new THREE.MeshStandardMaterial({
+      map: textures.railwayBallast,
+      color: 0xb8b2aa,
+      roughness: 0.95,
+      metalness: 0.02,
+    }),
+  );
+  const stBoardCanttMat = trackMat(
+    new THREE.MeshStandardMaterial({
+      map: textures.railwayBoardCantt,
+      roughness: 0.48,
+      metalness: 0.08,
+    }),
+  );
+  const stBoardCityMat = trackMat(
+    new THREE.MeshStandardMaterial({
+      map: textures.railwayBoardCity,
+      roughness: 0.48,
+      metalness: 0.08,
+    }),
+  );
+  const stFacadeNcrMat = trackMat(
+    new THREE.MeshStandardMaterial({
+      map: textures.railwayFacadeNcr,
+      roughness: 0.42,
+      metalness: 0.14,
+    }),
+  );
+  const stDropDriveMat = trackMat(
+    new THREE.MeshStandardMaterial({
+      map: textures.railwayDropDrive,
+      roughness: 0.44,
+      metalness: 0.1,
+    }),
+  );
+  const stClock1207Mat = trackMat(
+    new THREE.MeshStandardMaterial({
+      map: textures.railwayClock1207,
+      emissiveMap: textures.railwayClock1207,
+      emissive: 0xff3b3b,
+      emissiveIntensity: 1.5,
+      roughness: 0.25,
+    }),
+  );
+  const stClock1744Mat = trackMat(
+    new THREE.MeshStandardMaterial({
+      map: textures.railwayClock1744,
+      emissiveMap: textures.railwayClock1744,
+      emissive: 0xff3b3b,
+      emissiveIntensity: 1.5,
+      roughness: 0.25,
+    }),
+  );
+  const stExecSignMat = trackMat(
+    new THREE.MeshStandardMaterial({
+      map: textures.railwayExecSign,
+      roughness: 0.46,
+      metalness: 0.06,
+    }),
+  );
+  const stLedTubeMat = trackMat(
+    new THREE.MeshStandardMaterial({
+      color: 0xf8fafc,
+      emissive: 0xe0f2fe,
+      emissiveIntensity: 2.2,
+      roughness: 0.2,
+    }),
+  );
+  const stIcfBlueMat = trackMat(
+    new THREE.MeshStandardMaterial({
+      map: textures.railwayIcfBlue,
+      roughness: 0.42,
+      metalness: 0.34,
+    }),
+  );
+  const stCreamExpressMat = trackMat(
+    new THREE.MeshStandardMaterial({
+      map: textures.railwayCreamExpress,
+      roughness: 0.46,
+      metalness: 0.28,
+    }),
+  );
+  const stGaribGreenMat = trackMat(
+    new THREE.MeshStandardMaterial({
+      map: textures.railwayGaribGreen,
+      roughness: 0.44,
+      metalness: 0.3,
+    }),
+  );
+  const stCoachRoofMat = trackMat(
+    new THREE.MeshStandardMaterial({
+      color: 0x64748b,
+      roughness: 0.58,
+      metalness: 0.46,
+    }),
+  );
+  const stCoachInteriorMat = trackMat(
+    new THREE.MeshStandardMaterial({
+      color: 0xd6d3cd,
+      roughness: 0.72,
+      metalness: 0.08,
+    }),
+  );
+  const stBerthBlueMat = trackMat(
+    new THREE.MeshStandardMaterial({
+      color: 0x1e40af,
+      roughness: 0.78,
+      metalness: 0.04,
+    }),
+  );
+  const stBerthMaroonMat = trackMat(
+    new THREE.MeshStandardMaterial({
+      color: 0x7f1d1d,
+      roughness: 0.76,
+      metalness: 0.04,
+    }),
+  );
+  const stVestibuleMat = trackMat(
+    new THREE.MeshStandardMaterial({
+      color: 0x18181b,
+      roughness: 0.9,
+      metalness: 0.12,
+    }),
+  );
+  const stLocoSaffronMat = trackMat(
+    new THREE.MeshStandardMaterial({
+      color: 0xea580c,
+      roughness: 0.42,
+      metalness: 0.38,
+    }),
+  );
+
+  // 1) Station Forecourt Road & Drop-and-Drive Steel Pedestrian Railings (x = -46..-56, z = -42..+42)
+  addBox(worldGroup, 10.2, 0.06, 84.0, -51.0, 0.03, 0, stPlatformDeckMat, {
+    collide: false,
+    receiveShadow: true,
+  });
+  // Stainless steel crowd guardrail along forecourt sidewalk (x = -54.2), leaving central portico arches open (z = -10..+10)
+  [
+    [-34, -12],
+    [12, 34],
+  ].forEach(([z0, z1]) => {
+    const segLen = z1 - z0;
+    const midZ = (z0 + z1) * 0.5;
+    pushStaticGeo(unitBoxGeo, chromeMat, -54.2, 0.92, midZ, 0, 0, 0, 0.06, 0.06, segLen, false, false);
+    pushStaticGeo(unitBoxGeo, chromeMat, -54.2, 0.5, midZ, 0, 0, 0, 0.04, 0.04, segLen, false, false);
+    for (let pz = z0; pz <= z1 + 0.01; pz += 2.2) {
+      pushStaticGeo(unitBoxGeo, chromeMat, -54.2, 0.48, pz, 0, 0, 0, 0.06, 0.96, 0.06, true, true);
+    }
+    colliders.push({
+      id: `st_forecourt_rail_${z0}`,
+      minX: -54.35,
+      maxX: -54.05,
+      minY: 0,
+      maxY: 0.98,
+      minZ: z0,
+      maxZ: z1,
+      mantleable: true,
+      blocksZombies: true,
+    });
+  });
+
+  // Green "ENTRY / DROP & DRIVE" Sign in Front of Portico (x = -52.5, z = 4.2)
+  pushStaticGeo(unitBoxGeo, chromeMat, -52.5, 1.5, 3.05, 0, 0, 0, 0.09, 3.0, 0.09, true, true);
+  pushStaticGeo(unitBoxGeo, chromeMat, -52.5, 1.5, 5.35, 0, 0, 0, 0.09, 3.0, 0.09, true, true);
+  addBox(worldGroup, 0.14, 2.0, 2.5, -52.5, 2.05, 4.2, stDropDriveMat, {
+    collide: true,
+    mantleable: false,
+    blocksZombies: true,
+  });
+
+  // High-Mast Floodlight Tower in South Forecourt (x = -50.2, z = 24.0)
+  pushStaticGeo(trackGeo(new THREE.CylinderGeometry(0.14, 0.34, 14.5, 8)), chromeMat, -50.2, 7.25, 24.0, 0, 0, 0, 1, 1, 1, true, true);
+  pushStaticGeo(unitBoxGeo, darkMetalMat, -50.2, 14.4, 24.0, 0, 0, 0, 1.4, 0.16, 1.4, false, false);
+  for (let a = 0; a < 4; a++) {
+    const ang = (a / 4) * Math.PI * 2;
+    pushStaticGeo(unitBoxGeo, stLedTubeMat, -50.2 + Math.cos(ang) * 0.55, 14.28, 24.0 + Math.sin(ang) * 0.55, 0, ang, 0.35, 0.35, 0.16, 0.25, false, false);
+  }
+  const stMastLight = new THREE.PointLight(0xffeed4, 5.5, 38, 1.3);
+  stMastLight.castShadow = false;
+  stMastLight.position.set(-50.2, 13.8, 24.0);
+  worldGroup.add(stMastLight);
+
+  // 2) MAIN AGRA CANTT HERITAGE STATION BUILDING (x = -56.0 .. -66.0, z = -34 .. +34)
+  // Raised station plinth & concourse floor (y = 0.25m, sloped access apron on East Forecourt)
+  addBox(worldGroup, 10.6, 0.25, 68.4, -61.0, 0.125, 0, stPlinthMat, {
+    collide: true,
+    mantleable: false,
+    id: 'station_concourse_plinth',
+  });
+  addBox(worldGroup, 1.4, 0.14, 24.0, -55.2, 0.07, 0, stPlinthMat, {
+    collide: false,
+  });
+  colliders.push({
+    id: 'st_forecourt_apron_ramp',
+    minX: -55.9,
+    maxX: -54.5,
+    minY: 0,
+    maxY: 0.3,
+    minZ: -12,
+    maxZ: 12,
+    mantleable: false,
+    blocksZombies: false,
+    ramp: { axis: 'x', lowCoord: -54.5, highCoord: -55.9, lowY: 0, highY: 0.25 },
+  });
+
+  // Central Whitewashed Portico (z = -11 .. +11, East Wall x = -56.2, West Platform Wall x = -65.8)
+  // 3 Walk-through Archways at z = -7.0, 0.0, +7.0 (each 3.2m wide x 3.6m tall)
+  const buildPorticoArchedWall = (wx: number, idPrefix: string) => {
+    const piers = [-10.5, -3.5, 3.5, 10.5];
+    piers.forEach((pz, idx) => {
+      addBox(worldGroup, 0.78, 3.8, 1.75, wx, 2.15, pz, stBrickWhiteMat, {
+        collide: true,
+        mantleable: false,
+        blocksZombies: true,
+        id: `${idPrefix}_pier_${idx}`,
+      });
+      // Red sandstone plinth & capital accent
+      addBox(worldGroup, 0.92, 1.35, 1.9, wx, 0.92, pz, stPlinthMat, { collide: false });
+      addBox(worldGroup, 0.96, 0.26, 2.0, wx, 3.85, pz, stTrimRedMat, { collide: false });
+    });
+    // Stepped red arch corbels inside each opening
+    [-7.0, 0.0, 7.0].forEach((az) => {
+      [-1.55, 1.55].forEach((dz) => {
+        pushStaticGeo(unitBoxGeo, stTrimRedMat, wx, 3.45, az + dz * 0.88, 0, 0, 0, 0.84, 0.42, 0.5, false, false);
+        pushStaticGeo(unitBoxGeo, stTrimRedMat, wx, 3.72, az + dz * 0.62, 0, 0, 0, 0.84, 0.32, 0.5, false, false);
+      });
+    });
+    // Upper whitewashed brick spandrel frieze & overhang cornice (y = 3.85..6.15)
+    addBox(worldGroup, 0.78, 2.3, 22.8, wx, 5.0, 0, stBrickWhiteMat, {
+      collide: true,
+      mantleable: false,
+      blocksZombies: true,
+      id: `${idPrefix}_frieze`,
+    });
+    addBox(worldGroup, 1.7, 0.24, 24.4, wx + (wx > -61 ? 0.55 : -0.55), 5.95, 0, stTrimRedMat, { collide: false });
+  };
+  buildPorticoArchedWall(-56.2, 'portico_e');
+  buildPorticoArchedWall(-65.8, 'portico_w');
+
+  // Portico White & Red Facade Name Plaques ("AGRA CANTT / आगरा छावनी / آگرہ چھاؤنی") above the 3 Arches
+  [-7.0, 0.0, 7.0].forEach((pz) => {
+    pushStaticGeo(unitBoxGeo, stBoardCanttMat, -55.76, 4.95, pz, 0, 0, 0, 0.08, 0.95, 3.4, false, false);
+  });
+
+  // Portico Roof Slab (walkable at y = 6.20m)
+  addBox(worldGroup, 10.6, 0.34, 22.8, -61.0, 6.03, 0, stBrickWhiteMat, {
+    collide: true,
+    mantleable: true,
+    blocksZombies: true,
+    id: 'station_portico_roof',
+  });
+  // Portico Roof Parapet Trim
+  addBox(worldGroup, 0.28, 0.72, 22.8, -56.1, 6.56, 0, stBrickWhiteMat, { collide: true, mantleable: true });
+  addBox(worldGroup, 0.28, 0.72, 22.8, -65.9, 6.56, 0, stBrickWhiteMat, { collide: true, mantleable: true });
+
+  // Overhead Black Steel Truss + Deep Blue "उत्तर मध्य रेलवे / आगरा छावनी" Signboard (image_49628ea6.png)
+  [-56.4, -57.1].forEach((tx) => {
+    [-6.6, -2.2, 2.2, 6.6].forEach((tz) => {
+      pushStaticGeo(unitBoxGeo, darkMetalMat, tx, 7.65, tz, 0, 0, 0, 0.14, 2.6, 0.14, true, true);
+    });
+    pushStaticGeo(unitBoxGeo, darkMetalMat, tx, 8.95, 0, 0, 0, 0, 0.14, 0.16, 13.6, false, false);
+    pushStaticGeo(unitBoxGeo, darkMetalMat, tx, 6.42, 0, 0, 0, 0, 0.14, 0.16, 13.6, false, false);
+  });
+  pushStaticGeo(unitBoxGeo, stFacadeNcrMat, -56.28, 7.68, 0, 0, 0, 0, 0.16, 2.25, 11.4, false, false);
+
+  // 3 Crowning Red Terracotta Chhatri Cupolas on Station Portico Roof (image_49628ea6.png)
+  const buildStationChhatri = (cx: number, cy: number, cz: number, scale: number) => {
+    // Pedestal base
+    pushStaticGeo(unitBoxGeo, stBrickWhiteMat, cx, cy + 0.35 * scale, cz, 0, 0, 0, 1.9 * scale, 0.7 * scale, 1.9 * scale, true, true);
+    // 4 Red sandstone colonnettes
+    [
+      [-0.65, -0.65],
+      [0.65, -0.65],
+      [-0.65, 0.65],
+      [0.65, 0.65],
+    ].forEach(([ox, oz]) => {
+      pushStaticGeo(
+        trackGeo(new THREE.CylinderGeometry(0.11 * scale, 0.13 * scale, 1.45 * scale, 8)),
+        stChhatriMat,
+        cx + ox * scale,
+        cy + 1.42 * scale,
+        cz + oz * scale,
+        0,
+        0,
+        0,
+        1,
+        1,
+        1,
+        true,
+        true,
+      );
+    });
+    // Flared Chhajja eave ring
+    pushStaticGeo(
+      trackGeo(new THREE.CylinderGeometry(1.05 * scale, 1.55 * scale, 0.32 * scale, 8)),
+      stChhatriMat,
+      cx,
+      cy + 2.25 * scale,
+      cz,
+      0,
+      Math.PI / 8,
+      0,
+      1,
+      1,
+      1,
+      true,
+      true,
+    );
+    // Ribbed dome + kalash finial
+    pushStaticGeo(
+      trackGeo(new THREE.SphereGeometry(0.92 * scale, 12, 10, 0, Math.PI * 2, 0, Math.PI * 0.68)),
+      stChhatriMat,
+      cx,
+      cy + 2.55 * scale,
+      cz,
+      0,
+      0,
+      0,
+      1,
+      1.15,
+      1,
+      true,
+      true,
+    );
+    pushStaticGeo(
+      trackGeo(new THREE.ConeGeometry(0.16 * scale, 0.65 * scale, 8)),
+      goldMat,
+      cx,
+      cy + 3.85 * scale,
+      cz,
+      0,
+      0,
+      0,
+      1,
+      1,
+      1,
+      false,
+      false,
+    );
+  };
+  buildStationChhatri(-61.0, 6.2, 0, 1.38);    // Grand Center Chhatri
+  buildStationChhatri(-60.4, 6.2, -8.2, 0.88); // North Chhatri
+  buildStationChhatri(-60.4, 6.2, 8.2, 0.88);  // South Chhatri
+
+  // Colonial Red-Brick North & South Station Wings (z = -34..-11.2 & z = +11.2..+34, walkable indoors!)
+  const buildColonialWing = (zMin: number, zMax: number, wingPrefix: string, doorZ: number, doorOpenSign: 1 | -1) => {
+    const zMid = (zMin + zMax) * 0.5;
+    const len = zMax - zMin;
+    // East Red-Brick Facade with white-bordered arched window recesses
+    addBox(worldGroup, 0.5, 5.95, len, -56.25, 3.22, zMid, stBrickRedMat, {
+      collide: true,
+      mantleable: false,
+      blocksZombies: true,
+      id: `${wingPrefix}_east_wall`,
+    });
+    for (let wz = zMin + 3.2; wz <= zMax - 3.0; wz += 4.2) {
+      pushStaticGeo(unitBoxGeo, stBrickWhiteMat, -55.94, 3.1, wz, 0, 0, 0, 0.14, 2.7, 2.25, false, false);
+      pushStaticGeo(unitBoxGeo, tealWindowMat, -55.86, 2.95, wz, 0, 0, 0, 0.08, 2.2, 1.5, false, false);
+    }
+    // White colonial cornice along roofline
+    addBox(worldGroup, 0.9, 0.34, len + 0.4, -56.2, 6.1, zMid, stBrickWhiteMat, { collide: false });
+
+    // West Platform Wall (x = -65.75) leaving a wide open platform exit at z = zMid - 1.4 .. zMid + 1.4
+    addBox(worldGroup, 0.5, 5.95, len * 0.5 - 1.5, -65.75, 3.22, zMin + (len * 0.5 - 1.5) * 0.5, stBrickRedMat, {
+      collide: true,
+      mantleable: false,
+      blocksZombies: true,
+    });
+    addBox(worldGroup, 0.5, 5.95, len * 0.5 - 1.5, -65.75, 3.22, zMax - (len * 0.5 - 1.5) * 0.5, stBrickRedMat, {
+      collide: true,
+      mantleable: false,
+      blocksZombies: true,
+    });
+    addBox(worldGroup, 0.5, 2.6, 3.2, -65.75, 4.9, zMid, stBrickRedMat, {
+      collide: true,
+      mantleable: false,
+      blocksZombies: true,
+    });
+
+    // Outer Wing End Wall (North at -34 or South at +34)
+    const outerZ = zMin < 0 ? zMin : zMax;
+    addBox(worldGroup, 9.8, 5.95, 0.5, -61.0, 3.22, outerZ, stBrickRedMat, {
+      collide: true,
+      mantleable: false,
+      blocksZombies: true,
+    });
+
+    // Interior Partition Wall between Central Concourse & Wing (with Interactive Door!)
+    addBox(worldGroup, 4.2, 5.95, 0.4, -58.4, 3.22, doorZ, stBrickWhiteMat, {
+      collide: true,
+      mantleable: false,
+      blocksZombies: true,
+    });
+    addBox(worldGroup, 3.8, 5.95, 0.4, -63.8, 3.22, doorZ, stBrickWhiteMat, {
+      collide: true,
+      mantleable: false,
+      blocksZombies: true,
+    });
+    addBox(worldGroup, 2.0, 3.2, 0.4, -61.2, 4.6, doorZ, stBrickWhiteMat, {
+      collide: true,
+      mantleable: false,
+      blocksZombies: true,
+    });
+    registerInteractiveDoor({
+      id: `${wingPrefix}_door`,
+      label: wingPrefix === 'st_n_wing' ? 'Executive Lounge Door' : 'Station Waiting Hall Door',
+      x: -61.2,
+      yBase: 0.25,
+      z: doorZ,
+      width: 1.48,
+      height: 2.68,
+      axis: 'x',
+      doubleLeaf: false,
+      openSign: doorOpenSign,
+    });
+
+    // Walkable Wing Roof + Pitched Red Colonial Gable Caps
+    addBox(worldGroup, 10.2, 0.34, len, -61.0, 6.03, zMid, stRoofTileMat, {
+      collide: true,
+      mantleable: true,
+      blocksZombies: true,
+      id: `${wingPrefix}_roof`,
+    });
+    pushStaticGeo(unitBoxGeo, stRoofTileMat, -61.0, 6.9, zMid, 0, 0, 0.32, 5.4, 0.25, len - 0.4, true, true);
+    pushStaticGeo(unitBoxGeo, stRoofTileMat, -61.0, 6.9, zMid, 0, 0, -0.32, 5.4, 0.25, len - 0.4, true, true);
+  };
+  buildColonialWing(-34.0, -11.3, 'st_n_wing', -11.3, -1);
+  buildColonialWing(11.3, 34.0, 'st_s_wing', 11.3, 1);
+
+  // Heritage Red Colonial Turret Clock Tower at South Wing Corner (x = -60.5, z = +31.0, image_b58851a5.png)
+  addBox(worldGroup, 6.2, 9.6, 5.8, -60.5, 4.8, 31.0, stBrickRedMat, { collide: false });
+  pushStaticGeo(trackGeo(new THREE.ConeGeometry(4.2, 3.2, 4)), stRoofTileMat, -60.5, 11.2, 31.0, 0, Math.PI / 4, 0, 1, 1, 1, true, true);
+  pushStaticGeo(unitBoxGeo, stBrickWhiteMat, -57.3, 8.2, 31.0, 0, 0, 0, 0.14, 1.3, 1.3, false, false);
+
+  // Concourse & Waiting Hall Interiors: Ticket Counter, Benches, Digital LED Clock 17:44, Executive Lounge Sign (image_f9525a35.png)
+  addBox(worldGroup, 1.4, 1.15, 7.5, -58.2, 0.82, -20.5, stPlinthMat, { collide: true, mantleable: true });
+  addBox(worldGroup, 0.22, 1.5, 7.4, -58.2, 2.15, -20.5, darkMetalMat, { collide: true, mantleable: false });
+  // Waiting benches inside South Waiting Room & Central Concourse
+  [
+    [-61.5, 18.0],
+    [-61.5, 24.0],
+    [-58.6, 3.5],
+    [-58.6, -3.5],
+  ].forEach(([bx, bz]) => {
+    addBox(worldGroup, 0.72, 0.48, 2.6, bx, 0.49, bz, stRailSteelMat, { collide: true, mantleable: true });
+    addBox(worldGroup, 0.12, 0.52, 2.6, bx + 0.3, 0.92, bz, stRailSteelMat, { collide: false });
+  });
+  // Hanging Concourse LED Clock "17:44" + Yellow "EXECUTIVE LOUNGE" Board
+  pushStaticGeo(unitBoxGeo, darkMetalMat, -61.0, 4.85, 0, 0, 0, 0, 0.16, 0.8, 0.16, false, false);
+  pushStaticGeo(unitBoxGeo, stClock1744Mat, -61.0, 4.35, 0, 0, 0, 0, 1.95, 0.76, 0.24, false, false);
+  pushStaticGeo(unitBoxGeo, stExecSignMat, -61.0, 4.35, -6.5, 0, 0, 0, 0.18, 1.45, 2.1, false, false);
+  const concourseLight = new THREE.PointLight(0xffe7c2, 3.6, 28, 1.4);
+  concourseLight.castShadow = false;
+  concourseLight.position.set(-61.0, 4.9, 0);
+  worldGroup.add(concourseLight);
+
+  // Ramp steps from Concourse Floor (x = -64.4, y = 0.25) -> Platform 1 (x = -66.5, y = 1.05) across all 3 arch bays
+  for (let i = 0; i < 4; i++) {
+    const sy = THREE.MathUtils.lerp(0.25, 1.05, (i + 1) / 4);
+    const sx = THREE.MathUtils.lerp(-64.4, -66.2, (i + 0.5) / 4);
+    pushStaticGeo(unitBoxGeo, stPlinthMat, sx, sy * 0.5, 0, 0, 0, 0, 0.46, sy, 20.5, true, true);
+    pushStaticGeo(unitBoxGeo, stPlinthMat, sx, sy * 0.5, -22.5, 0, 0, 0, 0.46, sy, 4.0, true, true);
+    pushStaticGeo(unitBoxGeo, stPlinthMat, sx, sy * 0.5, 22.5, 0, 0, 0, 0.46, sy, 4.0, true, true);
+  }
+  [
+    [-10.2, 10.2, 'st_p1_ramp_main'],
+    [-24.5, -20.5, 'st_p1_ramp_n'],
+    [20.5, 24.5, 'st_p1_ramp_s'],
+  ].forEach(([z0, z1, rid]) => {
+    colliders.push({
+      id: rid as string,
+      minX: -66.3,
+      maxX: -64.4,
+      minY: 0.2,
+      maxY: 1.12,
+      minZ: z0 as number,
+      maxZ: z1 as number,
+      mantleable: false,
+      blocksZombies: false,
+      ramp: { axis: 'x', lowCoord: -64.4, highCoord: -66.3, lowY: 0.25, highY: 1.05 },
+    });
+  });
+
+  // 3) PLATFORM 1 (x = -66.0 .. -76.2, z = -46 .. +46, top y = 1.05m) & ISLAND PLATFORM 2 (x = -90.0 .. -100.0, top y = 1.05m)
+  const buildRailwayPlatform = (id: string, pxMin: number, pxMax: number, tactileEdges: Array<number>) => {
+    const pw = pxMax - pxMin;
+    const pMid = (pxMin + pxMax) * 0.5;
+    addBox(worldGroup, pw, 1.05, 92.0, pMid, 0.525, 0, stPlatformDeckMat, {
+      collide: true,
+      mantleable: true,
+      blocksZombies: true,
+      id,
+    });
+    // Yellow tactile coping edge strips
+    tactileEdges.forEach((ex) => {
+      pushStaticGeo(unitBoxGeo, stTactileYellowMat, ex, 1.058, 0, 0, 0, 0, 0.42, 0.018, 91.6, false, true);
+    });
+    // End ramps down to track ballast at z = ±46..±49.5
+    [
+      { z0: -49.5, z1: -46.0, low: -49.5, high: -46.0 },
+      { z0: 46.0, z1: 49.5, low: 49.5, high: 46.0 },
+    ].forEach((er, idx) => {
+      for (let s = 0; s < 5; s++) {
+        const sy = THREE.MathUtils.lerp(0.0, 1.05, (s + 1) / 5);
+        const sz = THREE.MathUtils.lerp(er.low, er.high, (s + 0.5) / 5);
+        pushStaticGeo(unitBoxGeo, stPlatformDeckMat, pMid, sy * 0.5, sz, 0, 0, 0, pw * 0.72, sy, 0.72, true, true);
+      }
+      colliders.push({
+        id: `${id}_end_ramp_${idx}`,
+        minX: pMid - pw * 0.36,
+        maxX: pMid + pw * 0.36,
+        minY: 0,
+        maxY: 1.1,
+        minZ: er.z0,
+        maxZ: er.z1,
+        mantleable: false,
+        blocksZombies: false,
+        ramp: { axis: 'z', lowCoord: er.low, highCoord: er.high, lowY: 0, highY: 1.05 },
+      });
+    });
+  };
+  buildRailwayPlatform('platform_1', -76.2, -66.0, [-75.9]);
+  buildRailwayPlatform('platform_2', -100.0, -90.0, [-90.3, -99.7]);
+
+  // Platform Canopy Sheds + H-Columns + LED Strips + Spinning Ceiling Fans (image_73862bf9.png & image_f9525a35.png)
+  const stPlatformFans: THREE.Group[] = [];
+  const buildPlatformCanopy = (centerX: number, width: number, zMin: number, zMax: number, fanZList: number[]) => {
+    const len = zMax - zMin;
+    const zMid = (zMin + zMax) * 0.5;
+    // Central H-pillar columns & transverse steel trusses every 12m
+    for (let pz = zMin + 4; pz <= zMax - 4; pz += 12) {
+      pushStaticGeo(unitBoxGeo, stPlinthMat, centerX, 1.32, pz, 0, 0, 0, 0.85, 0.55, 0.85, true, true);
+      pushStaticGeo(unitBoxGeo, chromeMat, centerX, 3.45, pz, 0, 0, 0, 0.34, 4.4, 0.34, true, true);
+      pushStaticGeo(unitBoxGeo, darkMetalMat, centerX, 5.42, pz, 0, 0, 0, width - 0.5, 0.16, 0.22, false, false);
+    }
+    // Pitched corrugated steel canopy roof (walkable at y = 5.75m!)
+    addBox(worldGroup, width * 0.52, 0.14, len, centerX - width * 0.25, 5.65, zMid, stCanopySheetMat, {
+      collide: true,
+      mantleable: true,
+      rotZ: 0.08,
+    });
+    addBox(worldGroup, width * 0.52, 0.14, len, centerX + width * 0.25, 5.65, zMid, stCanopySheetMat, {
+      collide: true,
+      mantleable: true,
+      rotZ: -0.08,
+    });
+    // Overhead longitudinal LED lighting strips + Spinning platform ceiling fans
+    for (let lz = zMin + 5; lz <= zMax - 5; lz += 8) {
+      pushStaticGeo(unitBoxGeo, stLedTubeMat, centerX - 1.6, 5.28, lz, 0, 0, 0, 0.14, 0.08, 2.2, false, false);
+      pushStaticGeo(unitBoxGeo, stLedTubeMat, centerX + 1.6, 5.28, lz, 0, 0, 0, 0.14, 0.08, 2.2, false, false);
+    }
+    fanZList.forEach((fz) => {
+      const fGrp = new THREE.Group();
+      fGrp.position.set(centerX, 4.88, fz);
+      worldGroup.add(fGrp);
+      const rod = new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.025, 0.025, 0.65, 6)), darkMetalMat);
+      rod.position.y = 0.32;
+      fGrp.add(rod);
+      const hub = new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.14, 0.14, 0.1, 10)), darkMetalMat);
+      fGrp.add(hub);
+      for (let b = 0; b < 3; b++) {
+        const bl = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.82, 0.02, 0.14)), chromeMat);
+        const ang = (b / 3) * Math.PI * 2;
+        bl.position.set(Math.cos(ang) * 0.45, 0, Math.sin(ang) * 0.45);
+        bl.rotation.y = -ang;
+        fGrp.add(bl);
+      }
+      stPlatformFans.push(fGrp);
+    });
+  };
+  buildPlatformCanopy(-71.0, 9.6, -34, 34, [-22, -10, 14, 26]);
+  buildPlatformCanopy(-95.0, 9.4, -34, 34, [-22, -10, 14, 26]);
+
+  // Platform 1 LED Digital Clock "12:07", Chai Stall, Rolling Luggage Trolley (image_73862bf9.png)
+  pushStaticGeo(unitBoxGeo, stClock1207Mat, -71.0, 4.35, -14.0, 0, Math.PI / 2, 0, 1.8, 0.68, 0.22, false, false);
+  const p1Light = new THREE.PointLight(0xe0f2fe, 2.8, 28, 1.5);
+  p1Light.castShadow = false;
+  p1Light.position.set(-71.0, 4.8, -14.0);
+  worldGroup.add(p1Light);
+  const p2Light = new THREE.PointLight(0xe0f2fe, 2.5, 28, 1.5);
+  p2Light.castShadow = false;
+  p2Light.position.set(-95.0, 4.8, -12.0);
+  worldGroup.add(p2Light);
+
+  // Refreshment Chai/Book Stall & Blue Rolling Trolley on Platform 1
+  addBox(worldGroup, 2.2, 2.4, 3.8, -68.2, 2.25, -24.5, stFobBlueMat, { collide: true, mantleable: true });
+  addBox(worldGroup, 2.4, 0.18, 4.0, -68.2, 3.5, -24.5, stFobYellowMat, { collide: false });
+  addBox(worldGroup, 0.9, 0.72, 1.4, -72.8, 1.41, -18.5, stFobBlueMat, { collide: true, mantleable: true });
+  addBox(worldGroup, 0.8, 0.25, 1.2, -72.8, 1.9, -18.5, woodMat, { collide: false });
+
+  // ICONIC YELLOW PLATFORM SIGNBOARDS:
+  // A) "आगरा छावनी / AGRA CANTT / M.S.L. 167.30 M." on Platform 1 North End (image_b7206d60.png)
+  pushStaticGeo(unitBoxGeo, stFobYellowMat, -71.0, 2.95, -41.3, 0, 0, 0, 0.14, 3.8, 0.14, true, true);
+  pushStaticGeo(unitBoxGeo, stFobYellowMat, -71.0, 2.95, -37.7, 0, 0, 0, 0.14, 3.8, 0.14, true, true);
+  addBox(worldGroup, 0.16, 1.85, 3.7, -71.0, 3.9, -39.5, stBoardCanttMat, {
+    collide: true,
+    mantleable: false,
+    blocksZombies: true,
+  });
+
+  // B) "आगरा शहर / AGRA CITY" on Platform 2 Concrete Plinths (image_9dc66cab.png)
+  [-41.0, -38.0].forEach((bz) => {
+    pushStaticGeo(unitBoxGeo, stBrickWhiteMat, -95.0, 1.32, bz, 0, 0, 0, 0.55, 0.55, 0.55, true, true);
+    pushStaticGeo(unitBoxGeo, stFobYellowMat, -95.0, 2.55, bz, 0, 0, 0, 0.12, 2.2, 0.12, true, true);
+  });
+  addBox(worldGroup, 0.14, 1.55, 3.1, -95.0, 3.15, -39.5, stBoardCityMat, {
+    collide: true,
+    mantleable: false,
+    blocksZombies: true,
+  });
+
+  // 4) WALKABLE STEEL FOOT-OVERBRIDGE (FOB) WITH BLUE & YELLOW STRIPED STAIRCASES (z = -5.6..-1.6, x = -69.5..-96.5, deck y = 6.8m)
+  const buildFobStaircase = (sx: number, idPrefix: string) => {
+    const lowZ = 7.6;
+    const highZ = -1.6;
+    const lowY = 1.05;
+    const highY = 6.80;
+    const steps = 16;
+    for (let i = 0; i < steps; i++) {
+      const t = (i + 1) / steps;
+      const stepY = THREE.MathUtils.lerp(lowY, highY, t);
+      const stepZ = THREE.MathUtils.lerp(lowZ, highZ, (i + 0.5) / steps);
+      const stepMat = i % 2 === 0 ? stFobBlueMat : stFobYellowMat;
+      pushStaticGeo(unitBoxGeo, stepMat, sx, stepY - 0.14, stepZ, 0, 0, 0, 2.4, 0.28, 0.6, true, true);
+    }
+    // Handrails flanking staircase
+    [-1.24, 1.24].forEach((ox) => {
+      pushStaticGeo(unitBoxGeo, stFobBlueMat, sx + ox, 4.45, 3.0, -0.56, 0, 0, 0.08, 0.1, 10.9, false, false);
+    });
+    colliders.push({
+      id: idPrefix,
+      minX: sx - 1.2,
+      maxX: sx + 1.2,
+      minY: 1.0,
+      maxY: 6.9,
+      minZ: highZ,
+      maxZ: lowZ,
+      mantleable: false,
+      blocksZombies: false,
+      ramp: { axis: 'z', lowCoord: lowZ, highCoord: highZ, lowY, highY },
+    });
+  };
+  buildFobStaircase(-71.0, 'fob_stair_p1');
+  buildFobStaircase(-95.0, 'fob_stair_p2');
+
+  // FOB Bridge Deck & Truss Overpass spanning Tracks 1 & 2 (x = -69.5..-96.5, z = -5.4..-1.6, deck y = 6.80m)
+  addBox(worldGroup, 27.6, 0.28, 3.8, -83.0, 6.66, -3.5, stPlatformDeckMat, {
+    collide: true,
+    mantleable: true,
+    blocksZombies: true,
+    id: 'fob_overpass_deck',
+  });
+  // Lattice safety parapets & arched corrugated roof over FOB
+  [-5.35, -1.65].forEach((fz) => {
+    addBox(worldGroup, 27.4, 1.15, 0.12, -83.0, 7.38, fz, stFobBlueMat, { collide: true, mantleable: false });
+    for (let tx = -96.0; tx <= -70.0; tx += 2.6) {
+      pushStaticGeo(unitBoxGeo, chromeMat, tx, 8.2, fz, 0, 0, 0, 0.12, 2.8, 0.12, false, false);
+    }
+  });
+  addBox(worldGroup, 28.0, 0.16, 4.3, -83.0, 9.65, -3.5, stCanopySheetMat, {
+    collide: true,
+    mantleable: true,
+  });
+  // Parkour Bridge & Zipline linking bldg_w2 rooftop (x=-27.5, y=5.8, z=3) -> Station Portico Roof (x=-56, y=6.2, z=3) -> Platform 1 Canopy (y=5.7)
+  addZipline('zip_bazaar_to_station', -32.2, 5.8, 3.0, -56.4, 6.2, 3.0);
+  addBox(worldGroup, 2.8, 0.22, 3.2, -66.8, 5.95, 2.0, woodMat, {
+    collide: true,
+    mantleable: true,
+    id: 'bridge_portico_to_p1_canopy',
+  });
+  pushStaticGeo(smudgeGeoZ, parkourSmudgeMat, -66.8, 6.08, 2.0, 0, 0, 0, 1, 1, 2.2, false, false);
+
+  // 5) 3 BALLASTED BROAD-GAUGE TRACKS & 25kV OHE CATENARY SYSTEM
+  const trackXs = [-78.8, -87.2, -102.6];
+  trackXs.forEach((tx) => {
+    // Crushed granite ballast strip
+    pushStaticGeo(unitBoxGeo, stBallastMat, tx, 0.08, 0, 0, 0, 0, 4.2, 0.16, 102.0, false, true);
+    // Sleepers every 1.4m
+    for (let sz = -48; sz <= 48; sz += 1.4) {
+      pushStaticGeo(unitBoxGeo, stSleeperMat, tx, 0.19, sz, 0, 0, 0, 2.55, 0.12, 0.24, false, true);
+    }
+    // Twin steel rails (1.676m broad gauge)
+    [-0.84, 0.84].forEach((rx) => {
+      pushStaticGeo(unitBoxGeo, stRailSteelMat, tx + rx, 0.3, 0, 0, 0, 0, 0.08, 0.14, 102.0, false, true);
+    });
+  });
+
+  // 25kV OHE Masts & Overhead Catenary Wires (along x = -83.0 between Tracks 1 & 2, and x = -105.4 west of Track 3)
+  for (let mz = -40; mz <= 40; mz += 16) {
+    if (Math.abs(mz + 3.5) < 4) continue; // skip mast directly inside FOB deck
+    // Central H-mast serving Track 1 (-78.8) and Track 2 (-87.2)
+    pushStaticGeo(unitBoxGeo, chromeMat, -83.0, 3.3, mz, 0, 0, 0, 0.22, 6.6, 0.22, true, true);
+    pushStaticGeo(unitBoxGeo, chromeMat, -78.8, 5.65, mz, 0, 0, 0, 8.6, 0.09, 0.09, false, false);
+    pushStaticGeo(unitBoxGeo, chromeMat, -87.2, 5.65, mz, 0, 0, 0, 8.6, 0.09, 0.09, false, false);
+    // West mast serving Track 3 (-102.6)
+    pushStaticGeo(unitBoxGeo, chromeMat, -105.4, 3.3, mz, 0, 0, 0, 0.22, 6.6, 0.22, true, true);
+    pushStaticGeo(unitBoxGeo, chromeMat, -104.0, 5.65, mz, 0, 0, 0, 3.0, 0.09, 0.09, false, false);
+  }
+  trackXs.forEach((tx) => {
+    pushStaticGeo(unitBoxGeo, darkMetalMat, tx, 5.35, 0, 0, 0, 0, 0.03, 0.03, 98.0, false, false);
+    pushStaticGeo(unitBoxGeo, darkMetalMat, tx, 6.05, 0, 0, 0, 0, 0.025, 0.025, 98.0, false, false);
+  });
+
+  // 6) 3 DETAILED INDIAN RAILWAYS TRAINS (Locomotives + Walkable Coupled Passenger Coaches)
+  const wheelGeo = trackGeo(new THREE.CylinderGeometry(0.42, 0.42, 0.14, 12));
+  const locoHornGeo = trackGeo(new THREE.CylinderGeometry(0.08, 0.14, 0.35, 8));
+
+  const buildLocomotive = (tx: number, zCenter: number, bodyMat: THREE.Material, stripeMat: THREE.Material, facingNorth: boolean) => {
+    const dir = facingNorth ? -1 : 1;
+    // Heavy underframe chassis & cowcatcher
+    addBox(worldGroup, 2.86, 0.65, 12.6, tx, 0.85, zCenter, stVestibuleMat, {
+      collide: true,
+      mantleable: true,
+      blocksZombies: true,
+    });
+    pushStaticGeo(unitBoxGeo, stLocoSaffronMat, tx, 0.56, zCenter + dir * 6.55, dir * 0.32, 0, 0, 2.75, 0.48, 0.55, true, true);
+    // Two 6-wheel bogies (3 axles per side = 6 wheels visible per side)
+    [-3.6, 3.6].forEach((bz) => {
+      pushStaticGeo(unitBoxGeo, darkMetalMat, tx, 0.52, zCenter + bz, 0, 0, 0, 2.35, 0.28, 3.5, true, true);
+      [-1.1, 0, 1.1].forEach((wz) => {
+        [-0.95, 0.95].forEach((wx) => {
+          pushStaticGeo(wheelGeo, stRailSteelMat, tx + wx, 0.52, zCenter + bz + wz, 0, 0, Math.PI / 2, 1, 1, 1, true, true);
+        });
+      });
+    });
+    // Locomotive main hood body (walkable top at y = 3.88m!)
+    addBox(worldGroup, 2.88, 2.65, 12.2, tx, 2.5, zCenter, bodyMat, {
+      collide: true,
+      mantleable: true,
+      blocksZombies: true,
+    });
+    // Racing stripe + front cab windshields + glowing twin headlight
+    pushStaticGeo(unitBoxGeo, stripeMat, tx, 2.25, zCenter, 0, 0, 0, 2.94, 0.34, 12.24, false, false);
+    [-0.65, 0.65].forEach((wx) => {
+      pushStaticGeo(unitBoxGeo, tealWindowMat, tx + wx, 2.95, zCenter + dir * 6.13, 0, 0, 0, 0.78, 0.68, 0.08, false, false);
+    });
+    pushStaticGeo(unitBoxGeo, stLedTubeMat, tx, 2.15, zCenter + dir * 6.14, 0, 0, 0, 0.56, 0.28, 0.08, false, false);
+    // Roof equipment + twin Diamond Pantograph raised toward 25kV OHE wire
+    pushStaticGeo(unitBoxGeo, stCoachRoofMat, tx, 3.92, zCenter, 0, 0, 0, 2.55, 0.22, 11.4, true, true);
+    pushStaticGeo(locoHornGeo, stRailSteelMat, tx - 0.35, 4.18, zCenter + dir * 4.4, Math.PI / 2, 0, 0, 1, 1, 1, false, false);
+    [-3.2, 3.2].forEach((pz) => {
+      pushStaticGeo(unitBoxGeo, stLocoSaffronMat, tx, 4.42, zCenter + pz, 0.58, 0, 0, 0.08, 1.05, 0.08, false, false);
+      pushStaticGeo(unitBoxGeo, stLocoSaffronMat, tx, 4.86, zCenter + pz, -0.58, 0, 0, 0.08, 1.05, 0.08, false, false);
+      pushStaticGeo(unitBoxGeo, stRailSteelMat, tx, 5.26, zCenter + pz, 0, 0, 0, 1.7, 0.06, 0.18, false, false);
+    });
+  };
+
+  const buildWalkableCoach = (opts: {
+    id: string;
+    tx: number;
+    zCenter: number;
+    length: number;
+    liveryMat: THREE.Material;
+    berthMat: THREE.Material;
+    interactiveDoors?: boolean;
+    medkitInside?: boolean;
+  }) => {
+    const { id, tx, zCenter, length, liveryMat, berthMat, interactiveDoors = false, medkitInside = false } = opts;
+    const halfL = length * 0.5;
+    // Bogies & flanged steel wheels
+    [-halfL + 3.0, halfL - 3.0].forEach((bz) => {
+      pushStaticGeo(unitBoxGeo, darkMetalMat, tx, 0.52, zCenter + bz, 0, 0, 0, 2.3, 0.28, 2.8, true, true);
+      [-0.88, 0.88].forEach((wz) => {
+        [-0.95, 0.95].forEach((wx) => {
+          pushStaticGeo(wheelGeo, stRailSteelMat, tx + wx, 0.52, zCenter + bz + wz, 0, 0, Math.PI / 2, 1, 1, 1, true, true);
+        });
+      });
+    });
+
+    // Underframe & Coach Floor (walkable at y = 1.18m!)
+    addBox(worldGroup, 2.88, 0.52, length, tx, 0.92, zCenter, stVestibuleMat, {
+      collide: true,
+      mantleable: false,
+      blocksZombies: true,
+      id: `${id}_floor`,
+    });
+    pushStaticGeo(unitBoxGeo, stCoachInteriorMat, tx, 1.186, zCenter, 0, 0, 0, 2.55, 0.014, length - 0.2, false, true);
+
+    // Boarding metal steps on East & West doorways (near ends of coach, matching image_2b80f84f.png!)
+    [-halfL + 1.65, halfL - 1.65].forEach((dz) => {
+      [-1.48, 1.48].forEach((sx) => {
+        pushStaticGeo(unitBoxGeo, darkMetalMat, tx + sx, 0.98, zCenter + dz, 0, 0, 0, 0.28, 0.08, 1.15, true, true);
+        pushStaticGeo(unitBoxGeo, darkMetalMat, tx + sx * 0.98, 0.72, zCenter + dz, 0, 0, 0, 0.24, 0.08, 1.15, true, true);
+      });
+    });
+
+    // Side Walls with open 1.3m Vestibule Doorways near North & South ends (walk straight in from Platform!)
+    const midWallLen = length - 5.2;
+    [-1.38, 1.38].forEach((wx, sideIdx) => {
+      // Main passenger cabin sidewall (center)
+      addBox(worldGroup, 0.14, 2.48, midWallLen, tx + wx, 2.42, zCenter, liveryMat, {
+        collide: true,
+        mantleable: false,
+        blocksZombies: true,
+      });
+      // End vestibule corner pillars
+      addBox(worldGroup, 0.14, 2.48, 0.95, tx + wx, 2.42, zCenter - halfL + 0.48, liveryMat, {
+        collide: true,
+        mantleable: false,
+        blocksZombies: true,
+      });
+      addBox(worldGroup, 0.14, 2.48, 0.95, tx + wx, 2.42, zCenter + halfL - 0.48, liveryMat, {
+        collide: true,
+        mantleable: false,
+        blocksZombies: true,
+      });
+      // Door lintels above the 1.6m doorway gaps
+      addBox(worldGroup, 0.14, 0.36, 1.7, tx + wx, 3.48, zCenter - halfL + 1.75, liveryMat, { collide: false });
+      addBox(worldGroup, 0.14, 0.36, 1.7, tx + wx, 3.48, zCenter + halfL - 1.75, liveryMat, { collide: false });
+
+      if (interactiveDoors && sideIdx === 1) {
+        registerInteractiveDoor({
+          id: `${id}_door_n`,
+          label: `Coach ${id.toUpperCase()} Door`,
+          x: tx + wx,
+          yBase: 1.18,
+          z: zCenter - halfL + 1.75,
+          width: 1.28,
+          height: 2.12,
+          axis: 'z',
+          doubleLeaf: false,
+          openSign: 1,
+        });
+      }
+    });
+
+    // End Bulkheads with open central vestibule corridor (width 1.1m so you can walk coach-to-coach!)
+    [-halfL + 0.08, halfL - 0.08].forEach((ez) => {
+      addBox(worldGroup, 0.9, 2.48, 0.14, tx - 0.96, 2.42, zCenter + ez, liveryMat, {
+        collide: true,
+        mantleable: false,
+        blocksZombies: true,
+      });
+      addBox(worldGroup, 0.9, 2.48, 0.14, tx + 0.96, 2.42, zCenter + ez, liveryMat, {
+        collide: true,
+        mantleable: false,
+        blocksZombies: true,
+      });
+      addBox(worldGroup, 1.1, 0.42, 0.14, tx, 3.45, zCenter + ez, liveryMat, { collide: false });
+    });
+
+    // Interior Sleeper Berths & Seats flanking 0.95m Central Walkable Aisle
+    for (let bz = zCenter - halfL + 3.2; bz <= zCenter + halfL - 3.2; bz += 2.2) {
+      [-0.86, 0.86].forEach((bx) => {
+        // Lower cushioned berth
+        addBox(worldGroup, 0.78, 0.42, 0.95, tx + bx, 1.4, bz, berthMat, { collide: true, mantleable: true });
+        // Upper folding berth
+        pushStaticGeo(unitBoxGeo, berthMat, tx + bx, 2.52, bz, 0, 0, 0, 0.72, 0.12, 0.92, false, true);
+      });
+    }
+
+    // Climbable Curved Coach Roof (y = 3.74..3.94m) + Roof Ventilator Cowls + Parkour Smudge
+    addBox(worldGroup, 2.94, 0.22, length + 0.1, tx, 3.78, zCenter, stCoachRoofMat, {
+      collide: true,
+      mantleable: true,
+      blocksZombies: true,
+      id: `${id}_roof`,
+    });
+    for (let vz = zCenter - halfL + 2.4; vz <= zCenter + halfL - 2.4; vz += 3.6) {
+      pushStaticGeo(unitBoxGeo, chromeMat, tx, 3.96, vz, 0, 0, 0, 0.56, 0.14, 0.62, false, true);
+    }
+    pushStaticGeo(smudgeGeoZ, parkourSmudgeMat, tx + 1.35, 3.905, zCenter, 0, 0, 0, 1, 1, 2.4, false, false);
+
+    if (medkitInside) {
+      addInteractiveMedkit(tx + 0.85, 1.72, zCenter + 1.1);
+    }
+  };
+
+  const addGangwayVestibule = (tx: number, zCenter: number) => {
+    // Hollow accordion rubber tunnel connecting adjacent coaches (floor walkable at y = 1.18m)
+    addBox(worldGroup, 1.25, 0.46, 1.1, tx, 0.95, zCenter, stVestibuleMat, { collide: true, mantleable: false });
+    pushStaticGeo(unitBoxGeo, stVestibuleMat, tx - 0.62, 2.38, zCenter, 0, 0, 0, 0.12, 2.38, 1.05, true, true);
+    pushStaticGeo(unitBoxGeo, stVestibuleMat, tx + 0.62, 2.38, zCenter, 0, 0, 0, 0.12, 2.38, 1.05, true, true);
+    pushStaticGeo(unitBoxGeo, stVestibuleMat, tx, 3.55, zCenter, 0, 0, 0, 1.32, 0.14, 1.05, false, false);
+  };
+
+  // TRAIN A (Track 1, x = -78.8, right along Platform 1!): Electric Loco + Blue ICF Coaches S5, S6, S7
+  buildLocomotive(-78.8, -32.0, stIcfBlueMat, stLocoSaffronMat, true);
+  buildWalkableCoach({ id: 's5', tx: -78.8, zCenter: -17.0, length: 15.6, liveryMat: stIcfBlueMat, berthMat: stBerthBlueMat });
+  addGangwayVestibule(-78.8, -8.7);
+  buildWalkableCoach({ id: 's6', tx: -78.8, zCenter: -0.4, length: 15.6, liveryMat: stIcfBlueMat, berthMat: stBerthBlueMat, interactiveDoors: true });
+  addGangwayVestibule(-78.8, 7.9);
+  buildWalkableCoach({ id: 's7', tx: -78.8, zCenter: 16.2, length: 15.6, liveryMat: stIcfBlueMat, berthMat: stBerthBlueMat, interactiveDoors: true, medkitInside: true });
+  const trainInteriorLight = new THREE.PointLight(0xfff3d6, 2.4, 24, 1.5);
+  trainInteriorLight.castShadow = false;
+  trainInteriorLight.position.set(-78.8, 3.35, 16.2);
+  worldGroup.add(trainInteriorLight);
+
+  // TRAIN B (Track 2, x = -87.2, alongside Island Platform 2!): Cream & Maroon Express (image_73862bf9.png)
+  buildLocomotive(-87.2, 31.5, stCreamExpressMat, stTrimRedMat, false);
+  buildWalkableCoach({ id: 'b1', tx: -87.2, zCenter: 16.5, length: 15.4, liveryMat: stCreamExpressMat, berthMat: stBerthMaroonMat });
+  addGangwayVestibule(-87.2, 8.3);
+  buildWalkableCoach({ id: 'b2', tx: -87.2, zCenter: 0.1, length: 15.4, liveryMat: stCreamExpressMat, berthMat: stBerthMaroonMat });
+  addGangwayVestibule(-87.2, -8.1);
+  buildWalkableCoach({ id: 'b3', tx: -87.2, zCenter: -16.3, length: 15.4, liveryMat: stCreamExpressMat, berthMat: stBerthMaroonMat });
+
+  // TRAIN C (Track 3, x = -102.6, west side of Platform 2!): Green & Yellow Garib Rath / Commuter (image_9dc66cab.png)
+  buildLocomotive(-102.6, -31.0, stGaribGreenMat, stFobYellowMat, true);
+  buildWalkableCoach({ id: 'g1', tx: -102.6, zCenter: -16.0, length: 15.4, liveryMat: stGaribGreenMat, berthMat: stBerthBlueMat });
+  addGangwayVestibule(-102.6, -7.8);
+  buildWalkableCoach({ id: 'g2', tx: -102.6, zCenter: 0.4, length: 15.4, liveryMat: stGaribGreenMat, berthMat: stBerthBlueMat });
+  addGangwayVestibule(-102.6, 8.6);
+  buildWalkableCoach({ id: 'g3', tx: -102.6, zCenter: 16.8, length: 15.4, liveryMat: stGaribGreenMat, berthMat: stBerthBlueMat });
 
   // Merge all static batches into ~25 draw calls!
   flushStaticBatches();
@@ -3303,7 +5018,175 @@ export function buildAgraWorld(
     });
   });
 
+  // =========================================================================
+  // 9. ATMOSPHERIC DUST/ASH MOTES, EMERGENCY BARREL FLARES & EXTRACTION BEACON
+  // =========================================================================
+  const dustCount = isSoftwareGl ? 140 : 280;
+  const dustPositions = new Float32Array(dustCount * 3);
+  const dustPhase = new Float32Array(dustCount);
+  for (let i = 0; i < dustCount; i++) {
+    dustPositions[i * 3] = (((i * 73) % 1000) / 1000 - 0.5) * 96;
+    dustPositions[i * 3 + 1] = 0.5 + (((i * 41) % 1000) / 1000) * 14.5;
+    dustPositions[i * 3 + 2] = (((i * 97) % 1000) / 1000 - 0.5) * 125 - 10;
+    dustPhase[i] = (i * 0.37) % (Math.PI * 2);
+  }
+  const dustGeo = trackGeo(new THREE.BufferGeometry());
+  dustGeo.setAttribute('position', new THREE.BufferAttribute(dustPositions, 3));
+  const dustMat = trackMat(
+    new THREE.PointsMaterial({
+      map: textures.dustMote,
+      color: 0xffd7a8,
+      size: 0.24,
+      transparent: true,
+      opacity: 0.44,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    }),
+  );
+  const dustPoints = new THREE.Points(dustGeo, dustMat);
+  dustPoints.frustumCulled = false;
+  worldGroup.add(dustPoints);
+
+  // Warm flickering burn barrels / emergency flares around key parkour chokepoints
+  interface FlickerLightEntry {
+    light: THREE.PointLight;
+    flame: THREE.Mesh;
+    baseIntensity: number;
+    phase: number;
+  }
+  const flickerLights: FlickerLightEntry[] = [];
+  const barrelGeo = trackGeo(new THREE.CylinderGeometry(0.36, 0.34, 0.92, 10));
+  const barrelEmberMat = trackMat(
+    new THREE.MeshBasicMaterial({ color: 0xff6b1a }),
+  );
+  const barrelFlameGeo = trackGeo(new THREE.ConeGeometry(0.24, 0.58, 7));
+  const barrelSpecs: Array<{ x: number; y: number; z: number; phase: number }> = [
+    { x: -17.5, y: 0, z: 25.0, phase: 0.4 },
+    { x: 17.5, y: 0, z: 10.5, phase: 1.9 },
+    { x: -27.5, y: 4.0, z: 22.0, phase: 3.1 },
+    { x: 27.5, y: 4.3, z: -18.0, phase: 4.7 },
+  ];
+  barrelSpecs.forEach((b) => {
+    const drum = new THREE.Mesh(barrelGeo, rustMat);
+    drum.position.set(b.x, b.y + 0.46, b.z);
+    drum.castShadow = !isSoftwareGl;
+    drum.receiveShadow = true;
+    worldGroup.add(drum);
+
+    const flame = new THREE.Mesh(barrelFlameGeo, barrelEmberMat);
+    flame.position.set(b.x, b.y + 1.05, b.z);
+    worldGroup.add(flame);
+
+    const pLight = new THREE.PointLight(0xff7828, 3.6, 17, 1.7);
+    pLight.castShadow = false;
+    pLight.position.set(b.x, b.y + 1.35, b.z);
+    worldGroup.add(pLight);
+
+    flickerLights.push({ light: pLight, flame, baseIntensity: 3.6, phase: b.phase });
+  });
+
+  // Extraction Flare Beacon at Taj Safe-House Plinth Approach (unlocked at 15 kills)
+  const extractionPoint = new THREE.Vector3(0, 1.5, -49.2);
+  const extractionGroup = new THREE.Group();
+  extractionGroup.position.set(extractionPoint.x, 0.04, extractionPoint.z);
+  worldGroup.add(extractionGroup);
+
+  const flareCanister = new THREE.Mesh(
+    trackGeo(new THREE.CylinderGeometry(0.14, 0.16, 0.52, 10)),
+    darkMetalMat,
+  );
+  flareCanister.position.y = 0.26;
+  extractionGroup.add(flareCanister);
+
+  const extractionBeamMat = trackMat(
+    new THREE.MeshBasicMaterial({
+      color: 0x10b981,
+      transparent: true,
+      opacity: 0.0,
+      blending: THREE.AdditiveBlending,
+      side: THREE.DoubleSide,
+      depthWrite: false,
+    }),
+  );
+  const extractionBeam = new THREE.Mesh(
+    trackGeo(new THREE.CylinderGeometry(0.22, 0.68, 28, 12, 1, true)),
+    extractionBeamMat,
+  );
+  extractionBeam.position.y = 14.0;
+  extractionBeam.visible = false;
+  extractionGroup.add(extractionBeam);
+
+  const extractionRingMat = trackMat(
+    new THREE.MeshBasicMaterial({
+      color: 0x34d399,
+      transparent: true,
+      opacity: 0.0,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    }),
+  );
+  const extractionRing = new THREE.Mesh(
+    trackGeo(new THREE.RingGeometry(1.15, 1.5, 24)),
+    extractionRingMat,
+  );
+  extractionRing.rotation.x = -Math.PI / 2;
+  extractionRing.position.y = 0.05;
+  extractionRing.visible = false;
+  extractionGroup.add(extractionRing);
+
+  const extractionLight = new THREE.PointLight(0x10b981, 0, 22, 1.5);
+  extractionLight.position.set(0, 1.4, 0);
+  extractionGroup.add(extractionLight);
+
+  let extractionActive = false;
+  const setExtractionActive = (active: boolean): void => {
+    extractionActive = active;
+    extractionBeam.visible = active;
+    extractionRing.visible = active;
+    if (!active) {
+      extractionBeamMat.opacity = 0;
+      extractionRingMat.opacity = 0;
+      extractionLight.intensity = 0;
+    }
+  };
+
+  let lastPropsElapsed = 0;
   const updateWorldProps = (elapsed: number): void => {
+    const dt = Math.max(0.001, Math.min(0.05, elapsed - lastPropsElapsed));
+    lastPropsElapsed = elapsed;
+
+    // Spin Haveli ceiling fan & Railway platform fans smoothly
+    haveliFanGroup.rotation.y = elapsed * 2.5;
+    for (let i = 0; i < stPlatformFans.length; i++) {
+      stPlatformFans[i].rotation.y = elapsed * 3.1 + i * 0.8;
+    }
+
+    // Smoothly swing interactive Haveli & Railway Station doors
+    for (let i = 0; i < interactiveDoors.length; i++) {
+      const door = interactiveDoors[i];
+      const target = door.open ? 1 : 0;
+      if (Math.abs(door.currentProgress - target) > 0.001) {
+        door.currentProgress = THREE.MathUtils.lerp(
+          door.currentProgress,
+          target,
+          1 - Math.exp(-10 * dt),
+        );
+        for (let p = 0; p < door.pivots.length; p++) {
+          const pv = door.pivots[p];
+          pv.group.rotation.y = THREE.MathUtils.lerp(pv.closedY, pv.openY, door.currentProgress);
+        }
+      }
+    }
+
+    for (let i = 0; i < worldMedkits.length; i++) {
+      const mk = worldMedkits[i];
+      if (!mk.used) {
+        mk.group.position.y = mk.pos.y + Math.sin(elapsed * 2.8 + i) * 0.03;
+        mk.group.rotation.y = elapsed * 1.1 + i * 1.2;
+      }
+    }
+
     for (let i = 0; i < flutteringPennants.length; i++) {
       const p = flutteringPennants[i];
       p.mesh.rotation.x = Math.sin(elapsed * 3.8 + p.phase) * 0.24 + 0.14;
@@ -3311,6 +5194,110 @@ export function buildAgraWorld(
     }
     cratePillarMat.opacity = 0.13 + Math.sin(elapsed * 2.4) * 0.04;
     uvBarrierMat.opacity = 0.12 + Math.sin(elapsed * 3.1) * 0.035;
+
+    // Drift floating atmospheric dust/ash motes gently
+    const posAttr = dustGeo.getAttribute('position') as THREE.BufferAttribute;
+    for (let i = 0; i < dustCount; i++) {
+      const ph = dustPhase[i];
+      let py = posAttr.getY(i) + 0.0045;
+      if (py > 15.5) py = 0.4;
+      const px = posAttr.getX(i) + Math.sin(elapsed * 0.55 + ph) * 0.006;
+      const pz = posAttr.getZ(i) + Math.cos(elapsed * 0.48 + ph) * 0.006;
+      posAttr.setXYZ(i, px, py, pz);
+    }
+    posAttr.needsUpdate = true;
+
+    // Flicker emergency burn barrels
+    for (let i = 0; i < flickerLights.length; i++) {
+      const fl = flickerLights[i];
+      const wave =
+        Math.sin(elapsed * 11.3 + fl.phase) * 0.45 +
+        Math.sin(elapsed * 19.7 + fl.phase * 1.7) * 0.28;
+      fl.light.intensity = Math.max(1.8, fl.baseIntensity + wave);
+      const s = 0.88 + Math.max(0, wave) * 0.35;
+      fl.flame.scale.set(1, s, 1);
+    }
+
+    if (extractionActive) {
+      const pulse = 0.5 + 0.5 * Math.sin(elapsed * 4.8);
+      extractionBeamMat.opacity = 0.24 + pulse * 0.14;
+      extractionRingMat.opacity = 0.45 + pulse * 0.35;
+      extractionRing.scale.setScalar(0.95 + pulse * 0.18);
+      extractionLight.intensity = 5.5 + pulse * 3.5;
+    }
+  };
+
+  const findNearestDoor = (playerPos: THREE.Vector3): InteractiveDoorObj | null => {
+    let best: InteractiveDoorObj | null = null;
+    let bestDist = 3.0;
+    for (let i = 0; i < interactiveDoors.length; i++) {
+      const d = interactiveDoors[i];
+      const horiz = Math.hypot(playerPos.x - d.centerPos.x, playerPos.z - d.centerPos.z);
+      const vert = Math.abs(playerPos.y + 0.9 - d.centerPos.y);
+      if (horiz < bestDist && vert < 2.2) {
+        bestDist = horiz;
+        best = d;
+      }
+    }
+    return best;
+  };
+
+  const getNearbyDoorPrompt = (playerPos: THREE.Vector3): string => {
+    const d = findNearestDoor(playerPos);
+    if (!d) return '';
+    return d.open ? `[E] Close ${d.label}` : `[E] Open ${d.label}`;
+  };
+
+  const toggleNearestDoor = (playerPos: THREE.Vector3): { label: string; open: boolean } | null => {
+    const d = findNearestDoor(playerPos);
+    if (!d) return null;
+    d.open = !d.open;
+    d.collider.disabled = d.open;
+    return { label: d.label, open: d.open };
+  };
+
+  const isNearHaveliMedkit = (playerPos: THREE.Vector3): boolean => {
+    for (let i = 0; i < worldMedkits.length; i++) {
+      const mk = worldMedkits[i];
+      if (mk.used) continue;
+      const horiz = Math.hypot(playerPos.x - mk.pos.x, playerPos.z - mk.pos.z);
+      const vert = Math.abs(playerPos.y + 0.8 - mk.pos.y);
+      if (horiz < 2.6 && vert < 2.0) return true;
+    }
+    return false;
+  };
+
+  const tryUseHaveliMedkit = (playerPos: THREE.Vector3): boolean => {
+    for (let i = 0; i < worldMedkits.length; i++) {
+      const mk = worldMedkits[i];
+      if (mk.used) continue;
+      const horiz = Math.hypot(playerPos.x - mk.pos.x, playerPos.z - mk.pos.z);
+      const vert = Math.abs(playerPos.y + 0.8 - mk.pos.y);
+      if (horiz < 2.6 && vert < 2.0) {
+        mk.used = true;
+        mk.group.visible = false;
+        return true;
+      }
+    }
+    return false;
+  };
+
+  const resetInteractiveWorld = (): void => {
+    for (let i = 0; i < interactiveDoors.length; i++) {
+      const d = interactiveDoors[i];
+      d.open = false;
+      d.currentProgress = 0;
+      d.collider.disabled = false;
+      for (let p = 0; p < d.pivots.length; p++) {
+        d.pivots[p].group.rotation.y = d.pivots[p].closedY;
+      }
+    }
+    for (let i = 0; i < worldMedkits.length; i++) {
+      const mk = worldMedkits[i];
+      mk.used = false;
+      mk.group.visible = true;
+      mk.group.position.copy(mk.pos);
+    }
   };
 
   return {
@@ -3324,6 +5311,7 @@ export function buildAgraWorld(
     uvGlowMeshes,
     stringBulbMats,
     tajGateCenter: new THREE.Vector3(0, 1.5, -51.6),
+    extractionPoint,
     guardTowerCenter: new THREE.Vector3(wtX, 0, wtZ),
     tajSafeZone: {
       minX: -10,
@@ -3333,8 +5321,14 @@ export function buildAgraWorld(
     },
     spawnPos: new THREE.Vector3(-28.0, 4.2, 42.8),
     spawnYaw: -0.2305, // Points NNE directly across the launch ramp toward the Taj Mahal
+    setExtractionActive,
     updateGuard,
     updateWorldProps,
+    getNearbyDoorPrompt,
+    toggleNearestDoor,
+    isNearHaveliMedkit,
+    tryUseHaveliMedkit,
+    resetInteractiveWorld,
     dispose: () => {
       scene.remove(worldGroup);
       disposables.forEach((d) => d.dispose());

@@ -34,6 +34,33 @@ export interface ProceduralTextureSet {
   parkourPaintSmudge: THREE.CanvasTexture;
   parkourChevronGuide: THREE.CanvasTexture;
   bazaarBunting: THREE.CanvasTexture;
+  courtyardAsphalt: THREE.CanvasTexture;
+  courtyardAsphaltBump: THREE.CanvasTexture;
+  courtyardAsphaltRoughness: THREE.CanvasTexture;
+  stoneBump: THREE.CanvasTexture;
+  stoneRoughness: THREE.CanvasTexture;
+  batWoodBump: THREE.CanvasTexture;
+  batWoodRoughness: THREE.CanvasTexture;
+  clothWrapBump: THREE.CanvasTexture;
+  clothWrapRoughness: THREE.CanvasTexture;
+  dustMote: THREE.CanvasTexture;
+  bloodSpatter: THREE.CanvasTexture;
+  polishedCreamTile: THREE.CanvasTexture;
+  haveliDoorWood: THREE.CanvasTexture;
+  blueMullionWindow: THREE.CanvasTexture;
+  railwayBoardCantt: THREE.CanvasTexture;
+  railwayBoardCity: THREE.CanvasTexture;
+  railwayFacadeNcr: THREE.CanvasTexture;
+  railwayDropDrive: THREE.CanvasTexture;
+  railwayClock1207: THREE.CanvasTexture;
+  railwayClock1744: THREE.CanvasTexture;
+  railwayExecSign: THREE.CanvasTexture;
+  railwayBrickRed: THREE.CanvasTexture;
+  railwayWhiteBrick: THREE.CanvasTexture;
+  railwayBallast: THREE.CanvasTexture;
+  railwayIcfBlue: THREE.CanvasTexture;
+  railwayCreamExpress: THREE.CanvasTexture;
+  railwayGaribGreen: THREE.CanvasTexture;
   dispose: () => void;
 }
 
@@ -45,6 +72,22 @@ function finalizeTexture(
 ): THREE.CanvasTexture {
   const tex = new THREE.CanvasTexture(canvas);
   tex.colorSpace = THREE.SRGBColorSpace;
+  tex.wrapS = THREE.RepeatWrapping;
+  tex.wrapT = THREE.RepeatWrapping;
+  tex.repeat.set(repeatX, repeatY);
+  tex.anisotropy = Math.min(8, maxAnisotropy);
+  tex.needsUpdate = true;
+  return tex;
+}
+
+function finalizeLinearTexture(
+  canvas: HTMLCanvasElement,
+  repeatX: number,
+  repeatY: number,
+  maxAnisotropy: number,
+): THREE.CanvasTexture {
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.colorSpace = THREE.NoColorSpace;
   tex.wrapS = THREE.RepeatWrapping;
   tex.wrapT = THREE.RepeatWrapping;
   tex.repeat.set(repeatX, repeatY);
@@ -985,6 +1028,705 @@ export function createProceduralTextures(maxAnisotropy: number): ProceduralTextu
   }
   const bazaarBunting = finalizeTexture(bzCanvas, 2, 1, maxAnisotropy);
 
+  // 31. Cracked Damp Asphalt (Albedo + Bump + Roughness for sunset specular sheen)
+  const aspCanvas = document.createElement('canvas');
+  aspCanvas.width = 256;
+  aspCanvas.height = 256;
+  const aspCtx = aspCanvas.getContext('2d')!;
+  const aspBumpCanvas = document.createElement('canvas');
+  aspBumpCanvas.width = 256;
+  aspBumpCanvas.height = 256;
+  const aspBCtx = aspBumpCanvas.getContext('2d')!;
+  const aspRoughCanvas = document.createElement('canvas');
+  aspRoughCanvas.width = 256;
+  aspRoughCanvas.height = 256;
+  const aspRCtx = aspRoughCanvas.getContext('2d')!;
+
+  aspCtx.fillStyle = '#3a3836';
+  aspCtx.fillRect(0, 0, 256, 256);
+  aspBCtx.fillStyle = '#808080';
+  aspBCtx.fillRect(0, 0, 256, 256);
+  aspRCtx.fillStyle = '#dcdcdc';
+  aspRCtx.fillRect(0, 0, 256, 256);
+
+  // Aggregate mineral grit
+  for (let i = 0; i < 1600; i++) {
+    const gx = (i * 53 + (i % 7) * 19) % 256;
+    const gy = (i * 97 + (i % 11) * 13) % 256;
+    const v = (i % 5) * 9 - 18;
+    aspCtx.fillStyle = `rgb(${58 + v},${56 + v},${54 + v})`;
+    aspCtx.fillRect(gx, gy, 2, 2);
+    const bv = 128 + v * 2;
+    aspBCtx.fillStyle = `rgb(${bv},${bv},${bv})`;
+    aspBCtx.fillRect(gx, gy, 2, 2);
+  }
+  // Damp puddle patches catching warm golden-hour reflection (darker roughness = glossy)
+  for (let p = 0; p < 5; p++) {
+    const px = 42 + ((p * 67) % 175);
+    const py = 36 + ((p * 89) % 184);
+    const pr = 26 + (p % 3) * 14;
+    const rGrad = aspRCtx.createRadialGradient(px, py, 4, px, py, pr);
+    rGrad.addColorStop(0, 'rgba(38, 38, 38, 0.92)');
+    rGrad.addColorStop(0.65, 'rgba(85, 85, 85, 0.65)');
+    rGrad.addColorStop(1, 'rgba(220, 220, 220, 0)');
+    aspRCtx.fillStyle = rGrad;
+    aspRCtx.beginPath();
+    aspRCtx.arc(px, py, pr, 0, Math.PI * 2);
+    aspRCtx.fill();
+
+    aspCtx.fillStyle = 'rgba(22, 23, 26, 0.28)';
+    aspCtx.beginPath();
+    aspCtx.arc(px, py, pr * 0.88, 0, Math.PI * 2);
+    aspCtx.fill();
+  }
+  // Deep asphalt stress cracks
+  for (let c = 0; c < 11; c++) {
+    let cx = (c * 43) % 256;
+    let cy = (c * 71) % 256;
+    aspCtx.strokeStyle = 'rgba(16, 15, 14, 0.72)';
+    aspCtx.lineWidth = 1.6;
+    aspBCtx.strokeStyle = '#1a1a1a';
+    aspBCtx.lineWidth = 2.0;
+    aspCtx.beginPath();
+    aspBCtx.beginPath();
+    aspCtx.moveTo(cx, cy);
+    aspBCtx.moveTo(cx, cy);
+    for (let s = 0; s < 6; s++) {
+      cx += Math.sin(c * 2.1 + s * 1.9) * 22;
+      cy += Math.cos(c * 1.7 + s * 2.3) * 18;
+      aspCtx.lineTo(cx, cy);
+      aspBCtx.lineTo(cx, cy);
+    }
+    aspCtx.stroke();
+    aspBCtx.stroke();
+  }
+  const courtyardAsphalt = finalizeTexture(aspCanvas, 16, 16, maxAnisotropy);
+  const courtyardAsphaltBump = finalizeLinearTexture(aspBumpCanvas, 16, 16, maxAnisotropy);
+  const courtyardAsphaltRoughness = finalizeLinearTexture(aspRoughCanvas, 16, 16, maxAnisotropy);
+
+  // 32. Weathered Stone / Brick Bump & Roughness
+  const stBumpCanvas = document.createElement('canvas');
+  stBumpCanvas.width = 256;
+  stBumpCanvas.height = 256;
+  const stBCtx = stBumpCanvas.getContext('2d')!;
+  const stRoughCanvas = document.createElement('canvas');
+  stRoughCanvas.width = 256;
+  stRoughCanvas.height = 256;
+  const stRCtx = stRoughCanvas.getContext('2d')!;
+  stBCtx.fillStyle = '#909090';
+  stBCtx.fillRect(0, 0, 256, 256);
+  stRCtx.fillStyle = '#d4d4d4';
+  stRCtx.fillRect(0, 0, 256, 256);
+  for (let i = 0; i < 650; i++) {
+    const sx = (i * 73) % 256;
+    const sy = (i * 41) % 256;
+    const shade = 110 + (i % 7) * 14;
+    stBCtx.fillStyle = `rgb(${shade},${shade},${shade})`;
+    stBCtx.fillRect(sx, sy, 6, 4);
+    const rShade = 175 + (i % 6) * 12;
+    stRCtx.fillStyle = `rgb(${rShade},${rShade},${rShade})`;
+    stRCtx.fillRect(sx, sy, 7, 5);
+  }
+  stBCtx.strokeStyle = '#303030';
+  stBCtx.lineWidth = 2.5;
+  for (let y = 0; y < 256; y += 32) {
+    stBCtx.beginPath();
+    stBCtx.moveTo(0, y);
+    stBCtx.lineTo(256, y);
+    stBCtx.stroke();
+    const offset = (y / 32) % 2 === 0 ? 0 : 32;
+    for (let x = offset; x < 256; x += 64) {
+      stBCtx.beginPath();
+      stBCtx.moveTo(x, y);
+      stBCtx.lineTo(x, y + 32);
+      stBCtx.stroke();
+    }
+  }
+  const stoneBump = finalizeLinearTexture(stBumpCanvas, 4, 4, maxAnisotropy);
+  const stoneRoughness = finalizeLinearTexture(stRoughCanvas, 4, 4, maxAnisotropy);
+
+  // 33. Hardwood Baseball Bat Grain Bump & Roughness
+  const bwBumpCanvas = document.createElement('canvas');
+  bwBumpCanvas.width = 256;
+  bwBumpCanvas.height = 256;
+  const bwBCtx = bwBumpCanvas.getContext('2d')!;
+  const bwRoughCanvas = document.createElement('canvas');
+  bwRoughCanvas.width = 256;
+  bwRoughCanvas.height = 256;
+  const bwRCtx = bwRoughCanvas.getContext('2d')!;
+  bwBCtx.fillStyle = '#848484';
+  bwBCtx.fillRect(0, 0, 256, 256);
+  bwRCtx.fillStyle = '#9a9a9a';
+  bwRCtx.fillRect(0, 0, 256, 256);
+  for (let x = 0; x < 256; x += 3) {
+    const wave = Math.sin(x * 0.24) * 26;
+    const bVal = Math.max(40, Math.min(220, Math.round(128 + wave)));
+    bwBCtx.fillStyle = `rgb(${bVal},${bVal},${bVal})`;
+    bwBCtx.fillRect(x, 0, 2, 256);
+    const rVal = Math.max(95, Math.min(225, Math.round(150 - wave * 0.6)));
+    bwRCtx.fillStyle = `rgb(${rVal},${rVal},${rVal})`;
+    bwRCtx.fillRect(x, 0, 2, 256);
+  }
+  // Scratches & battle gouges across bat barrel
+  bwBCtx.strokeStyle = '#383838';
+  bwBCtx.lineWidth = 1.4;
+  bwRCtx.strokeStyle = '#e5e5e5';
+  bwRCtx.lineWidth = 1.6;
+  for (let g = 0; g < 16; g++) {
+    const gx = (g * 37) % 230;
+    const gy = (g * 59) % 220;
+    bwBCtx.beginPath();
+    bwBCtx.moveTo(gx, gy);
+    bwBCtx.lineTo(gx + 18 + (g % 14), gy + 8);
+    bwBCtx.stroke();
+    bwRCtx.beginPath();
+    bwRCtx.moveTo(gx, gy);
+    bwRCtx.lineTo(gx + 18 + (g % 14), gy + 8);
+    bwRCtx.stroke();
+  }
+  const batWoodBump = finalizeLinearTexture(bwBumpCanvas, 1, 1, maxAnisotropy);
+  const batWoodRoughness = finalizeLinearTexture(bwRoughCanvas, 1, 1, maxAnisotropy);
+
+  // 34. Woven Cloth Wrap Bump & Roughness
+  const cwBumpCanvas = document.createElement('canvas');
+  cwBumpCanvas.width = 128;
+  cwBumpCanvas.height = 128;
+  const cwBCtx = cwBumpCanvas.getContext('2d')!;
+  const cwRoughCanvas = document.createElement('canvas');
+  cwRoughCanvas.width = 128;
+  cwRoughCanvas.height = 128;
+  const cwRCtx = cwRoughCanvas.getContext('2d')!;
+  cwBCtx.fillStyle = '#787878';
+  cwBCtx.fillRect(0, 0, 128, 128);
+  cwRCtx.fillStyle = '#dedede';
+  cwRCtx.fillRect(0, 0, 128, 128);
+  for (let y = 0; y < 128; y += 4) {
+    for (let x = 0; x < 128; x += 4) {
+      const checker = ((x + y) / 4) % 2 === 0;
+      cwBCtx.fillStyle = checker ? '#a8a8a8' : '#585858';
+      cwBCtx.fillRect(x, y, 3, 3);
+      cwRCtx.fillStyle = checker ? '#ededed' : '#cccccc';
+      cwRCtx.fillRect(x, y, 3, 3);
+    }
+  }
+  const clothWrapBump = finalizeLinearTexture(cwBumpCanvas, 4, 4, maxAnisotropy);
+  const clothWrapRoughness = finalizeLinearTexture(cwRoughCanvas, 4, 4, maxAnisotropy);
+
+  // 35. Soft Floating Atmospheric Dust / Ash Mote Sprite
+  const dustCanvas = document.createElement('canvas');
+  dustCanvas.width = 64;
+  dustCanvas.height = 64;
+  const dustCtx = dustCanvas.getContext('2d')!;
+  const dGrad = dustCtx.createRadialGradient(32, 32, 1, 32, 32, 30);
+  dGrad.addColorStop(0, 'rgba(255, 240, 214, 0.95)');
+  dGrad.addColorStop(0.45, 'rgba(245, 210, 175, 0.45)');
+  dGrad.addColorStop(1, 'rgba(245, 210, 175, 0)');
+  dustCtx.fillStyle = dGrad;
+  dustCtx.fillRect(0, 0, 64, 64);
+  const dustMote = finalizeTexture(dustCanvas, 1, 1, maxAnisotropy);
+  dustMote.wrapS = THREE.ClampToEdgeWrapping;
+  dustMote.wrapT = THREE.ClampToEdgeWrapping;
+
+  // 36. Organic Crimson Ground Blood Spatter Decal Texture (alpha-masked multi-lobe splatter + satellite drops)
+  const bsCanvas = document.createElement('canvas');
+  bsCanvas.width = 256;
+  bsCanvas.height = 256;
+  const bsCtx = bsCanvas.getContext('2d')!;
+  bsCtx.clearRect(0, 0, 256, 256);
+
+  // Outer crimson splatter halo & radial spray lobes
+  for (let i = 0; i < 18; i++) {
+    const ang = (i / 18) * Math.PI * 2 + (i % 3) * 0.14;
+    const dist = 24 + ((i * 37) % 44);
+    const rx = 18 + (i % 4) * 9;
+    const ry = 10 + (i % 3) * 6;
+    const cx = 128 + Math.cos(ang) * dist;
+    const cy = 128 + Math.sin(ang) * dist;
+    bsCtx.save();
+    bsCtx.translate(cx, cy);
+    bsCtx.rotate(ang);
+    const g = bsCtx.createRadialGradient(0, 0, 2, 0, 0, rx);
+    g.addColorStop(0, 'rgba(98, 4, 8, 0.94)');
+    g.addColorStop(0.65, 'rgba(136, 8, 12, 0.84)');
+    g.addColorStop(1, 'rgba(110, 4, 8, 0)');
+    bsCtx.fillStyle = g;
+    bsCtx.beginPath();
+    bsCtx.ellipse(0, 0, rx, ry, 0, 0, Math.PI * 2);
+    bsCtx.fill();
+    bsCtx.restore();
+  }
+  // Dense central pooled blood core
+  const coreGrad = bsCtx.createRadialGradient(128, 128, 8, 128, 128, 62);
+  coreGrad.addColorStop(0, 'rgba(64, 2, 4, 0.98)');
+  coreGrad.addColorStop(0.55, 'rgba(118, 6, 10, 0.94)');
+  coreGrad.addColorStop(0.88, 'rgba(148, 12, 14, 0.72)');
+  coreGrad.addColorStop(1, 'rgba(120, 6, 10, 0)');
+  bsCtx.fillStyle = coreGrad;
+  bsCtx.beginPath();
+  bsCtx.arc(128, 128, 62, 0, Math.PI * 2);
+  bsCtx.fill();
+  // Fine radial satellite spray droplets
+  for (let d = 0; d < 42; d++) {
+    const ang = d * 2.39996;
+    const rDist = 66 + ((d * 29) % 52);
+    const dx = 128 + Math.cos(ang) * rDist;
+    const dy = 128 + Math.sin(ang) * rDist;
+    const rad = 2.2 + (d % 5) * 1.4;
+    bsCtx.fillStyle = d % 2 === 0 ? 'rgba(128, 8, 12, 0.88)' : 'rgba(84, 4, 8, 0.82)';
+    bsCtx.beginPath();
+    bsCtx.ellipse(dx, dy, rad * 1.35, rad * 0.8, ang, 0, Math.PI * 2);
+    bsCtx.fill();
+  }
+  const bloodSpatter = finalizeTexture(bsCanvas, 1, 1, maxAnisotropy);
+  bloodSpatter.wrapS = THREE.ClampToEdgeWrapping;
+  bloodSpatter.wrapT = THREE.ClampToEdgeWrapping;
+
+  // 37. Polished Cream Interior Porcelain Tile Floor (Agra Haveli Living Hall)
+  const pctCanvas = document.createElement('canvas');
+  pctCanvas.width = 256;
+  pctCanvas.height = 256;
+  const pctCtx = pctCanvas.getContext('2d')!;
+  pctCtx.fillStyle = '#e7dfd1';
+  pctCtx.fillRect(0, 0, 256, 256);
+  for (let ty = 0; ty < 256; ty += 64) {
+    for (let tx = 0; tx < 256; tx += 64) {
+      const tint = ((tx * 3 + ty * 7) % 10) - 5;
+      pctCtx.fillStyle = `rgb(${232 + tint}, ${223 + tint}, ${209 + tint})`;
+      pctCtx.fillRect(tx + 2, ty + 2, 60, 60);
+      // Soft diagonal specular sheen on tile
+      pctCtx.strokeStyle = 'rgba(182, 168, 148, 0.16)';
+      pctCtx.lineWidth = 1.2;
+      pctCtx.beginPath();
+      pctCtx.moveTo(tx + 8, ty + 14);
+      pctCtx.quadraticCurveTo(tx + 32, ty + 28, tx + 54, ty + 48);
+      pctCtx.stroke();
+    }
+  }
+  pctCtx.strokeStyle = 'rgba(155, 142, 124, 0.34)';
+  pctCtx.lineWidth = 2;
+  for (let i = 0; i <= 256; i += 64) {
+    pctCtx.beginPath();
+    pctCtx.moveTo(0, i);
+    pctCtx.lineTo(256, i);
+    pctCtx.stroke();
+    pctCtx.beginPath();
+    pctCtx.moveTo(i, 0);
+    pctCtx.lineTo(i, 256);
+    pctCtx.stroke();
+  }
+  const polishedCreamTile = finalizeTexture(pctCanvas, 4, 4, maxAnisotropy);
+
+  // 38. Mint-Green & Teak Wood Paneled Haveli Door Leaf (matches interior reference!)
+  const hdwCanvas = document.createElement('canvas');
+  hdwCanvas.width = 256;
+  hdwCanvas.height = 512;
+  const hdwCtx = hdwCanvas.getContext('2d')!;
+  // Soft mint-green outer stiles and rails
+  hdwCtx.fillStyle = '#99c5a9';
+  hdwCtx.fillRect(0, 0, 256, 512);
+  // Subtle mint bevel highlights
+  hdwCtx.strokeStyle = '#b4dcc2';
+  hdwCtx.lineWidth = 4;
+  hdwCtx.strokeRect(4, 4, 248, 504);
+  hdwCtx.strokeStyle = '#6c987d';
+  hdwCtx.lineWidth = 3;
+  hdwCtx.strokeRect(10, 10, 236, 492);
+  // Upper & lower recessed warm teak wood panels
+  const drawWoodPanel = (px: number, py: number, pw: number, ph: number) => {
+    hdwCtx.fillStyle = '#6f4226';
+    hdwCtx.fillRect(px, py, pw, ph);
+    hdwCtx.strokeStyle = '#472814';
+    hdwCtx.lineWidth = 5;
+    hdwCtx.strokeRect(px, py, pw, ph);
+    hdwCtx.strokeStyle = 'rgba(148, 96, 58, 0.45)';
+    hdwCtx.lineWidth = 2;
+    for (let gx = px + 8; gx < px + pw - 6; gx += 10) {
+      hdwCtx.beginPath();
+      hdwCtx.moveTo(gx, py + 4);
+      hdwCtx.lineTo(gx + Math.sin(gx * 0.15) * 2, py + ph - 4);
+      hdwCtx.stroke();
+    }
+  };
+  drawWoodPanel(34, 34, 188, 236);
+  drawWoodPanel(34, 306, 188, 172);
+  // Brass handle plate & latch knob near edge
+  hdwCtx.fillStyle = '#d4a438';
+  hdwCtx.fillRect(202, 244, 14, 54);
+  hdwCtx.fillStyle = '#fde68a';
+  hdwCtx.beginPath();
+  hdwCtx.arc(209, 266, 7, 0, Math.PI * 2);
+  hdwCtx.fill();
+  const haveliDoorWood = finalizeTexture(hdwCanvas, 1, 1, maxAnisotropy);
+  haveliDoorWood.wrapS = THREE.ClampToEdgeWrapping;
+  haveliDoorWood.wrapT = THREE.ClampToEdgeWrapping;
+
+  // 39. Tall Blue-Mullioned Daylight Staircase Window
+  const bmwCanvas = document.createElement('canvas');
+  bmwCanvas.width = 256;
+  bmwCanvas.height = 256;
+  const bmwCtx = bmwCanvas.getContext('2d')!;
+  const winSky = bmwCtx.createLinearGradient(0, 0, 0, 256);
+  winSky.addColorStop(0, '#c6e5f5');
+  winSky.addColorStop(0.55, '#a8d5ea');
+  winSky.addColorStop(1, '#e6d8be');
+  bmwCtx.fillStyle = winSky;
+  bmwCtx.fillRect(0, 0, 256, 256);
+  bmwCtx.strokeStyle = '#1e3a5f';
+  bmwCtx.lineWidth = 8;
+  bmwCtx.strokeRect(4, 4, 248, 248);
+  bmwCtx.lineWidth = 5;
+  for (let x = 64; x < 256; x += 64) {
+    bmwCtx.beginPath();
+    bmwCtx.moveTo(x, 0);
+    bmwCtx.lineTo(x, 256);
+    bmwCtx.stroke();
+  }
+  for (let y = 64; y < 256; y += 64) {
+    bmwCtx.beginPath();
+    bmwCtx.moveTo(0, y);
+    bmwCtx.lineTo(256, y);
+    bmwCtx.stroke();
+  }
+  const blueMullionWindow = finalizeTexture(bmwCanvas, 1, 1, maxAnisotropy);
+  blueMullionWindow.wrapS = THREE.ClampToEdgeWrapping;
+  blueMullionWindow.wrapT = THREE.ClampToEdgeWrapping;
+
+  // 40. Iconic Yellow Indian Railways Board: "आगरा छावनी / AGRA CANTT / M.S.L. 167.30 M."
+  const canttCanvas = document.createElement('canvas');
+  canttCanvas.width = 1024;
+  canttCanvas.height = 512;
+  const cCtx = canttCanvas.getContext('2d')!;
+  const canttGrad = cCtx.createLinearGradient(0, 0, 1024, 512);
+  canttGrad.addColorStop(0, '#f8c325');
+  canttGrad.addColorStop(0.55, '#f2b114');
+  canttGrad.addColorStop(1, '#e19c0a');
+  cCtx.fillStyle = canttGrad;
+  cCtx.fillRect(0, 0, 1024, 512);
+  // Subtle sunlit weathering streaks
+  for (let i = 0; i < 160; i++) {
+    cCtx.fillStyle = i % 2 === 0 ? 'rgba(255, 245, 200, 0.08)' : 'rgba(130, 82, 0, 0.07)';
+    cCtx.fillRect((i * 73) % 1024, (i * 41) % 512, 48, 8);
+  }
+  cCtx.strokeStyle = '#6c4204';
+  cCtx.lineWidth = 10;
+  cCtx.strokeRect(18, 18, 988, 476);
+  cCtx.fillStyle = '#181410';
+  cCtx.textAlign = 'center';
+  cCtx.textBaseline = 'middle';
+  cCtx.font = 'bold 148px "Noto Sans Devanagari", "Kohinoor Devanagari", sans-serif';
+  cCtx.fillText('आगरा छावनी', 512, 165);
+  cCtx.font = '900 84px "Arial Black", "Segoe UI", sans-serif';
+  cCtx.textAlign = 'left';
+  cCtx.fillText('AGRA CANTT', 64, 336);
+  cCtx.font = 'bold 74px "Noto Nastaliq Urdu", serif';
+  cCtx.textAlign = 'right';
+  cCtx.fillText('آگرہ چھاؤنی', 956, 332);
+  cCtx.fillStyle = '#b91c1c';
+  cCtx.textAlign = 'center';
+  cCtx.font = 'bold 34px "Arial", sans-serif';
+  cCtx.fillText('M.S.L. - 167.30 M.', 512, 434);
+  const railwayBoardCantt = finalizeTexture(canttCanvas, 1, 1, maxAnisotropy);
+  railwayBoardCantt.wrapS = THREE.ClampToEdgeWrapping;
+  railwayBoardCantt.wrapT = THREE.ClampToEdgeWrapping;
+
+  // 41. Platform 2 Yellow Indian Railways Board: "आगरा शहर / AGRA CITY"
+  const cityCanvas = document.createElement('canvas');
+  cityCanvas.width = 768;
+  cityCanvas.height = 384;
+  const cyCtx = cityCanvas.getContext('2d')!;
+  cyCtx.fillStyle = '#f6c31c';
+  cyCtx.fillRect(0, 0, 768, 384);
+  cyCtx.strokeStyle = '#4a3204';
+  cyCtx.lineWidth = 8;
+  cyCtx.strokeRect(14, 14, 740, 356);
+  cyCtx.fillStyle = '#161310';
+  cyCtx.textAlign = 'center';
+  cyCtx.textBaseline = 'middle';
+  cyCtx.font = 'bold 112px "Noto Sans Devanagari", sans-serif';
+  cyCtx.fillText('आगरा शहर', 384, 134);
+  cyCtx.font = '900 66px "Arial Black", sans-serif';
+  cyCtx.textAlign = 'left';
+  cyCtx.fillText('AGRA CITY', 56, 272);
+  cyCtx.font = 'bold 58px "Noto Nastaliq Urdu", serif';
+  cyCtx.textAlign = 'right';
+  cyCtx.fillText('آگرہ شہر', 712, 268);
+  const railwayBoardCity = finalizeTexture(cityCanvas, 1, 1, maxAnisotropy);
+  railwayBoardCity.wrapS = THREE.ClampToEdgeWrapping;
+  railwayBoardCity.wrapT = THREE.ClampToEdgeWrapping;
+
+  // 42. Deep Blue North Central Railway Facade Sign: "उत्तर मध्य रेलवे / आगरा छावनी"
+  const ncrCanvas = document.createElement('canvas');
+  ncrCanvas.width = 1024;
+  ncrCanvas.height = 320;
+  const nCtx = ncrCanvas.getContext('2d')!;
+  nCtx.fillStyle = '#183c7c';
+  nCtx.fillRect(0, 0, 1024, 320);
+  nCtx.strokeStyle = '#dbeafe';
+  nCtx.lineWidth = 8;
+  nCtx.strokeRect(14, 14, 996, 292);
+  nCtx.fillStyle = '#f8fafc';
+  nCtx.textAlign = 'center';
+  nCtx.textBaseline = 'middle';
+  nCtx.font = 'bold 46px "Noto Sans Devanagari", sans-serif';
+  nCtx.fillText('उत्तर मध्य रेलवे', 512, 74);
+  nCtx.font = 'bold 132px "Noto Sans Devanagari", sans-serif';
+  nCtx.fillText('आगरा छावनी', 512, 206);
+  const railwayFacadeNcr = finalizeTexture(ncrCanvas, 1, 1, maxAnisotropy);
+  railwayFacadeNcr.wrapS = THREE.ClampToEdgeWrapping;
+  railwayFacadeNcr.wrapT = THREE.ClampToEdgeWrapping;
+
+  // 43. Green Forecourt Entry Sign: "प्रवेश / ENTRY - DROP & DRIVE"
+  const ddCanvas = document.createElement('canvas');
+  ddCanvas.width = 512;
+  ddCanvas.height = 384;
+  const ddCtx = ddCanvas.getContext('2d')!;
+  ddCtx.fillStyle = '#157347';
+  ddCtx.fillRect(0, 0, 512, 384);
+  ddCtx.strokeStyle = '#ecfdf5';
+  ddCtx.lineWidth = 10;
+  ddCtx.strokeRect(14, 14, 484, 356);
+  ddCtx.fillStyle = '#ffffff';
+  ddCtx.textAlign = 'center';
+  ddCtx.textBaseline = 'middle';
+  ddCtx.font = 'bold 46px "Noto Sans Devanagari", sans-serif';
+  ddCtx.fillText('प्रवेश', 256, 68);
+  ddCtx.font = 'bold 30px "Noto Sans Devanagari", sans-serif';
+  ddCtx.fillText('ड्राप एण्ड ड्राइव', 256, 126);
+  ddCtx.fillText('वी आई पी लेन', 256, 170);
+  ddCtx.font = '900 58px "Arial Black", sans-serif';
+  ddCtx.fillText('ENTRY', 256, 248);
+  ddCtx.font = 'bold 34px "Arial", sans-serif';
+  ddCtx.fillText('DROP & DRIVE', 256, 314);
+  const railwayDropDrive = finalizeTexture(ddCanvas, 1, 1, maxAnisotropy);
+  railwayDropDrive.wrapS = THREE.ClampToEdgeWrapping;
+  railwayDropDrive.wrapT = THREE.ClampToEdgeWrapping;
+
+  // 44 & 45. Glowing Red Digital LED Clocks (12:07 and 17:44)
+  const makeLedClockTex = (timeStr: string) => {
+    const ckCanvas = document.createElement('canvas');
+    ckCanvas.width = 512;
+    ckCanvas.height = 192;
+    const ckCtx = ckCanvas.getContext('2d')!;
+    ckCtx.fillStyle = '#090a0d';
+    ckCtx.fillRect(0, 0, 512, 192);
+    ckCtx.strokeStyle = '#334155';
+    ckCtx.lineWidth = 10;
+    ckCtx.strokeRect(8, 8, 496, 176);
+    ckCtx.shadowColor = '#ef4444';
+    ckCtx.shadowBlur = 18;
+    ckCtx.fillStyle = '#ff2e2e';
+    ckCtx.textAlign = 'center';
+    ckCtx.textBaseline = 'middle';
+    ckCtx.font = '900 122px "Courier New", monospace';
+    ckCtx.fillText(timeStr, 256, 102);
+    const tex = finalizeTexture(ckCanvas, 1, 1, maxAnisotropy);
+    tex.wrapS = THREE.ClampToEdgeWrapping;
+    tex.wrapT = THREE.ClampToEdgeWrapping;
+    return tex;
+  };
+  const railwayClock1207 = makeLedClockTex('12:07');
+  const railwayClock1744 = makeLedClockTex('17:44');
+
+  // 46. Yellow Hanging Concourse Board: "EXECUTIVE LOUNGE / PLATFORMS 1-3"
+  const exCanvas = document.createElement('canvas');
+  exCanvas.width = 512;
+  exCanvas.height = 384;
+  const exCtx = exCanvas.getContext('2d')!;
+  exCtx.fillStyle = '#facc15';
+  exCtx.fillRect(0, 0, 512, 384);
+  exCtx.strokeStyle = '#713f12';
+  exCtx.lineWidth = 8;
+  exCtx.strokeRect(10, 10, 492, 364);
+  exCtx.fillStyle = '#18181b';
+  exCtx.textAlign = 'center';
+  exCtx.font = 'bold 34px "Noto Sans Devanagari", sans-serif';
+  exCtx.fillText('एग्जीक्यूटिव लाउंज', 256, 56);
+  exCtx.font = '900 32px "Arial Black", sans-serif';
+  exCtx.fillText('EXECUTIVE LOUNGE', 256, 100);
+  exCtx.fillStyle = '#b91c1c';
+  exCtx.font = 'bold 26px "Arial", sans-serif';
+  exCtx.fillText('PLATFORM NO. 1-3  |  WAITING HALL', 256, 144);
+  exCtx.fillStyle = '#27272a';
+  exCtx.font = '22px "Arial", sans-serif';
+  exCtx.fillText('• Fully A.C.   • Reclining Chairs', 256, 198);
+  exCtx.fillText('• Refreshment  • Wi-Fi & Washroom', 256, 236);
+  exCtx.fillText('• Luggage Rack • Train Display', 256, 274);
+  // Red directional arrow at bottom
+  exCtx.fillStyle = '#dc2626';
+  exCtx.fillRect(116, 326, 280, 14);
+  exCtx.beginPath();
+  exCtx.moveTo(86, 333);
+  exCtx.lineTo(126, 310);
+  exCtx.lineTo(126, 356);
+  exCtx.closePath();
+  exCtx.fill();
+  const railwayExecSign = finalizeTexture(exCanvas, 1, 1, maxAnisotropy);
+  railwayExecSign.wrapS = THREE.ClampToEdgeWrapping;
+  railwayExecSign.wrapT = THREE.ClampToEdgeWrapping;
+
+  // 47. Colonial Painted Red Station Brick (Agra Cantt Wings)
+  const rbrCanvas = document.createElement('canvas');
+  rbrCanvas.width = 256;
+  rbrCanvas.height = 256;
+  const rbCtx = rbrCanvas.getContext('2d')!;
+  rbCtx.fillStyle = '#a6201b';
+  rbCtx.fillRect(0, 0, 256, 256);
+  for (let row = 0; row < 16; row++) {
+    const y = row * 16;
+    const offset = (row % 2) * 24;
+    for (let col = -1; col < 6; col++) {
+      const x = col * 48 + offset;
+      const tone = ((row * 13 + col * 19) % 16) - 8;
+      rbCtx.fillStyle = `rgb(${168 + tone}, ${32 + Math.floor(tone * 0.4)}, ${28 + Math.floor(tone * 0.3)})`;
+      rbCtx.fillRect(x + 2, y + 2, 44, 12);
+    }
+  }
+  rbCtx.strokeStyle = 'rgba(235, 224, 212, 0.25)';
+  rbCtx.lineWidth = 1.5;
+  for (let y = 0; y <= 256; y += 16) {
+    rbCtx.beginPath();
+    rbCtx.moveTo(0, y);
+    rbCtx.lineTo(256, y);
+    rbCtx.stroke();
+  }
+  const railwayBrickRed = finalizeTexture(rbrCanvas, 4, 2, maxAnisotropy);
+
+  // 48. Whitewashed Colonial Station Portico Brick
+  const wbrCanvas = document.createElement('canvas');
+  wbrCanvas.width = 256;
+  wbrCanvas.height = 256;
+  const wbCtx = wbrCanvas.getContext('2d')!;
+  wbCtx.fillStyle = '#ece7de';
+  wbCtx.fillRect(0, 0, 256, 256);
+  for (let row = 0; row < 16; row++) {
+    const y = row * 16;
+    const offset = (row % 2) * 24;
+    for (let col = -1; col < 6; col++) {
+      const x = col * 48 + offset;
+      const v = 232 + (((row * 17 + col * 23) % 12) - 6);
+      wbCtx.fillStyle = `rgb(${v}, ${v - 4}, ${v - 11})`;
+      wbCtx.fillRect(x + 2, y + 2, 44, 12);
+    }
+  }
+  wbCtx.strokeStyle = 'rgba(130, 122, 112, 0.32)';
+  wbCtx.lineWidth = 1.5;
+  for (let y = 0; y <= 256; y += 16) {
+    wbCtx.beginPath();
+    wbCtx.moveTo(0, y);
+    wbCtx.lineTo(256, y);
+    wbCtx.stroke();
+  }
+  const railwayWhiteBrick = finalizeTexture(wbrCanvas, 3, 2, maxAnisotropy);
+
+  // 49. Crushed Granite Railway Ballast Bed
+  const balCanvas = document.createElement('canvas');
+  balCanvas.width = 256;
+  balCanvas.height = 256;
+  const blCtx = balCanvas.getContext('2d')!;
+  blCtx.fillStyle = '#494542';
+  blCtx.fillRect(0, 0, 256, 256);
+  for (let i = 0; i < 1600; i++) {
+    const gx = (i * 73 + (i % 7) * 19) % 256;
+    const gy = (i * 41 + (i % 11) * 13) % 256;
+    const shade = 52 + ((i * 29) % 62);
+    const warm = i % 9 === 0 ? 18 : 0;
+    blCtx.fillStyle = `rgb(${shade + warm}, ${shade + Math.floor(warm * 0.4)}, ${shade - 4})`;
+    blCtx.fillRect(gx, gy, 4 + (i % 4), 3 + (i % 3));
+  }
+  const railwayBallast = finalizeTexture(balCanvas, 2, 18, maxAnisotropy);
+
+  // 50, 51, 52. Indian Railways Coach Exterior Liveries (ICF Blue Sleeper, Cream & Maroon Express, Green & Yellow Garib Rath)
+  const makeCoachLiveryTex = (opts: {
+    baseHex: string;
+    bandHex: string;
+    stripeHex: string;
+    accentStripeHex?: string;
+    coachCode: string;
+    tricolor?: boolean;
+  }) => {
+    const lvCanvas = document.createElement('canvas');
+    lvCanvas.width = 1024;
+    lvCanvas.height = 256;
+    const lvCtx = lvCanvas.getContext('2d')!;
+    lvCtx.fillStyle = opts.baseHex;
+    lvCtx.fillRect(0, 0, 1024, 256);
+    // Window belt band
+    lvCtx.fillStyle = opts.bandHex;
+    lvCtx.fillRect(0, 54, 1024, 108);
+    // Horizontal railway stripes
+    lvCtx.fillStyle = opts.stripeHex;
+    lvCtx.fillRect(0, 44, 1024, 10);
+    lvCtx.fillRect(0, 162, 1024, 14);
+    if (opts.accentStripeHex) {
+      lvCtx.fillStyle = opts.accentStripeHex;
+      lvCtx.fillRect(0, 176, 1024, 8);
+    }
+    // Weathered underframe grime
+    const grime = lvCtx.createLinearGradient(0, 210, 0, 256);
+    grime.addColorStop(0, 'rgba(35, 28, 22, 0)');
+    grime.addColorStop(1, 'rgba(30, 24, 18, 0.55)');
+    lvCtx.fillStyle = grime;
+    lvCtx.fillRect(0, 210, 1024, 46);
+    // Panel seam lines & steel rivets
+    lvCtx.strokeStyle = 'rgba(0,0,0,0.22)';
+    lvCtx.lineWidth = 2;
+    for (let x = 0; x < 1024; x += 128) {
+      lvCtx.beginPath();
+      lvCtx.moveTo(x, 0);
+      lvCtx.lineTo(x, 256);
+      lvCtx.stroke();
+    }
+    // Indian Tricolor Flag Emblem near vestibule
+    if (opts.tricolor) {
+      lvCtx.fillStyle = '#ff9933';
+      lvCtx.fillRect(28, 66, 56, 12);
+      lvCtx.fillStyle = '#ffffff';
+      lvCtx.fillRect(28, 78, 56, 12);
+      lvCtx.fillStyle = '#138808';
+      lvCtx.fillRect(28, 90, 56, 12);
+      lvCtx.strokeStyle = '#1e3a8a';
+      lvCtx.lineWidth = 2;
+      lvCtx.beginPath();
+      lvCtx.arc(56, 84, 4.5, 0, Math.PI * 2);
+      lvCtx.stroke();
+    }
+    // Coach number & destination plate
+    lvCtx.fillStyle = '#fef08a';
+    lvCtx.font = '900 32px "Arial Black", sans-serif';
+    lvCtx.textAlign = 'left';
+    lvCtx.fillText(opts.coachCode, 102, 118);
+    lvCtx.fillStyle = '#f8fafc';
+    lvCtx.font = 'bold 20px "Arial", sans-serif';
+    lvCtx.fillText('NORTH CENTRAL RLY', 740, 34);
+    const tex = finalizeTexture(lvCanvas, 1, 1, maxAnisotropy);
+    tex.wrapS = THREE.ClampToEdgeWrapping;
+    tex.wrapT = THREE.ClampToEdgeWrapping;
+    return tex;
+  };
+
+  const railwayIcfBlue = makeCoachLiveryTex({
+    baseHex: '#1888cc',
+    bandHex: '#0d4f8b',
+    stripeHex: '#cbd5e1',
+    accentStripeHex: '#e2e8f0',
+    coachCode: 'S7',
+    tricolor: true,
+  });
+  const railwayCreamExpress = makeCoachLiveryTex({
+    baseHex: '#e2d7bc',
+    bandHex: '#cfc09d',
+    stripeHex: '#7f1d1d',
+    accentStripeHex: '#991b1b',
+    coachCode: 'B3',
+  });
+  const railwayGaribGreen = makeCoachLiveryTex({
+    baseHex: '#198754',
+    bandHex: '#facc15',
+    stripeHex: '#fef9c3',
+    accentStripeHex: '#14532d',
+    coachCode: 'G4',
+  });
+
   return {
     marble,
     sandstone,
@@ -1019,6 +1761,33 @@ export function createProceduralTextures(maxAnisotropy: number): ProceduralTextu
     parkourPaintSmudge,
     parkourChevronGuide,
     bazaarBunting,
+    courtyardAsphalt,
+    courtyardAsphaltBump,
+    courtyardAsphaltRoughness,
+    stoneBump,
+    stoneRoughness,
+    batWoodBump,
+    batWoodRoughness,
+    clothWrapBump,
+    clothWrapRoughness,
+    dustMote,
+    bloodSpatter,
+    polishedCreamTile,
+    haveliDoorWood,
+    blueMullionWindow,
+    railwayBoardCantt,
+    railwayBoardCity,
+    railwayFacadeNcr,
+    railwayDropDrive,
+    railwayClock1207,
+    railwayClock1744,
+    railwayExecSign,
+    railwayBrickRed,
+    railwayWhiteBrick,
+    railwayBallast,
+    railwayIcfBlue,
+    railwayCreamExpress,
+    railwayGaribGreen,
     dispose: () => {
       marble.dispose();
       sandstone.dispose();
@@ -1053,6 +1822,33 @@ export function createProceduralTextures(maxAnisotropy: number): ProceduralTextu
       parkourPaintSmudge.dispose();
       parkourChevronGuide.dispose();
       bazaarBunting.dispose();
+      courtyardAsphalt.dispose();
+      courtyardAsphaltBump.dispose();
+      courtyardAsphaltRoughness.dispose();
+      stoneBump.dispose();
+      stoneRoughness.dispose();
+      batWoodBump.dispose();
+      batWoodRoughness.dispose();
+      clothWrapBump.dispose();
+      clothWrapRoughness.dispose();
+      dustMote.dispose();
+      bloodSpatter.dispose();
+      polishedCreamTile.dispose();
+      haveliDoorWood.dispose();
+      blueMullionWindow.dispose();
+      railwayBoardCantt.dispose();
+      railwayBoardCity.dispose();
+      railwayFacadeNcr.dispose();
+      railwayDropDrive.dispose();
+      railwayClock1207.dispose();
+      railwayClock1744.dispose();
+      railwayExecSign.dispose();
+      railwayBrickRed.dispose();
+      railwayWhiteBrick.dispose();
+      railwayBallast.dispose();
+      railwayIcfBlue.dispose();
+      railwayCreamExpress.dispose();
+      railwayGaribGreen.dispose();
     },
   };
 }

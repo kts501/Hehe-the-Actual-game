@@ -15,13 +15,14 @@ const INITIAL_HUD: HudSnapshot = {
   comboTimerRatio: 0,
   takedownReady: false,
   timeOfDay: 0,
-  formattedTime: '18:45',
+  formattedTime: '3:58 PM — DAY 1',
   isNight: false,
   cratesCollected: 0,
   totalCrates: 3,
   crateStatuses: [],
   tajDistance: 102,
   flashlightOn: false,
+  flashlightBattery: 100,
   firecrackerCooldown: 0,
   kickCooldown: 0,
   canMantle: false,
@@ -55,6 +56,32 @@ const INITIAL_HUD: HudSnapshot = {
   introRadioVisible: false,
   introRadioText: '',
   tutorialHintOpacity: 0,
+  isGrabbingEnemy: false,
+  isExecutingFinisher: false,
+  finisherGoreOpacity: 0,
+  exhausted: false,
+  exhaustionRemaining: 0,
+  executionsCount: 0,
+  waveNumber: 1,
+  killsTarget: 15,
+  extractionReady: false,
+  extractionDistance: 74,
+  hitMarkerFlash: 0,
+  moveSpread: 0,
+  canGrabEnemy: false,
+  grabTargetHealthy: false,
+  lowStaminaPulse: false,
+  isFinisherActive: false,
+  finisherVignetteOpacity: 0,
+  finisherBlackoutOpacity: 0,
+  deathCause: 'overrun',
+  survivedDays: 1,
+  activeTerritory: null,
+  territoryLiberationToast: null,
+  allyNameplates: [],
+  squadCommandToast: null,
+  allyDownAlert: null,
+  allyCount: 0,
   awakening: {
     charge: 0,
     isReady: false,
@@ -267,6 +294,13 @@ export default function App() {
     engineRef.current?.restartGame();
   }, []);
 
+  const handleRespawnSafeZone = useCallback(() => {
+    hunterAlertSentRef.current = false;
+    setRadioMessages([]);
+    setRadioSending(false);
+    engineRef.current?.respawnAtSafeZone();
+  }, []);
+
   const handleLockPointer = useCallback(() => {
     engineRef.current?.lockPointer();
   }, []);
@@ -321,6 +355,10 @@ export default function App() {
 
   const handleDevClearNearbyEnemies = useCallback((): number => {
     return engineRef.current?.devClearNearbyEnemies(26) ?? 0;
+  }, []);
+
+  const handleDevSpawnInfectedInFront = useCallback(() => {
+    engineRef.current?.devSpawnInfectedInFront();
   }, []);
 
   const handleSendRadioMessage = useCallback(
@@ -415,6 +453,7 @@ export default function App() {
         radioSending={radioSending}
         onStart={handleStart}
         onRestart={handleRestart}
+        onRespawnSafeZone={handleRespawnSafeZone}
         onLockPointer={handleLockPointer}
         onSkipTime={handleSkipTime}
         onToggleMute={handleToggleMute}
@@ -433,6 +472,7 @@ export default function App() {
         onFillAwakening={handleDevFillAwakening}
         onFullHeal={handleDevFullHeal}
         onClearNearbyEnemies={handleDevClearNearbyEnemies}
+        onSpawnInfectedInFront={handleDevSpawnInfectedInFront}
       />
     </div>
   );

@@ -4,7 +4,7 @@ import type { WeaponId, WeaponSlot } from '../game/weapons';
 
 export type GamePhase = 'start' | 'playing' | 'gameover' | 'victory';
 
-export type ZombieKind = 'shambler' | 'runner' | 'brute' | 'dog' | 'screamer';
+export type ZombieKind = 'shambler' | 'runner' | 'brute' | 'dog' | 'screamer' | 'night_runner';
 
 export interface CounterIndicator {
   id: number;
@@ -17,6 +17,19 @@ export interface DirectionalDamageIndicator {
   id: number;
   angleRad: number; // 0 = front, +PI/2 = right, -PI/2 = left, ±PI = behind
   intensity: number; // 0..1 remaining opacity
+}
+
+export interface ScreenBloodSpatter {
+  id: number;
+  xPct: number;
+  yPct: number;
+  sizePx: number;
+  rotDeg: number;
+  scaleX: number;
+  scaleY: number;
+  dripPx: number;
+  opacity: number;
+  variant: 0 | 1 | 2;
 }
 
 export interface CrateStatus {
@@ -44,6 +57,7 @@ export interface HudSnapshot {
   crateStatuses: CrateStatus[];
   tajDistance: number;
   flashlightOn: boolean;
+  flashlightBattery: number;
   firecrackerCooldown: number; // seconds remaining
   kickCooldown: number;
   canMantle: boolean;
@@ -85,7 +99,53 @@ export interface HudSnapshot {
   introRadioText?: string;
   tutorialHintOpacity?: number;
   awakening?: AwakeningHudSnapshot;
+  isGrabbingEnemy?: boolean;
+  isExecutingFinisher?: boolean;
+  finisherGoreOpacity?: number;
+  exhausted?: boolean;
+  exhaustionRemaining?: number;
+  executionsCount?: number;
+  waveNumber?: number;
+  killsTarget?: number;
+  extractionReady?: boolean;
+  extractionDistance?: number;
+  hitMarkerFlash?: number;
+  moveSpread?: number;
+  canGrabEnemy?: boolean;
+  grabTargetHealthy?: boolean;
+  screenBloodSpatters?: ScreenBloodSpatter[];
+  lowStaminaPulse?: boolean;
+  isFinisherActive?: boolean;
+  finisherVignetteOpacity?: number;
+  finisherBlackoutOpacity?: number;
+  deathCause?: 'night_runner' | 'overrun';
+  survivedDays?: number;
+  activeTerritory?: {
+    id: string;
+    name: string;
+    captured: boolean;
+    progress: number;
+    aliveDefenders: number;
+    isLocked: boolean;
+  } | null;
+  territoryLiberationToast?: string | null;
+  allyNameplates?: AllyNameplate[];
+  squadCommandToast?: string | null;
+  allyDownAlert?: string | null;
+  allyCount?: number;
   minimap?: MinimapTelemetry;
+}
+
+export interface AllyNameplate {
+  id: number;
+  name: string;
+  hp: number;
+  maxHp: number;
+  mode: 'FOLLOW' | 'GUARD';
+  x: number;
+  y: number;
+  dist: number;
+  inCombat: boolean;
 }
 
 export interface MinimapEnemyBlip {
@@ -93,6 +153,14 @@ export interface MinimapEnemyBlip {
   z: number;
   kind: ZombieKind;
   alerted: boolean;
+}
+
+export interface MinimapAllyBlip {
+  id: number;
+  name: string;
+  x: number;
+  z: number;
+  mode: 'FOLLOW' | 'GUARD';
 }
 
 export interface MinimapCrateBlip {
@@ -110,8 +178,18 @@ export interface MinimapTelemetry {
   playerYaw: number;
   crates: MinimapCrateBlip[];
   enemies: MinimapEnemyBlip[];
+  allies?: MinimapAllyBlip[];
   tajGate: { x: number; z: number };
   watchtower: { x: number; z: number };
+  territories?: Array<{
+    id: string;
+    name: string;
+    x: number;
+    z: number;
+    radius: number;
+    captured: boolean;
+    progress: number;
+  }>;
 }
 
 export interface RadioMessage {
@@ -154,6 +232,7 @@ export interface BoxCollider {
   cushion?: boolean; // Blue landing tarp that absorbs fall impact
   wallrunnable?: boolean;
   ramp?: RampSlope;
+  disabled?: boolean;
 }
 
 export interface ZiplineRoute {

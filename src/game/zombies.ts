@@ -40,9 +40,13 @@ export interface ZombieActor {
   hitReactDir: number;
   alerted: boolean;
   isClimbing: boolean;
+  isElite?: boolean;
+  flankAngle: number;
+  pounceCooldown: number;
   dogJaw?: THREE.Group;
   dogTail?: THREE.Group;
   dogBaseHeight?: number;
+  territoryId?: string;
 }
 
 const _tmpVec = new THREE.Vector3();
@@ -108,6 +112,7 @@ export class ZombieManager {
   private readonly trouserMats: THREE.MeshStandardMaterial[];
   private readonly hazmatMat: THREE.MeshStandardMaterial;
   private readonly runnerEyeMat: THREE.MeshBasicMaterial;
+  private readonly eliteEyeMat: THREE.MeshBasicMaterial;
   private readonly shamblerEyeMat: THREE.MeshBasicMaterial;
   private readonly dogEyeMat: THREE.MeshBasicMaterial;
   private readonly trailMat: THREE.MeshBasicMaterial;
@@ -288,6 +293,9 @@ export class ZombieManager {
 
     this.runnerEyeMat = trackMat(
       new THREE.MeshBasicMaterial({ color: new THREE.Color(2.4, 0.28, 0.16), toneMapped: false }),
+    );
+    this.eliteEyeMat = trackMat(
+      new THREE.MeshBasicMaterial({ color: new THREE.Color(2.9, 0.72, 0.14), toneMapped: false }),
     );
     this.shamblerEyeMat = trackMat(
       new THREE.MeshBasicMaterial({ color: new THREE.Color(2.1, 1.85, 0.35), toneMapped: false }),
@@ -640,11 +648,11 @@ export class ZombieManager {
     return { hip, knee };
   }
 
-  private createNightHunterMesh(x: number, y: number, z: number): ZombieActor {
+  private createNightHunterMesh(x: number, y: number, z: number, isElite = false): ZombieActor {
     const group = new THREE.Group();
     group.position.set(x, y, z);
 
-    const scale = 1.22;
+    const scale = isElite ? 1.28 : 1.22;
 
     const cShadow = new THREE.Mesh(
       this.cachedGeo('nh_shad', () => new THREE.PlaneGeometry(1.55, 1.55)),
@@ -741,7 +749,12 @@ export class ZombieManager {
     neck.rotation.x = 0.2;
     spineGroup.add(neck);
 
-    const headGroup = this.buildSculptedHead(this.runnerPaleMat, this.runnerEyeMat, scale, true);
+    const headGroup = this.buildSculptedHead(
+      isElite ? this.runnerMuscleMat : this.runnerPaleMat,
+      isElite ? this.eliteEyeMat : this.runnerEyeMat,
+      scale,
+      true,
+    );
     headGroup.position.set(0, 0.78 * scale, 0.12 * scale);
     headGroup.rotation.x = -0.22;
     spineGroup.add(headGroup);
@@ -785,8 +798,9 @@ export class ZombieManager {
 
     this.scene.add(group);
 
+    const id = this.nextId++;
     const actor: ZombieActor = {
-      id: this.nextId++,
+      id,
       kind: 'runner',
       group,
       pelvisGroup,
@@ -806,13 +820,13 @@ export class ZombieManager {
       pos: new THREE.Vector3(x, y, z),
       vel: new THREE.Vector3(),
       yaw: Math.random() * Math.PI * 2,
-      hp: 85,
-      maxHp: 85,
-      speed: 7.0,
-      damage: 18,
+      hp: isElite ? 172 : 115,
+      maxHp: isElite ? 172 : 115,
+      speed: isElite ? 9.8 : 9.1,
+      damage: isElite ? 34 : 28,
       state: 'wander',
       stateTimer: 0,
-      windupDuration: 0.9,
+      windupDuration: isElite ? 0.56 : 0.65,
       attackCooldown: 0,
       animPhase: Math.random() * 10,
       groanTimer: 2 + Math.random() * 6,
@@ -821,6 +835,9 @@ export class ZombieManager {
       hitReactDir: 0,
       alerted: true,
       isClimbing: false,
+      isElite,
+      flankAngle: ((id % 5) - 2) * 0.36,
+      pounceCooldown: 1.5,
     };
     this.zombies.push(actor);
     return actor;
@@ -1255,12 +1272,13 @@ export class ZombieManager {
 
     this.scene.add(group);
 
-    const hp = variant === 1 ? 75 : 55;
-    const speed = variant === 1 ? 7.6 : 6.9;
-    const damage = variant === 1 ? 16 : 13;
+    const hp = variant === 1 ? 115 : 85;
+    const speed = variant === 1 ? 9.88 : 8.95;
+    const damage = variant === 1 ? 28 : 22;
 
+    const id = this.nextId++;
     const actor: ZombieActor = {
-      id: this.nextId++,
+      id,
       kind: 'dog',
       group,
       pelvisGroup,
@@ -1286,7 +1304,7 @@ export class ZombieManager {
       damage,
       state: 'wander',
       stateTimer: 0,
-      windupDuration: 0.78,
+      windupDuration: 0.62,
       attackCooldown: 0,
       animPhase: Math.random() * 10,
       groanTimer: 2 + Math.random() * 5,
@@ -1295,6 +1313,8 @@ export class ZombieManager {
       hitReactDir: 0,
       alerted: false,
       isClimbing: false,
+      flankAngle: ((id % 5) - 2) * 0.42,
+      pounceCooldown: 0,
       dogJaw,
       dogTail,
       dogBaseHeight: baseHeight,
@@ -1303,9 +1323,33 @@ export class ZombieManager {
     return actor;
   }
 
-  private createZombieMesh(kind: ZombieKind, x: number, y: number, z: number): ZombieActor {
+  public spawnActor(
+    kind: ZombieKind,
+    x: number,
+    y: number,
+    z: number,
+    exactKind = true,
+    territoryId?: string,
+  ): ZombieActor {
+    const actor = this.createZombieMesh(kind, x, y, z, exactKind);
+    if (territoryId) actor.territoryId = territoryId;
+    return actor;
+  }
+
+  private createZombieMesh(
+    kind: ZombieKind,
+    x: number,
+    y: number,
+    z: number,
+    exactKind = false,
+  ): ZombieActor {
     if (kind === 'runner') {
-      return this.createNightHunterMesh(x, y, z);
+      const eliteRoll = !exactKind && this.nextId % 5 === 0;
+      return this.createNightHunterMesh(x, y, z, eliteRoll);
+    }
+    if (!exactKind && kind === 'shambler' && this.nextId % 5 === 0) {
+      // 20% spawn chance: Elite Split-Jaw / Volatile Runner
+      return this.createNightHunterMesh(x, y, z, true);
     }
     if (kind === 'dog') {
       return this.createInfectedDogMesh(x, y, z, this.nextId % 3);
@@ -1453,12 +1497,13 @@ export class ZombieManager {
 
     this.scene.add(group);
 
-    const hp = kind === 'brute' ? 140 : 75;
-    const speed = kind === 'brute' ? 2.5 : 2.35;
-    const damage = kind === 'brute' ? 24 : 15;
+    const hp = kind === 'brute' ? 190 : 112;
+    const speed = kind === 'brute' ? 3.25 : 3.05;
+    const damage = kind === 'brute' ? 35 : 22;
 
+    const id = this.nextId++;
     const actor: ZombieActor = {
-      id: this.nextId++,
+      id,
       kind,
       group,
       pelvisGroup,
@@ -1484,7 +1529,7 @@ export class ZombieManager {
       damage,
       state: 'wander',
       stateTimer: 0,
-      windupDuration: 0.9,
+      windupDuration: kind === 'brute' ? 0.82 : 0.72,
       attackCooldown: 0,
       animPhase: Math.random() * 10,
       groanTimer: 2 + Math.random() * 6,
@@ -1493,6 +1538,8 @@ export class ZombieManager {
       hitReactDir: 0,
       alerted: false,
       isClimbing: false,
+      flankAngle: ((id % 5) - 2) * 0.36,
+      pounceCooldown: 0,
     };
     this.zombies.push(actor);
     return actor;
@@ -1512,6 +1559,10 @@ export class ZombieManager {
       [23.5, 0, 10],
       [-14, 0, -39],
       [14, 0, -40],
+      [-51.0, 0, -4.0],    // Agra Cantt Drop & Drive Forecourt
+      [-60.5, 0.25, 2.0],  // Station Portico Concourse Hall
+      [-71.5, 1.05, 14.0], // Platform 1 beside Blue ICF Coach S7
+      [-94.5, 1.05, 16.0], // Island Platform 2
     ];
     shamblerSpawns.forEach(([x, y, z]) => this.createZombieMesh('shambler', x, y, z));
 
@@ -1548,6 +1599,29 @@ export class ZombieManager {
     });
   }
 
+  public spawnWavePack(waveNumber: number, playerPos: THREE.Vector3): void {
+    const anchors: [number, number][] = [
+      [-18, 22],
+      [18, 22],
+      [-20, -14],
+      [20, -14],
+      [-10, -34],
+      [10, -34],
+    ];
+    const spawnCount = Math.min(5, 2 + waveNumber);
+    let spawned = 0;
+    for (let i = 0; i < anchors.length && spawned < spawnCount; i++) {
+      const [ax, az] = anchors[(i + waveNumber) % anchors.length];
+      if (Math.hypot(ax - playerPos.x, az - playerPos.z) < 9.5) continue;
+      const isElite = spawned % 3 === 0 || waveNumber >= 3;
+      const actor = isElite
+        ? this.createNightHunterMesh(ax, 0, az, spawned % 2 === 0)
+        : this.createZombieMesh('shambler', ax, 0, az);
+      actor.alerted = true;
+      spawned++;
+    }
+  }
+
   public resetAll(): void {
     this.nightSpawned = false;
     this.zombies.forEach((z) => {
@@ -1564,12 +1638,18 @@ export class ZombieManager {
     knockbackDir: THREE.Vector3,
     knockbackForce: number,
     stunDuration = 0.45,
+    forceInterrupt = false,
   ): boolean {
     if (z.state === 'dead') return false;
     z.hp -= amount;
     z.alerted = true;
-    z.vel.addScaledVector(knockbackDir, knockbackForce);
-    z.vel.y = Math.max(z.vel.y, 2.2);
+    const poisedInWindup = z.state === 'windup' && !forceInterrupt && stunDuration < 0.85;
+    if (!poisedInWindup) {
+      z.vel.addScaledVector(knockbackDir, knockbackForce);
+      z.vel.y = Math.max(z.vel.y, 2.2);
+    } else {
+      z.vel.addScaledVector(knockbackDir, knockbackForce * 0.25);
+    }
 
     // Directional snap-back hit reaction relative to zombie facing
     const fwdX = Math.sin(z.yaw);
@@ -1585,11 +1665,12 @@ export class ZombieManager {
       z.respawnTimer = z.kind === 'runner' ? 14 : 22;
       z.trailMeshes.forEach((tm) => (tm.visible = false));
       return true;
-    } else {
+    } else if (!poisedInWindup) {
       z.state = 'stunned';
       z.stateTimer = stunDuration;
       return false;
     }
+    return false;
   }
 
   public applyAwakeningShockwave(
@@ -1665,7 +1746,10 @@ export class ZombieManager {
     tajSafeZone: { minX: number; maxX: number; minZ: number; maxZ: number },
     onPlayerHit: (damage: number, attackerPos: THREE.Vector3) => void,
     onZombieGroan: (kind: ZombieKind) => void,
+    freezeAI = false,
   ): void {
+    if (freezeAI) return;
+
     if (isNight && !this.nightSpawned) {
       this.spawnNightRunners();
     }
@@ -1726,6 +1810,7 @@ export class ZombieManager {
       }
 
       z.attackCooldown = Math.max(0, z.attackCooldown - dt);
+      z.pounceCooldown = Math.max(0, z.pounceCooldown - dt);
       z.groanTimer -= dt;
       z.hitReactTimer = Math.max(0, z.hitReactTimer - dt);
       z.isClimbing = false;
@@ -1751,15 +1836,16 @@ export class ZombieManager {
       _toTarget.subVectors(targetPos, z.pos);
       const horizDist = Math.hypot(_toTarget.x, _toTarget.z);
       const detectRadius =
-        z.kind === 'runner' ? 40 : z.kind === 'dog' ? (isNight ? 28 : 20) : isNight ? 24 : z.alerted ? 22 : 14;
+        z.kind === 'runner' ? 44 : z.kind === 'dog' ? (isNight ? 30 : 22) : isNight ? 26 : z.alerted ? 24 : 16;
 
       if (z.groanTimer <= 0 && horizDist < 18) {
         z.groanTimer = z.kind === 'dog' ? 3.2 + Math.random() * 4.0 : 4.5 + Math.random() * 5.5;
         onZombieGroan(z.kind);
       }
 
-      // UV Safe House Repulsion
+      // UV Safe House Repulsion (skip for Sector 3 Taj Mausoleum territory defenders)
       const inUvZone =
+        !z.territoryId &&
         z.pos.z < tajSafeZone.maxZ + 1.8 &&
         z.pos.x > tajSafeZone.minX - 1.5 &&
         z.pos.x < tajSafeZone.maxX + 1.5;
@@ -1800,10 +1886,17 @@ export class ZombieManager {
       } else if (z.state === 'windup') {
         z.stateTimer -= dt;
         const targetYaw = Math.atan2(_toTarget.x, _toTarget.z);
-        z.yaw = lerpAngle(z.yaw, targetYaw, dt * (z.kind === 'dog' ? 12 : 8));
+        z.yaw = lerpAngle(z.yaw, targetYaw, dt * (z.kind === 'dog' ? 13 : 9.5));
+
+        // Forward lunge burst during final strike frame
+        const lungeProgress = 1 - Math.max(0, z.stateTimer / Math.max(0.01, z.windupDuration));
+        if (lungeProgress > 0.55 && horizDist > 1.2) {
+          const burst = z.kind === 'runner' ? 9.5 : z.kind === 'brute' ? 5.8 : 7.2;
+          z.vel.x = Math.sin(z.yaw) * burst;
+          z.vel.z = Math.cos(z.yaw) * burst;
+        }
 
         if (z.kind === 'dog') {
-          // Crouch low onto haunches, open fanged jaw wide before pouncing!
           z.pelvisGroup.position.y = (z.dogBaseHeight ?? 0.66) - 0.11;
           z.spineGroup.rotation.x = -0.22;
           z.headGroup.rotation.x = 0.28;
@@ -1813,26 +1906,25 @@ export class ZombieManager {
           z.rightShoulder.rotation.x = 0.45;
           if (z.dogJaw) z.dogJaw.rotation.x = 0.62;
         } else {
-          z.leftShoulder.rotation.x = THREE.MathUtils.lerp(z.leftShoulder.rotation.x, -2.3, dt * 14);
-          z.rightShoulder.rotation.x = THREE.MathUtils.lerp(z.rightShoulder.rotation.x, -2.5, dt * 14);
+          z.leftShoulder.rotation.x = THREE.MathUtils.lerp(z.leftShoulder.rotation.x, -2.35, dt * 15);
+          z.rightShoulder.rotation.x = THREE.MathUtils.lerp(z.rightShoulder.rotation.x, -2.55, dt * 15);
           z.leftElbow.rotation.x = -0.55;
           z.rightElbow.rotation.x = -0.55;
-          z.spineGroup.rotation.x = -0.05;
+          z.spineGroup.rotation.x = -0.08;
         }
 
         if (z.stateTimer <= 0) {
           if (z.kind === 'dog') {
-            // Forward canine bite pounce lunge!
-            z.vel.x = Math.sin(z.yaw) * 9.6;
-            z.vel.z = Math.cos(z.yaw) * 9.6;
-            z.vel.y = 3.2;
+            z.vel.x = Math.sin(z.yaw) * 10.6;
+            z.vel.z = Math.cos(z.yaw) * 10.6;
+            z.vel.y = 3.4;
           }
-          if (!isLured && horizDist < (z.kind === 'brute' ? 3.1 : 2.65) && Math.abs(playerPos.y - z.pos.y) < 2.2) {
+          if (!isLured && horizDist < (z.kind === 'brute' ? 3.25 : 2.8) && Math.abs(playerPos.y - z.pos.y) < 2.2) {
             onPlayerHit(z.damage, z.pos);
           }
           z.state = 'recover';
-          z.stateTimer = 0.45;
-          z.attackCooldown = z.kind === 'runner' ? 0.78 : z.kind === 'dog' ? 0.95 : 1.3;
+          z.stateTimer = 0.42;
+          z.attackCooldown = z.kind === 'runner' ? 0.68 : z.kind === 'dog' ? 0.85 : 1.15;
         }
       } else if (z.state === 'recover') {
         z.stateTimer -= dt;
@@ -1853,28 +1945,33 @@ export class ZombieManager {
         z.state = shouldChase ? 'chase' : 'wander';
 
         if (z.state === 'chase') {
-          const desiredYaw = Math.atan2(_toTarget.x, _toTarget.z);
-          z.yaw = lerpAngle(z.yaw, desiredYaw, dt * (z.kind === 'dog' ? 9.5 : 6.5));
+          // Subtle pack flank offset so multiple zombies surround instead of marching single-file
+          const flankBlend = horizDist > 2.8 && horizDist < 10.0 ? Math.min(1, (horizDist - 2.8) / 4.5) : 0;
+          const desiredYaw = Math.atan2(_toTarget.x, _toTarget.z) + z.flankAngle * flankBlend;
+          z.yaw = lerpAngle(z.yaw, desiredYaw, dt * (z.kind === 'dog' ? 10 : 7.2));
 
-          const stopDist = isLured ? 1.8 : z.kind === 'brute' ? 2.2 : z.kind === 'dog' ? 2.15 : 1.9;
-          if (horizDist > stopDist) {
-            const chaseSpeed = z.speed * (isNight && z.kind !== 'runner' ? 1.25 : 1.0);
+          const lungeTriggerDist = isLured ? 1.8 : 3.2;
+          if (horizDist > lungeTriggerDist) {
+            const chaseSpeed = z.speed * (isNight && z.kind !== 'runner' ? 1.22 : 1.0);
             z.vel.x = Math.sin(z.yaw) * chaseSpeed;
             z.vel.z = Math.cos(z.yaw) * chaseSpeed;
 
+            // Elite Split-Jaw / Volatile Runner leaping pounce toward stationary/nearby player
             if (
               z.kind === 'runner' &&
-              z.pos.y <= 0.12 &&
-              ((horizDist > 4.2 && horizDist < 7.2 && Math.random() < dt * 1.4) ||
+              z.pos.y <= 0.14 &&
+              ((z.isElite && z.pounceCooldown <= 0 && horizDist > 4.0 && horizDist < 8.0) ||
+                (horizDist > 4.5 && horizDist < 7.5 && Math.random() < dt * 1.4) ||
                 playerPos.y > z.pos.y + 1.8)
             ) {
-              if (horizDist < 9.5) {
-                z.vel.y = 7.6;
-              }
+              z.vel.y = z.isElite ? 8.2 : 7.4;
+              z.vel.x = Math.sin(z.yaw) * (z.isElite ? 12.2 : 10.0);
+              z.vel.z = Math.cos(z.yaw) * (z.isElite ? 12.2 : 10.0);
+              z.pounceCooldown = 3.0;
             }
           } else {
-            z.vel.x *= 0.7;
-            z.vel.z *= 0.7;
+            z.vel.x *= 0.72;
+            z.vel.z *= 0.72;
             if (!isLured && z.attackCooldown <= 0 && Math.abs(playerPos.y - z.pos.y) < 2.2) {
               z.state = 'windup';
               z.stateTimer = z.windupDuration;
@@ -1888,8 +1985,8 @@ export class ZombieManager {
           } else {
             z.yaw += Math.sin(z.animPhase * 0.5) * dt * 0.7;
           }
-          z.vel.x = Math.sin(z.yaw) * (z.kind === 'dog' ? 1.35 : 0.85);
-          z.vel.z = Math.cos(z.yaw) * (z.kind === 'dog' ? 1.35 : 0.85);
+          z.vel.x = Math.sin(z.yaw) * (z.kind === 'dog' ? 1.45 : 1.05);
+          z.vel.z = Math.cos(z.yaw) * (z.kind === 'dog' ? 1.45 : 1.05);
         }
       }
 
@@ -1903,8 +2000,9 @@ export class ZombieManager {
         z.vel.z *= Math.exp(-5 * dt);
       }
 
-      if (z.pos.y <= 0) {
-        z.pos.y = 0;
+      const supportY = this.sampleZombieGroundY(z.pos.x, z.pos.z, z.pos.y, colliders);
+      if (z.pos.y <= supportY) {
+        z.pos.y = supportY;
         z.vel.y = 0;
       }
 
@@ -2071,7 +2169,7 @@ export class ZombieManager {
       const radius = z.kind === 'brute' ? 0.65 : z.kind === 'runner' ? 0.54 : z.kind === 'dog' ? 0.42 : 0.45;
       for (let c = 0; c < colliders.length; c++) {
         const b = colliders[c];
-        if (!b.blocksZombies) continue;
+        if (b.disabled || !b.blocksZombies || b.ramp) continue;
         if (z.pos.y >= b.maxY - 0.1 || z.pos.y + 1.8 < b.minY) continue;
 
         const closestX = Math.max(b.minX, Math.min(z.pos.x, b.maxX));
@@ -2093,12 +2191,33 @@ export class ZombieManager {
         }
       }
 
-      z.pos.x = THREE.MathUtils.clamp(z.pos.x, -43, 43);
-      z.pos.z = THREE.MathUtils.clamp(z.pos.z, -53, 49);
+      z.pos.x = THREE.MathUtils.clamp(z.pos.x, -105, 55);
+      z.pos.z = THREE.MathUtils.clamp(z.pos.z, -104, 49);
 
       z.group.position.copy(z.pos);
       z.group.rotation.y = z.yaw;
     }
+  }
+
+  private sampleZombieGroundY(x: number, z: number, curY: number, colliders: BoxCollider[]): number {
+    let groundY = 0;
+    for (let i = 0; i < colliders.length; i++) {
+      const b = colliders[i];
+      if (b.disabled) continue;
+      if (x >= b.minX - 0.15 && x <= b.maxX + 0.15 && z >= b.minZ - 0.15 && z <= b.maxZ + 0.15) {
+        let topY = b.maxY;
+        if (b.ramp) {
+          const coord = b.ramp.axis === 'x' ? x : z;
+          const span = b.ramp.highCoord - b.ramp.lowCoord;
+          const t = span !== 0 ? THREE.MathUtils.clamp((coord - b.ramp.lowCoord) / span, 0, 1) : 1;
+          topY = THREE.MathUtils.lerp(b.ramp.lowY, b.ramp.highY, t);
+        }
+        if (curY >= topY - 0.48 && topY > groundY) {
+          groundY = topY;
+        }
+      }
+    }
+    return groundY;
   }
 
   public dispose(): void {

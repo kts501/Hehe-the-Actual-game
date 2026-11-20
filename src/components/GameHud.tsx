@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import {
   AlertTriangle,
   ArrowLeft,
-  DoorOpen,
+  BatteryCharging,
   Flag,
   Heart,
   Keyboard,
@@ -57,6 +57,7 @@ interface GameHudProps {
   radioSending: boolean;
   onStart: () => void;
   onRestart: () => void;
+  onRespawnSafeZone: () => void;
   onLockPointer: () => void;
   onSkipTime: () => void;
   onToggleMute: () => void;
@@ -92,6 +93,7 @@ export const GameHud: React.FC<GameHudProps> = ({
   radioSending,
   onStart,
   onRestart,
+  onRespawnSafeZone,
   onLockPointer,
   onSkipTime,
   onToggleMute,
@@ -155,7 +157,6 @@ export const GameHud: React.FC<GameHudProps> = ({
   const nextCrate = hud.crateStatuses.find((c) => !c.collected);
 
   const hudTextShadow = '[text-shadow:0_2px_6px_rgba(0,0,0,0.9)]';
-  const hudIconShadow = 'drop-shadow-[0_2px_5px_rgba(0,0,0,0.92)]';
   const awakeningCinematic = Boolean(hud.awakening?.cinematicActive);
   const hudDim = hud.awakening?.hudDimOpacity ?? (awakeningCinematic ? 0.15 : 1);
   const effectiveHudOpacity = Math.min(hud.hudOpacity ?? 1, hudDim);
@@ -197,6 +198,39 @@ export const GameHud: React.FC<GameHudProps> = ({
             opacity: hud.awakening?.vignetteOpacity ?? 0,
             boxShadow: 'inset 0 0 90px rgba(255, 60, 20, 0.45)',
           }}
+          aria-hidden="true"
+        />
+      )}
+
+      {/* Bat Face-Drive Finisher Screen-Edge Red Gore Vignette */}
+      {hud.phase === 'playing' && (hud.finisherGoreOpacity ?? 0) > 0.01 && (
+        <div
+          className="pointer-events-none fixed inset-0"
+          style={{
+            opacity: hud.finisherGoreOpacity ?? 0,
+            boxShadow: 'inset 0 0 85px rgba(150, 0, 0, 0.55)',
+          }}
+          aria-hidden="true"
+        />
+      )}
+
+      {/* Night Runner <3% HP Finisher Struggle Crimson Vignette & Collapse Blackout */}
+      {(hud.finisherVignetteOpacity ?? 0) > 0.01 && (
+        <div
+          className="pointer-events-none fixed inset-0 z-40"
+          style={{
+            opacity: hud.finisherVignetteOpacity ?? 0,
+            boxShadow: 'inset 0 0 130px rgba(220, 20, 10, 0.9)',
+            background:
+              'radial-gradient(circle at center, transparent 42%, rgba(160, 0, 0, 0.42) 100%)',
+          }}
+          aria-hidden="true"
+        />
+      )}
+      {(hud.finisherBlackoutOpacity ?? 0) > 0.005 && (
+        <div
+          className="pointer-events-none fixed inset-0 z-50 bg-black"
+          style={{ opacity: hud.finisherBlackoutOpacity ?? 0 }}
           aria-hidden="true"
         />
       )}
@@ -360,6 +394,73 @@ export const GameHud: React.FC<GameHudProps> = ({
         </div>
       )}
 
+      {/* Persistent Viewport-Edge Blood Spatter (Finishers & High-Combo Strikes) */}
+      {hud.phase === 'playing' &&
+        hud.screenBloodSpatters &&
+        hud.screenBloodSpatters.length > 0 &&
+        hud.screenBloodSpatters.map((s) => (
+          <div
+            key={s.id}
+            className="pointer-events-none fixed z-10"
+            style={{
+              left: `${s.xPct}%`,
+              top: `${s.yPct}%`,
+              width: `${s.sizePx}px`,
+              height: `${s.sizePx}px`,
+              opacity: s.opacity,
+              transform: `translate3d(-50%, calc(-50% + ${s.dripPx}px), 0) rotate(${s.rotDeg}deg) scale(${s.scaleX}, ${s.scaleY})`,
+            }}
+            aria-hidden="true"
+          >
+            <svg viewBox="0 0 100 100" className="h-full w-full drop-shadow-[0_2px_6px_rgba(60,0,0,0.65)]">
+              {s.variant === 0 && (
+                <>
+                  <path
+                    d="M46 18 C58 14 70 25 66 38 C78 44 76 62 63 65 C60 80 42 84 36 70 C22 72 18 55 28 46 C22 32 34 20 46 18 Z"
+                    fill="#7a090d"
+                  />
+                  <path
+                    d="M47 26 C55 24 61 32 58 41 C65 46 62 58 53 59 C50 69 40 70 37 60 C29 59 29 48 35 43 C32 34 39 27 47 26 Z"
+                    fill="#9e0e14"
+                  />
+                  <circle cx="80" cy="24" r="5.5" fill="#7a090d" />
+                  <circle cx="17" cy="72" r="4" fill="#8b0a10" />
+                  <circle cx="74" cy="78" r="3.2" fill="#7a090d" />
+                  <ellipse cx="44" cy="41" rx="4.5" ry="2.2" fill="rgba(255,180,180,0.22)" />
+                </>
+              )}
+              {s.variant === 1 && (
+                <>
+                  <path
+                    d="M50 14 C61 16 64 31 58 41 C69 47 68 68 56 76 C53 88 45 92 43 79 C32 76 26 58 34 45 C29 31 39 13 50 14 Z"
+                    fill="#6b060a"
+                  />
+                  <path
+                    d="M50 24 C57 26 58 37 53 45 C59 52 57 67 49 71 C43 68 38 56 42 46 C39 36 44 23 50 24 Z"
+                    fill="#990d12"
+                  />
+                  <circle cx="23" cy="26" r="4.8" fill="#7a090d" />
+                  <circle cx="78" cy="52" r="4.2" fill="#7a090d" />
+                  <ellipse cx="48" cy="38" rx="3.4" ry="2" fill="rgba(255,190,190,0.24)" />
+                </>
+              )}
+              {s.variant === 2 && (
+                <>
+                  <path
+                    d="M38 22 C52 16 68 24 67 39 C79 47 72 67 57 67 C50 79 31 76 30 61 C18 55 21 36 33 34 C32 27 34 24 38 22 Z"
+                    fill="#7f0a0e"
+                  />
+                  <circle cx="20" cy="20" r="3.5" fill="#7f0a0e" />
+                  <circle cx="82" cy="30" r="6" fill="#6b060a" />
+                  <circle cx="70" cy="82" r="4.5" fill="#8b0a10" />
+                  <circle cx="26" cy="80" r="3" fill="#7f0a0e" />
+                  <ellipse cx="49" cy="44" rx="5" ry="2.5" fill="rgba(255,180,180,0.2)" />
+                </>
+              )}
+            </svg>
+          </div>
+        ))}
+
       {/* Subtle Red Curved Directional Damage Indicators for Side/Rear Hits */}
       {hud.phase === 'playing' &&
         hud.directionalHits?.map((hit) => {
@@ -466,20 +567,90 @@ export const GameHud: React.FC<GameHudProps> = ({
           />
         )}
 
-      {/* Center Minimal Reticle during active gameplay (hidden during intro, cutscene & weapon wheel) */}
+      {/* Dynamic Center Dot + Spread + Hit-Marker Reticle */}
+      {hud.phase === 'playing' &&
+        !hud.radioOpen &&
+        !hud.isIntroPlaying &&
+        !awakeningCinematic &&
+        !hud.weaponWheelOpen &&
+        effectiveHudOpacity > 0.1 && (() => {
+          const spreadGap = 5 + (hud.moveSpread ?? 0) * 9;
+          const hitActive = (hud.hitMarkerFlash ?? 0) > 0.02;
+          return (
+            <div className="pointer-events-none fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2">
+              <div
+                className={`h-1.5 w-1.5 rounded-full transition-colors duration-75 ${
+                  hitActive ? 'bg-red-500 shadow-[0_0_8px_rgba(239,68,68,0.95)]' : 'bg-white/95 ring-1 ring-black/75'
+                }`}
+              />
+              {/* 4 subtle dynamic outer ticks expanding with speed/swing */}
+              <div
+                className={`absolute left-1/2 h-1.5 w-px -translate-x-1/2 ${hitActive ? 'bg-red-400' : 'bg-white/60'}`}
+                style={{ bottom: `${spreadGap}px` }}
+              />
+              <div
+                className={`absolute left-1/2 h-1.5 w-px -translate-x-1/2 ${hitActive ? 'bg-red-400' : 'bg-white/60'}`}
+                style={{ top: `${spreadGap}px` }}
+              />
+              <div
+                className={`absolute top-1/2 h-px w-1.5 -translate-y-1/2 ${hitActive ? 'bg-red-400' : 'bg-white/60'}`}
+                style={{ right: `${spreadGap}px` }}
+              />
+              <div
+                className={`absolute top-1/2 h-px w-1.5 -translate-y-1/2 ${hitActive ? 'bg-red-400' : 'bg-white/60'}`}
+                style={{ left: `${spreadGap}px` }}
+              />
+              {hitActive && (
+                <div
+                  className="absolute left-1/2 top-1/2 h-5 w-5 -translate-x-1/2 -translate-y-1/2 rotate-45"
+                  style={{ opacity: Math.min(1, (hud.hitMarkerFlash ?? 0) * 4.5) }}
+                >
+                  <span className="absolute left-1/2 top-0 h-1.5 w-[2px] -translate-x-1/2 bg-red-500" />
+                  <span className="absolute left-1/2 bottom-0 h-1.5 w-[2px] -translate-x-1/2 bg-red-500" />
+                  <span className="absolute top-1/2 left-0 h-[2px] w-1.5 -translate-y-1/2 bg-red-500" />
+                  <span className="absolute top-1/2 right-0 h-[2px] w-1.5 -translate-y-1/2 bg-red-500" />
+                </div>
+              )}
+            </div>
+          );
+        })()}
+
+      {/* Lower-Center Contextual Execution / Head-Grab Prompts */}
       {hud.phase === 'playing' &&
         !hud.radioOpen &&
         !hud.isIntroPlaying &&
         !awakeningCinematic &&
         !hud.weaponWheelOpen &&
         effectiveHudOpacity > 0.1 && (
-          <div className="pointer-events-none fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2">
-            <div className="h-1.5 w-1.5 rounded-full bg-white/90 ring-2 ring-black/65" />
-          </div>
+          <>
+            {hud.isGrabbingEnemy && !hud.isExecutingFinisher && (
+              <div className="pointer-events-none fixed left-1/2 top-1/2 mt-9 -translate-x-1/2 flex items-center gap-2">
+                <div className="rounded-md border border-red-400/80 bg-red-950/90 px-4 py-1.5 font-display text-xs font-bold tracking-widest text-white shadow-[0_0_16px_rgba(220,38,38,0.65)]">
+                  [LMB] EXECUTE
+                </div>
+                <div className="rounded-md border border-white/20 bg-zinc-950/85 px-3 py-1.5 font-display text-[11px] font-semibold tracking-wider text-zinc-200">
+                  [MMB] SHOVE
+                </div>
+              </div>
+            )}
+            {!hud.isGrabbingEnemy && !hud.isExecutingFinisher && hud.canGrabEnemy && (
+              <div className="pointer-events-none fixed left-1/2 top-1/2 mt-9 -translate-x-1/2">
+                {hud.grabTargetHealthy ? (
+                  <div className="rounded-md border border-amber-400/45 bg-zinc-950/88 px-3.5 py-1 font-display text-[11px] font-semibold tracking-wider text-amber-300 shadow-lg">
+                    WEAKEN &lt;65% HP OR STAGGER TO GRAB
+                  </div>
+                ) : (
+                  <div className="rounded-md border border-red-400/65 bg-zinc-950/90 px-4 py-1.5 font-display text-xs font-bold tracking-widest text-red-200 shadow-[0_0_12px_rgba(220,38,38,0.45)]">
+                    [MMB] GRAB STAGGERED HEAD
+                  </div>
+                )}
+              </div>
+            )}
+          </>
         )}
 
       {/* ===================================================================== */}
-      {/* TOP HUD ROW: Floating Dying Light-style Bars, Combo & Objective Info  */}
+      {/* TOP HUD ROW: SILAS WALKER Card, Compass, & Outbreak Watch Objective   */}
       {/* ===================================================================== */}
       {hud.phase === 'playing' && (
         <div
@@ -488,97 +659,144 @@ export const GameHud: React.FC<GameHudProps> = ({
           }`}
           style={{ opacity: effectiveHudOpacity }}
         >
-          {/* Top-Left: Floating White Health Bar & Golden-Yellow Stamina Bar */}
-          <div className="flex flex-col gap-2.5">
-            <div className="flex items-center gap-3">
-              <div className="flex h-8 w-8 items-center justify-center rounded-full border border-white/60 bg-black/30 shadow-[0_2px_6px_rgba(0,0,0,0.7)]">
-                <Heart className={`h-5 w-5 shrink-0 fill-white text-white ${hudIconShadow}`} />
-              </div>
-              <div className="h-3 w-56 overflow-hidden rounded-xs bg-black/45 ring-1 ring-white/20 shadow-[0_2px_6px_rgba(0,0,0,0.75)]">
+          {/* Top-Left: SILAS WALKER Compact Tactical Card */}
+          <div
+            className={`w-68 rounded-lg border bg-zinc-950/82 px-3.5 py-2.5 shadow-2xl transition-transform duration-75 ${
+              hud.lowStaminaPulse
+                ? 'border-red-500/80 ring-1 ring-red-500/60 translate-x-[2px]'
+                : 'border-white/12'
+            }`}
+          >
+            <div className="flex items-center justify-between">
+              <span className="font-display text-xs font-bold tracking-[0.14em] text-zinc-100">
+                SILAS WALKER
+              </span>
+              <span className="font-mono-num text-xs font-semibold text-zinc-300">
+                {hud.health}/{hud.maxHealth} HP
+              </span>
+            </div>
+
+            {/* Crimson HP Bar */}
+            <div className="mt-1.5 flex items-center gap-2">
+              <Heart className="h-3.5 w-3.5 shrink-0 fill-red-500 text-red-400" />
+              <div className="h-2.5 w-full overflow-hidden rounded-xs bg-zinc-900 ring-1 ring-white/15">
                 <div
                   className={`h-full transition-[width] duration-100 ${
-                    healthPct > 30 ? 'bg-white' : 'bg-red-400'
+                    healthPct > 30
+                      ? 'bg-gradient-to-r from-red-700 to-red-500'
+                      : 'bg-red-400'
                   }`}
                   style={{ width: `${healthPct}%` }}
                 />
               </div>
             </div>
 
-            <div className="flex items-center gap-3 pl-9">
-              <div className="flex h-6 w-6 items-center justify-center rounded-full border border-white/40 bg-black/30 shadow-[0_2px_6px_rgba(0,0,0,0.7)]">
-                <RunningPersonIcon className={`h-4 w-4 shrink-0 text-white ${hudIconShadow}`} />
-              </div>
-              <div className="h-2.5 w-48 overflow-hidden rounded-xs bg-black/45 ring-1 ring-white/15 shadow-[0_2px_6px_rgba(0,0,0,0.75)]">
+            {/* Amber Stamina Bar + EXHAUSTED / LOW STAMINA Alert */}
+            <div className="mt-2 flex items-center gap-2">
+              <RunningPersonIcon
+                className={`h-3.5 w-3.5 shrink-0 ${
+                  hud.exhausted || hud.lowStaminaPulse ? 'text-red-400' : 'text-amber-300'
+                }`}
+              />
+              <div
+                className={`h-2 w-full overflow-hidden rounded-xs bg-zinc-900 ring-1 ${
+                  hud.lowStaminaPulse ? 'ring-red-400/80' : 'ring-white/10'
+                }`}
+              >
                 <div
-                  className="h-full bg-amber-400 transition-[width] duration-75"
+                  className={`h-full transition-[width] duration-75 ${
+                    hud.exhausted || hud.lowStaminaPulse ? 'bg-red-500' : 'bg-amber-400'
+                  }`}
                   style={{ width: `${staminaPct}%` }}
                 />
               </div>
+              {hud.exhausted && (
+                <span className="font-mono-num shrink-0 text-[10px] font-bold tracking-wider text-red-400">
+                  EXHAUSTED
+                </span>
+              )}
             </div>
 
-            {/* Awakening / Pumped-Up Meter directly beneath Stamina Bar */}
+            {/* Flashlight Battery Bar */}
+            <div className="mt-2 flex items-center gap-2">
+              <BatteryCharging
+                className={`h-3.5 w-3.5 shrink-0 ${
+                  (hud.flashlightBattery ?? 100) <= 20
+                    ? 'text-red-400'
+                    : hud.flashlightOn
+                      ? 'text-cyan-300'
+                      : 'text-cyan-400/75'
+                }`}
+              />
+              <div className="h-1.5 w-full overflow-hidden rounded-xs bg-zinc-900 ring-1 ring-white/10">
+                <div
+                  className={`h-full transition-[width] duration-100 ${
+                    (hud.flashlightBattery ?? 100) <= 20 ? 'bg-red-500' : 'bg-cyan-400'
+                  }`}
+                  style={{ width: `${Math.max(0, Math.min(100, hud.flashlightBattery ?? 100))}%` }}
+                />
+              </div>
+              <span className="font-mono-num shrink-0 text-[10px] text-zinc-400">
+                {Math.round(hud.flashlightBattery ?? 100)}%
+              </span>
+            </div>
+
+            {/* Awakening Gauge */}
             {(() => {
               const awk = hud.awakening;
               const chargePct = Math.max(0, Math.min(100, awk?.charge ?? 0));
               const isReady = Boolean(awk?.isReady);
               const isActive = Boolean(awk?.isActive);
               return (
-                <div className="flex items-center gap-3 pl-9">
-                  <div
-                    className={`flex h-6 w-6 items-center justify-center rounded-full border shadow-[0_2px_6px_rgba(0,0,0,0.75)] transition-colors ${
+                <div className="mt-2 flex items-center gap-2">
+                  <AwakeningFlameIcon
+                    className={`h-3.5 w-3.5 shrink-0 ${
                       isActive
-                        ? 'border-amber-300 bg-red-600/80 text-amber-200 shadow-[0_0_12px_rgba(255,90,20,0.9)]'
+                        ? 'text-amber-300'
                         : isReady
-                          ? 'border-[#FFD700] bg-amber-500/35 text-[#FFD700] shadow-[0_0_12px_rgba(255,180,0,0.85)]'
-                          : 'border-orange-300/45 bg-black/40 text-amber-400'
+                          ? 'text-[#FFD700]'
+                          : 'text-orange-400/80'
+                    }`}
+                  />
+                  <div
+                    className={`h-2 w-full overflow-hidden rounded-full bg-zinc-900 ${
+                      isReady
+                        ? 'awakening-ready-pill border border-[#FFD700]'
+                        : isActive
+                          ? 'border border-amber-300/90'
+                          : 'border border-white/12'
                     }`}
                   >
-                    <AwakeningFlameIcon className={`h-3.5 w-3.5 shrink-0 ${hudIconShadow}`} />
-                  </div>
-                  <div className="flex items-center gap-2.5">
                     <div
-                      className={`h-[10px] w-[220px] overflow-hidden rounded-full bg-[rgba(15,17,22,0.78)] ${
-                        isReady
-                          ? 'awakening-ready-pill border-[1.5px] border-[#FFD700]'
-                          : isActive
-                            ? 'border-[1.5px] border-amber-300/90 shadow-[0_0_14px_rgba(255,90,20,0.75)]'
-                            : 'border-[1.5px] border-[rgba(255,255,255,0.18)]'
+                      className={`h-full rounded-full ${
+                        isActive
+                          ? 'awakening-plasma-bar transition-[width] duration-75 ease-linear'
+                          : 'transition-[width] duration-150 ease-out'
                       }`}
-                    >
-                      <div
-                        className={`h-full rounded-full ${
-                          isActive
-                            ? 'awakening-plasma-bar transition-[width] duration-75 ease-linear'
-                            : 'transition-[width] duration-150 ease-out'
-                        }`}
-                        style={{
-                          width: `${chargePct}%`,
-                          ...(isActive
-                            ? {}
-                            : {
-                                background:
-                                  'linear-gradient(90deg, #D92626 0%, #FF6B1A 60%, #FFC400 100%)',
-                              }),
-                        }}
-                      />
-                    </div>
-                    {isActive ? (
-                      <span
-                        className={`font-display text-xs font-black italic tracking-wider text-amber-300 uppercase ${hudTextShadow}`}
-                      >
-                        PUMPED UP{' '}
-                        <span className="font-mono-num text-[11px] not-italic text-white/90">
-                          {(awk?.remainingSeconds ?? 0).toFixed(1)}s
-                        </span>
-                      </span>
-                    ) : isReady ? (
-                      <span
-                        className={`font-display text-[11px] font-bold tracking-wider text-[#FFD700] uppercase animate-pulse ${hudTextShadow}`}
-                      >
-                        READY [G]
-                      </span>
-                    ) : null}
+                      style={{
+                        width: `${chargePct}%`,
+                        ...(isActive
+                          ? {}
+                          : {
+                              background:
+                                'linear-gradient(90deg, #D92626 0%, #FF6B1A 60%, #FFC400 100%)',
+                            }),
+                      }}
+                    />
                   </div>
+                  {isActive ? (
+                    <span className="font-mono-num shrink-0 text-[10px] font-bold text-amber-300">
+                      {(awk?.remainingSeconds ?? 0).toFixed(1)}s
+                    </span>
+                  ) : isReady ? (
+                    <span className="font-display shrink-0 text-[10px] font-bold tracking-wider text-[#FFD700]">
+                      [G] READY
+                    </span>
+                  ) : (
+                    <span className="font-mono-num shrink-0 text-[10px] text-zinc-400">
+                      {Math.round(chargePct)}%
+                    </span>
+                  )}
                 </div>
               );
             })()}
@@ -697,7 +915,71 @@ export const GameHud: React.FC<GameHudProps> = ({
               </div>
             )}
 
-            {!hud.pointerLocked && !hud.radioOpen && !hud.weaponWheelOpen && !awakeningCinematic && (
+            {hud.territoryLiberationToast && (
+              <div className="rounded-lg border border-sky-400/70 bg-zinc-950/92 px-6 py-2.5 text-center shadow-[0_0_24px_rgba(56,189,248,0.45)]">
+                <div className="font-display text-sm font-bold tracking-[0.18em] text-sky-300 uppercase">
+                  SECTOR LIBERATED: {hud.territoryLiberationToast}
+                </div>
+                <div className="mt-0.5 text-[11px] font-medium tracking-wider text-zinc-300">
+                  UV Safe Zone &amp; Allied Patrols Active (+6 HP/s · +10% Battery/s)
+                </div>
+              </div>
+            )}
+
+            {hud.squadCommandToast && (
+              <div className="rounded-md border border-cyan-400/70 bg-zinc-950/92 px-5 py-1.5 text-center font-display text-xs font-bold tracking-[0.16em] text-cyan-300 uppercase shadow-[0_0_18px_rgba(0,216,255,0.35)]">
+                {hud.squadCommandToast}
+              </div>
+            )}
+
+            {hud.allyDownAlert && (
+              <div className="rounded-md border border-red-500/75 bg-red-950/92 px-5 py-1.5 text-center font-display text-xs font-bold tracking-[0.16em] text-red-200 uppercase shadow-[0_0_18px_rgba(239,68,68,0.4)]">
+                {hud.allyDownAlert}
+              </div>
+            )}
+
+            {hud.activeTerritory && !hud.territoryLiberationToast && (
+              <div
+                className={`flex w-76 flex-col items-center rounded-lg border bg-zinc-950/88 px-4 py-2 shadow-xl ${
+                  hud.activeTerritory.captured
+                    ? 'border-sky-400/50'
+                    : hud.activeTerritory.isLocked
+                      ? 'border-red-500/55'
+                      : 'border-sky-400/70'
+                }`}
+              >
+                <div className="flex w-full items-center justify-between text-[11px] font-bold tracking-[0.14em] uppercase">
+                  <span className={hud.activeTerritory.captured ? 'text-sky-300' : 'text-zinc-100'}>
+                    {hud.activeTerritory.name}
+                  </span>
+                  <span className="font-mono-num text-zinc-300">
+                    {hud.activeTerritory.captured
+                      ? 'SAFE ZONE'
+                      : hud.activeTerritory.isLocked
+                        ? 'LOCKED'
+                        : `${hud.activeTerritory.progress}%`}
+                  </span>
+                </div>
+                {hud.activeTerritory.captured ? (
+                  <div className="mt-1 text-[10px] font-semibold tracking-wider text-sky-300 uppercase">
+                    UV Barrier Active · Recharging HP &amp; Battery
+                  </div>
+                ) : hud.activeTerritory.isLocked ? (
+                  <div className="mt-1 text-[11px] font-bold tracking-wider text-red-400 uppercase">
+                    ELIMINATE ZONE DEFENDERS: {hud.activeTerritory.aliveDefenders} REMAINING
+                  </div>
+                ) : (
+                  <div className="mt-1.5 h-2 w-full overflow-hidden rounded-xs bg-zinc-900 ring-1 ring-white/15">
+                    <div
+                      className="h-full bg-gradient-to-r from-sky-500 to-cyan-300 transition-[width] duration-75"
+                      style={{ width: `${hud.activeTerritory.progress}%` }}
+                    />
+                  </div>
+                )}
+              </div>
+            )}
+
+            {!hud.pointerLocked && !hud.radioOpen && !hud.weaponWheelOpen && !awakeningCinematic && !hud.isFinisherActive && (
               <button
                 type="button"
                 onClick={onLockPointer}
@@ -708,50 +990,57 @@ export const GameHud: React.FC<GameHudProps> = ({
             )}
           </div>
 
-          {/* Top-Right: Floating White Time, Antizin Supplies & Taj UV Gate Distance */}
-          <div className="pointer-events-auto flex flex-col items-end gap-2 text-white">
-            <div className={`flex items-center gap-3 ${hudTextShadow}`}>
-              <span className="font-display text-xl font-bold tracking-tight font-mono-num">
-                {hud.formattedTime} <span className="font-normal opacity-85">|</span> {hud.timeLabel}
+          {/* Top-Right: Outbreak Watch, Wave & Kills / Extraction Objective */}
+          <div className="pointer-events-auto flex flex-col items-end gap-1.5 rounded-lg border border-white/12 bg-zinc-950/82 px-4 py-2.5 text-white shadow-2xl">
+            <div className="flex items-center gap-3">
+              <span className="font-mono-num text-sm font-bold tracking-wide text-amber-200">
+                {hud.formattedTime}
               </span>
               <button
                 type="button"
                 onClick={onSkipTime}
                 title="Advance time of day (Shortcut: T)"
-                className={`inline-flex items-center gap-1 text-xs font-semibold text-white/90 hover:text-amber-300 transition-colors cursor-pointer ${hudTextShadow}`}
+                className="inline-flex items-center gap-1 text-xs font-semibold text-zinc-300 hover:text-amber-300 transition-colors cursor-pointer"
               >
-                <SkipForward className={`h-4 w-4 ${hudIconShadow}`} />
+                <SkipForward className="h-3.5 w-3.5" />
                 [T]
               </button>
               <button
                 type="button"
                 onClick={onToggleMute}
                 aria-label={muted ? 'Unmute audio' : 'Mute audio'}
-                className="text-white/90 hover:text-amber-300 transition-colors cursor-pointer"
+                className="text-zinc-300 hover:text-amber-300 transition-colors cursor-pointer"
               >
-                {muted ? (
-                  <VolumeX className={`h-4 w-4 ${hudIconShadow}`} />
-                ) : (
-                  <Volume2 className={`h-4 w-4 ${hudIconShadow}`} />
-                )}
+                {muted ? <VolumeX className="h-3.5 w-3.5" /> : <Volume2 className="h-3.5 w-3.5" />}
               </button>
             </div>
 
-            <div className={`flex items-center gap-2 text-lg font-semibold ${hudTextShadow}`}>
-              <span className="font-mono-num">
-                Antizin Supplies: [{hud.cratesCollected} / {hud.totalCrates}]
+            <div className="flex items-center gap-2 text-xs text-zinc-300">
+              <span className="font-display font-semibold tracking-wider text-amber-400">
+                WAVE {hud.waveNumber ?? 1}
               </span>
-              <Package className={`h-5 w-5 text-white ${hudIconShadow}`} />
+              <span aria-hidden="true">·</span>
+              <span className="font-mono-num font-bold text-white">
+                {hud.killCount} / {hud.killsTarget ?? 15} INFECTED
+              </span>
             </div>
 
-            <div className={`flex items-center gap-2 text-lg font-semibold ${hudTextShadow}`}>
-              <span className="font-mono-num">Taj Mahal UV Gate: {hud.tajDistance}m</span>
-              <DoorOpen className={`h-5 w-5 text-white ${hudIconShadow}`} />
-            </div>
-
-            {hud.cratesCollected < hud.totalCrates && nextCrate && (
-              <div className={`text-xs font-medium text-white/85 ${hudTextShadow}`}>
-                Nearest Crate: {nextCrate.locationHint} ({nextCrate.distance}m)
+            {hud.extractionReady ? (
+              <div className="flex items-center gap-1.5 font-display text-xs font-bold tracking-wider text-amber-300">
+                <Flag className="h-3.5 w-3.5 text-amber-400" />
+                <span className="font-mono-num">
+                  EXTRACTION FLARE ACTIVE · {hud.extractionDistance ?? hud.tajDistance}m
+                </span>
+              </div>
+            ) : (
+              <div className="flex items-center gap-2 text-[11px] text-zinc-400">
+                <span className="font-mono-num">
+                  Crates {hud.cratesCollected}/{hud.totalCrates}
+                </span>
+                <span aria-hidden="true">·</span>
+                <span className="font-mono-num">
+                  {nextCrate ? `${nextCrate.locationHint} (${nextCrate.distance}m)` : `UV Gate ${hud.tajDistance}m`}
+                </span>
               </div>
             )}
           </div>
@@ -783,13 +1072,13 @@ export const GameHud: React.FC<GameHudProps> = ({
                   hud.flashlightOn ? 'text-yellow-300' : 'text-white'
                 } ${hudTextShadow}`}
               >
-                [F] {hud.flashlightOn ? 'On' : 'Off'}
+                [F] {hud.flashlightOn ? 'On' : 'Off'} · {Math.round(hud.flashlightBattery ?? 100)}%
               </span>
               <span
                 className={`text-sm font-medium tracking-wide font-mono-num ${
                   hud.weaponWheelOpen ? 'text-amber-300' : 'text-white'
                 } ${hudTextShadow}`}
-                title="Hold Q / Tab / Middle Mouse for Weapon Wheel, Tap Q to Quick-Swap"
+                title="Hold Q / Tab for Weapon Wheel, Tap Q to Quick-Swap • [MMB] Head-Grab"
               >
                 [Q] {hud.weaponWheelOpen
                   ? 'Select'
@@ -799,19 +1088,31 @@ export const GameHud: React.FC<GameHudProps> = ({
                 className={`text-sm font-medium tracking-wide font-mono-num ${
                   hud.awakening?.isReady
                     ? 'font-bold text-[#FFD700]'
-                    : hud.firecrackerCooldown > 0
-                      ? 'text-white/55'
-                      : 'text-white'
+                    : (hud.allyCount ?? 0) > 0
+                      ? 'text-cyan-300'
+                      : hud.firecrackerCooldown > 0
+                        ? 'text-white/55'
+                        : 'text-white'
                 } ${hudTextShadow}`}
-                title="Activate Awakening Smack when full, or throw Firecracker Lure"
+                title="Toggle nearby Squad Follow / Hold Position (or Awakening / Lure)"
               >
                 [G]{' '}
                 {hud.awakening?.isReady
                   ? 'Smack!'
-                  : hud.firecrackerCooldown > 0
-                    ? `${hud.firecrackerCooldown}s`
-                    : 'Lure'}
+                  : (hud.allyCount ?? 0) > 0
+                    ? 'Squad'
+                    : hud.firecrackerCooldown > 0
+                      ? `${hud.firecrackerCooldown}s`
+                      : 'Lure'}
               </span>
+              {(hud.allyCount ?? 0) > 0 && (
+                <span
+                  className={`text-sm font-medium tracking-wide font-mono-num text-cyan-200 ${hudTextShadow}`}
+                  title="Call up to 3 allied survivors to your position"
+                >
+                  [H] Reinforce ({hud.allyCount})
+                </span>
+              )}
               <span
                 className={`text-sm font-medium tracking-wide font-mono-num ${
                   hud.kickCooldown > 0 ? 'text-white/55' : 'text-white'
@@ -833,37 +1134,35 @@ export const GameHud: React.FC<GameHudProps> = ({
           {/* Center-Bottom: Intro Overwatch Radio, Tutorial Hint, Interaction Prompt & Radio Subtitles */}
           <div className="pointer-events-none fixed bottom-5 left-1/2 z-30 flex w-full max-w-2xl -translate-x-1/2 flex-col items-center gap-2 px-4">
             {hud.introRadioVisible && (
-              <div className="w-full rounded-lg border border-amber-400/35 bg-zinc-950/88 px-5 py-3 shadow-2xl backdrop-blur-sm">
+              <div className="w-full rounded-lg border border-amber-400/35 bg-zinc-950/90 px-5 py-3 shadow-2xl">
                 <div className="flex items-center gap-2 text-[11px] font-bold tracking-[0.14em] text-amber-400 uppercase">
-                  <span className="inline-block h-2 w-2 rounded-full bg-amber-400 animate-pulse" />
                   <Radio className="h-3.5 w-3.5 text-amber-300" />
                   <span>OVERWATCH RADIO · CH-01</span>
                 </div>
                 <p className="mt-1 text-sm leading-relaxed text-zinc-100">
                   {hud.introRadioText}
-                  <span className="ml-0.5 inline-block h-3.5 w-1.5 align-middle bg-amber-300 animate-pulse" />
                 </p>
               </div>
             )}
 
             {!hud.isIntroPlaying && !awakeningCinematic && (hud.tutorialHintOpacity ?? 0) > 0.01 && (
               <div
-                className="rounded-md border border-white/15 bg-zinc-950/78 px-4 py-1.5 text-center text-xs font-semibold tracking-wide text-zinc-100 shadow-lg backdrop-blur-xs"
+                className="rounded-md border border-white/15 bg-zinc-950/84 px-4 py-1.5 text-center text-xs font-semibold tracking-wide text-zinc-100 shadow-lg"
                 style={{ opacity: hud.tutorialHintOpacity }}
               >
-                <span className="font-mono-num text-amber-300">[WASD]</span> Run &nbsp;•&nbsp;{' '}
-                <span className="font-mono-num text-amber-300">[SHIFT]</span> Sprint &nbsp;•&nbsp;{' '}
-                <span className="font-mono-num text-amber-300">[SPACE]</span> Jump / Vault &nbsp;•&nbsp;{' '}
-                <span className="font-mono-num text-amber-300">[LMB]</span> Strike &nbsp;•&nbsp;{' '}
-                <span className="font-mono-num text-amber-300">[RMB]</span> Counter
+                <span className="font-mono-num text-amber-300">[WASD]</span> Run &nbsp;·&nbsp;{' '}
+                <span className="font-mono-num text-amber-300">[SHIFT]</span> Sprint &nbsp;·&nbsp;{' '}
+                <span className="font-mono-num text-amber-300">[SPACE]</span> Jump / Vault &nbsp;·&nbsp;{' '}
+                <span className="font-mono-num text-amber-300">[LMB]</span> Strike &nbsp;·&nbsp;{' '}
+                <span className="font-mono-num text-amber-300">[MMB]</span> Head-Grab
               </div>
             )}
 
             {hud.awakening?.isReady && !hud.awakening.isActivating && !hud.weaponWheelOpen && (
               <div
-                className={`animate-pulse rounded-full border border-[#FFD700]/75 bg-black/70 px-4 py-1 font-display text-xs font-extrabold tracking-[0.14em] text-[#FFD700] uppercase shadow-[0_0_16px_rgba(255,180,0,0.55)] ${hudTextShadow}`}
+                className={`rounded-md border border-[#FFD700]/80 bg-zinc-950/88 px-4 py-1.5 font-display text-xs font-bold tracking-[0.14em] text-[#FFD700] shadow-[0_0_16px_rgba(255,180,0,0.45)] ${hudTextShadow}`}
               >
-                [G] ACTIVATION SMACK — PUMPED UP!
+                [G] AWAKENING READY — TRIGGER SELF-BONK
               </div>
             )}
 
@@ -1252,39 +1551,65 @@ export const GameHud: React.FC<GameHudProps> = ({
       )}
 
       {/* ===================================================================== */}
-      {/* FULL-BLEED TITLE SCREEN ARTWORK (AGRA NIGHTFALL)                      */}
+      {/* LIVE 3D TRANSLUCENT TITLE OVERLAY (FALL OF THE LIVING — DEMO BUILD)  */}
       {/* ===================================================================== */}
       {hud.phase === 'start' && (
-        <div className="pointer-events-auto fixed inset-0 flex flex-col justify-between bg-zinc-950">
-          {/* Full-bleed Title Screen Artwork with fallback dark dusk backdrop */}
-          <div className="absolute inset-0 bg-gradient-to-b from-amber-950/60 via-zinc-950 to-zinc-950">
-            <img
-              src="/assets/aistudio/image_622358f2.png"
-              alt="Agra Nightfall — Taj Mahal Safe House"
-              referrerPolicy="no-referrer"
-              className="h-full w-full object-cover select-none"
-            />
-            <div className="pointer-events-none absolute inset-x-0 bottom-0 h-44 bg-gradient-to-t from-zinc-950 via-zinc-950/75 to-transparent" />
+        <div
+          className="pointer-events-auto fixed inset-0 flex flex-col justify-between"
+          style={{
+            background:
+              'radial-gradient(circle at 50% 44%, rgba(10, 10, 14, 0.14) 0%, rgba(10, 10, 14, 0.72) 100%)',
+          }}
+        >
+          {/* Top quiet demo metadata bar */}
+          <div className="relative z-10 flex items-center justify-between px-8 pt-6 text-xs font-medium text-zinc-200/90">
+            <span className={hudTextShadow}>Fall of the Living · Playable Demo Prototype</span>
+            <span className={hudTextShadow}>Objective: Eliminate 15 Infected &amp; Reach Extraction Flare</span>
           </div>
 
-          {/* Top-right subtle mission tag (keeps center AGRA NIGHTFALL 100% unobstructed) */}
-          <div className="relative z-10 flex items-center justify-between px-6 pt-5">
-            <span className="rounded-md border border-white/15 bg-zinc-950/80 px-3 py-1 text-xs font-medium text-amber-200">
-              Agra Quarantine · Sector 4
-            </span>
-            <span className="rounded-md border border-purple-400/30 bg-zinc-950/80 px-3 py-1 text-xs font-medium text-purple-200">
-              Objective: Scavenge 3 Antizin Crates &amp; Reach Taj UV Safe House
-            </span>
+          {/* Center Translucent Title Block & Primary Play CTA */}
+          <div className="relative z-10 mx-auto flex max-w-2xl flex-col items-center px-6 text-center">
+            <p className={`font-display text-xs font-semibold tracking-[0.26em] text-amber-300 ${hudTextShadow}`}>
+              SURVIVAL PARKOUR COMBAT DEMO
+            </p>
+            <h1
+              className={`mt-2 font-display text-5xl font-bold tracking-tight text-white sm:text-6xl ${hudTextShadow}`}
+              style={{ textWrap: 'balance' }}
+            >
+              FALL OF THE LIVING
+            </h1>
+            <p className={`mt-3 max-w-lg text-sm leading-relaxed text-zinc-200 ${hudTextShadow}`}>
+              Outlast escalating courtyard waves, land critical headshots, weaken Screamers below 65% HP for brutal
+              one-handed bat executions, and survive to extraction.
+            </p>
+
+            <div className="mt-7 flex items-center gap-3">
+              <button
+                type="button"
+                onClick={onStart}
+                className="rounded-lg bg-gradient-to-r from-amber-500 to-orange-500 px-8 py-3 font-display text-base font-bold tracking-wider text-zinc-950 shadow-[0_0_28px_rgba(245,158,11,0.5)] hover:from-amber-400 hover:to-orange-400 transition-all whitespace-nowrap shrink-0 cursor-pointer"
+              >
+                PLAY DEMO
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowControls((prev) => !prev)}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-white/25 bg-zinc-950/75 px-4 py-3 text-xs font-semibold text-zinc-100 hover:bg-zinc-900/90 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+              >
+                <Keyboard className="h-4 w-4" />
+                {showControls ? 'Hide Controls' : 'Controls'}
+              </button>
+            </div>
           </div>
 
-          {/* Bottom Controls Guide & Start Mission Action Bar */}
-          <div className="relative z-10 flex flex-col items-center gap-3 px-6 pb-5">
+          {/* Bottom Compact Controls Card */}
+          <div className="relative z-10 flex flex-col items-center gap-3 px-6 pb-6">
             {showControls && (
-              <div className="w-full max-w-4xl rounded-xl border border-white/15 bg-zinc-950/94 p-5 shadow-2xl">
+              <div className="w-full max-w-4xl rounded-xl border border-white/15 bg-zinc-950/90 p-5 shadow-2xl">
                 <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                   <div>
                     <h2 className="font-display text-sm font-semibold text-amber-300">
-                      Parkour &amp; Exploration
+                      Parkour &amp; Stamina Discipline
                     </h2>
                     <ul className="mt-2 space-y-1.5 text-xs text-zinc-300">
                       <li className="flex justify-between">
@@ -1292,64 +1617,48 @@ export const GameHud: React.FC<GameHudProps> = ({
                         <span className="font-mono-num text-zinc-100">WASD + Mouse</span>
                       </li>
                       <li className="flex justify-between">
-                        <span>Sprint (Uses Stamina)</span>
+                        <span>Sprint (Triggers Exhaustion at 0)</span>
                         <span className="font-mono-num text-zinc-100">Shift</span>
                       </li>
                       <li className="flex justify-between">
                         <span>Jump, Speed Vault &amp; Ledge Mantle</span>
-                        <span className="font-mono-num text-zinc-100">Space (Sprint = Vault)</span>
+                        <span className="font-mono-num text-zinc-100">Space</span>
                       </li>
                       <li className="flex justify-between">
-                        <span>Tactical Slide / Slide-Hop</span>
-                        <span className="font-mono-num text-zinc-100">Ctrl / X / C (+ Space)</span>
+                        <span>Slide / Safety Roll</span>
+                        <span className="font-mono-num text-zinc-100">Ctrl / C</span>
                       </li>
                       <li className="flex justify-between">
-                        <span>Wall Run &amp; Tic-Tac Wall Kick</span>
-                        <span className="font-mono-num text-zinc-100">Sprint Alongside Wall + Space</span>
-                      </li>
-                      <li className="flex justify-between">
-                        <span>Active Safety Landing Roll</span>
-                        <span className="font-mono-num text-zinc-100">C / Ctrl Before Landing</span>
-                      </li>
-                      <li className="flex justify-between">
-                        <span>Scavenge Crate / Ride Zipline</span>
-                        <span className="font-mono-num text-zinc-100">E</span>
-                      </li>
-                      <li className="flex justify-between">
-                        <span>Flashlight / Skip Time</span>
-                        <span className="font-mono-num text-zinc-100">F / T</span>
+                        <span>Flashlight / Watchtower Radio</span>
+                        <span className="font-mono-num text-zinc-100">F / E</span>
                       </li>
                     </ul>
                   </div>
 
                   <div>
                     <h2 className="font-display text-sm font-semibold text-amber-300">
-                      Freeflow Combat &amp; Gadgets
+                      Brutal Melee &amp; Executions
                     </h2>
                     <ul className="mt-2 space-y-1.5 text-xs text-zinc-300">
                       <li className="flex justify-between">
-                        <span>Swing &amp; Target Lunge</span>
+                        <span>Melee Strike (Aim High = 1.75x Crit)</span>
                         <span className="font-mono-num text-zinc-100">Left-Click</span>
                       </li>
                       <li className="flex justify-between">
-                        <span>Parry Counter (Yellow Bolt)</span>
+                        <span>Parry Counter</span>
                         <span className="font-mono-num text-zinc-100">Right-Click</span>
                       </li>
                       <li className="flex justify-between">
-                        <span>Parkour Kick / Flying Dropkick</span>
-                        <span className="font-mono-num text-zinc-100">C / V (Air = Dropkick)</span>
+                        <span>Head-Grab (&lt;65% HP or Staggered)</span>
+                        <span className="font-mono-num text-zinc-100">Middle-Click (MMB)</span>
                       </li>
                       <li className="flex justify-between">
-                        <span>Weapon Wheel / Quick-Swap</span>
-                        <span className="font-mono-num text-zinc-100">Hold Q (or Tab) / Tap Q</span>
+                        <span>Bat Face-Drive Execution</span>
+                        <span className="font-mono-num text-zinc-100">LMB While Grabbing</span>
                       </li>
                       <li className="flex justify-between">
-                        <span>Heavy Takedown / Quick Loadout</span>
-                        <span className="font-mono-num text-zinc-100">R / 1–4</span>
-                      </li>
-                      <li className="flex justify-between">
-                        <span>Throw Lure Firecracker</span>
-                        <span className="font-mono-num text-zinc-100">G</span>
+                        <span>Awakening Self-Bonk / Weapon Wheel</span>
+                        <span className="font-mono-num text-zinc-100">G / Hold Q</span>
                       </li>
                     </ul>
                   </div>
@@ -1357,133 +1666,160 @@ export const GameHud: React.FC<GameHudProps> = ({
               </div>
             )}
 
-            <div className="flex w-full max-w-5xl flex-wrap items-center justify-between gap-3 rounded-xl border border-white/15 bg-zinc-950/90 px-5 py-3 shadow-2xl">
-              <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-zinc-300">
-                <span>
-                  <strong className="font-mono-num text-zinc-100">WASD</strong> Move
-                </span>
-                <span>
-                  <strong className="font-mono-num text-zinc-100">Shift</strong> Sprint
-                </span>
-                <span>
-                  <strong className="font-mono-num text-zinc-100">Space</strong> Jump / Vault
-                </span>
-                <span>
-                  <strong className="font-mono-num text-zinc-100">Ctrl/X/C</strong> Slide
-                </span>
-                <span>
-                  <strong className="font-mono-num text-zinc-100">C/V</strong> Kick / Dropkick
-                </span>
-                <span>
-                  <strong className="font-mono-num text-zinc-100">Hold Q</strong> Weapon Wheel
-                </span>
-                <span>
-                  <strong className="font-mono-num text-zinc-100">E</strong> Loot / Zipline
-                </span>
-              </div>
-
-              <div className="flex items-center gap-2.5 shrink-0">
-                <button
-                  type="button"
-                  onClick={() => setShowControls((prev) => !prev)}
-                  className="inline-flex items-center gap-1.5 rounded-lg border border-white/20 bg-zinc-900 px-3.5 py-2 text-xs font-semibold text-zinc-200 hover:bg-zinc-800 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-                >
-                  <Keyboard className="h-3.5 w-3.5" />
-                  {showControls ? 'Hide Controls' : 'Controls'}
-                </button>
-                <button
-                  type="button"
-                  onClick={onStart}
-                  className="rounded-lg bg-amber-500 px-6 py-2 font-display text-sm font-bold text-zinc-950 hover:bg-amber-400 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-                >
-                  Start Mission
-                </button>
-              </div>
+            <div className="flex flex-wrap items-center justify-center gap-x-5 gap-y-1 rounded-lg border border-white/12 bg-zinc-950/78 px-5 py-2.5 text-xs text-zinc-300 shadow-xl">
+              <span>
+                <strong className="font-mono-num text-amber-300">WASD</strong> Move
+              </span>
+              <span>
+                <strong className="font-mono-num text-amber-300">Shift</strong> Sprint
+              </span>
+              <span>
+                <strong className="font-mono-num text-amber-300">Space</strong> Jump / Vault
+              </span>
+              <span>
+                <strong className="font-mono-num text-amber-300">LMB</strong> Strike / Crit Head
+              </span>
+              <span>
+                <strong className="font-mono-num text-amber-300">MMB → LMB</strong> Head-Grab Execution
+              </span>
+              <span>
+                <strong className="font-mono-num text-amber-300">Hold Q</strong> Weapon Wheel
+              </span>
+              <span>
+                <strong className="font-mono-num text-amber-300">G</strong> Awakening
+              </span>
             </div>
           </div>
         </div>
       )}
 
       {/* ===================================================================== */}
-      {/* GAME OVER SCREEN                                                      */}
+      {/* GAME OVER SCREEN (NIGHT RUNNER FINISHER OR OVERRUN)                   */}
       {/* ===================================================================== */}
       {hud.phase === 'gameover' && (
-        <div className="pointer-events-auto fixed inset-0 flex items-center justify-center bg-zinc-950/82 p-6">
-          <div className="w-full max-w-md rounded-xl border border-red-500/35 bg-zinc-950 p-7 text-center shadow-2xl">
-            <ShieldAlert className="mx-auto h-11 w-11 text-red-500" />
-            <h2 className="mt-3 font-display text-3xl font-bold text-white">Runner Down</h2>
-            <p className="mt-2 text-sm text-zinc-400">
-              The Agra infected overwhelmed you before reaching the Taj Mahal UV gate.
+        <div className="pointer-events-auto fixed inset-0 z-50 flex items-center justify-center bg-black/88 p-6">
+          {hud.deathCause === 'night_runner' ? (
+            <div className="w-full max-w-lg rounded-xl border border-red-600/55 bg-zinc-950/95 p-8 text-center shadow-[0_0_60px_rgba(220,38,38,0.35)]">
+              <ShieldAlert className="mx-auto h-12 w-12 text-red-500" />
+              <h2 className="mt-3 font-display text-4xl font-extrabold tracking-[0.14em] text-red-500 uppercase">
+                SILAS WALKER DIED
+              </h2>
+              <p className="mt-2.5 text-sm font-medium text-zinc-300">
+                Killed by a Night Runner in Agra — Survived: Day {hud.survivedDays ?? 1}
+              </p>
+              <div className="mt-5 grid grid-cols-3 gap-2 border-y border-white/10 py-3 text-xs">
+                <div>
+                  <div className="text-zinc-500">Kills</div>
+                  <div className="font-mono-num text-base font-bold text-white">{hud.killCount}</div>
+                </div>
+                <div>
+                  <div className="text-zinc-500">Executions</div>
+                  <div className="font-mono-num text-base font-bold text-red-400">
+                    {hud.executionsCount ?? 0}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-zinc-500">Time Survived</div>
+                  <div className="font-mono-num text-base font-bold text-amber-400">
+                    {hud.elapsedSeconds}s
+                  </div>
+                </div>
+              </div>
+              <div className="mt-6 flex flex-wrap items-center justify-center gap-3">
+                <button
+                  type="button"
+                  onClick={onRespawnSafeZone}
+                  className="inline-flex items-center gap-2 rounded-lg bg-red-600 px-6 py-2.5 font-display text-sm font-bold tracking-wider text-white hover:bg-red-500 transition-colors cursor-pointer"
+                >
+                  <Shield className="h-4 w-4" />
+                  RESTART FROM SAFE ZONE
+                </button>
+                <button
+                  type="button"
+                  onClick={onRestart}
+                  className="inline-flex items-center gap-2 rounded-lg border border-white/20 bg-zinc-900 px-4 py-2.5 font-display text-xs font-semibold tracking-wider text-zinc-200 hover:bg-zinc-800 transition-colors cursor-pointer"
+                >
+                  <RotateCcw className="h-3.5 w-3.5" />
+                  NEW RUN
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div className="w-full max-w-md rounded-xl border border-red-500/40 bg-zinc-950 p-7 text-center shadow-2xl">
+              <ShieldAlert className="mx-auto h-11 w-11 text-red-500" />
+              <h2 className="mt-3 font-display text-3xl font-bold text-white">You Were Overrun</h2>
+              <p className="mt-2 text-sm text-zinc-400">
+                Stamina exhaustion and the courtyard swarm claimed Silas Walker before extraction.
+              </p>
+              <div className="mt-5 grid grid-cols-3 gap-2 border-y border-white/10 py-3 text-xs">
+                <div>
+                  <div className="text-zinc-500">Kills</div>
+                  <div className="font-mono-num text-base font-bold text-white">{hud.killCount}</div>
+                </div>
+                <div>
+                  <div className="text-zinc-500">Executions</div>
+                  <div className="font-mono-num text-base font-bold text-red-400">
+                    {hud.executionsCount ?? 0}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-zinc-500">Time Survived</div>
+                  <div className="font-mono-num text-base font-bold text-amber-400">
+                    {hud.elapsedSeconds}s
+                  </div>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={onRestart}
+                className="mt-6 inline-flex items-center gap-2 rounded-lg bg-red-600 px-6 py-2.5 font-display text-sm font-bold text-white hover:bg-red-500 transition-colors cursor-pointer"
+              >
+                <RotateCcw className="h-4 w-4" />
+                PLAY AGAIN
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ===================================================================== */}
+      {/* VICTORY SCREEN (DEMO COMPLETE)                                        */}
+      {/* ===================================================================== */}
+      {hud.phase === 'victory' && (
+        <div className="pointer-events-auto fixed inset-0 flex items-center justify-center bg-zinc-950/84 p-6">
+          <div className="w-full max-w-md rounded-xl border border-amber-400/45 bg-zinc-950 p-7 text-center shadow-2xl">
+            <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-lg border border-amber-400/40 bg-amber-950/50 text-amber-300">
+              <Flag className="h-6 w-6" />
+            </div>
+            <h2 className="mt-3 font-display text-3xl font-bold text-white">Demo Complete</h2>
+            <p className="mt-2 text-sm text-zinc-300">
+              You survived the courtyard outbreak waves and reached the Extraction Flare with Silas Walker intact.
             </p>
             <div className="mt-5 grid grid-cols-3 gap-2 border-y border-white/10 py-3 text-xs">
               <div>
-                <div className="text-zinc-500">Crates</div>
-                <div className="font-mono-num text-base font-bold text-white">
-                  {hud.cratesCollected}/{hud.totalCrates}
-                </div>
-              </div>
-              <div>
-                <div className="text-zinc-500">Infected</div>
+                <div className="text-zinc-500">Kills</div>
                 <div className="font-mono-num text-base font-bold text-white">{hud.killCount}</div>
               </div>
               <div>
-                <div className="text-zinc-500">Max Combo</div>
-                <div className="font-mono-num text-base font-bold text-amber-400">
-                  {hud.maxCombo}x
+                <div className="text-zinc-500">Executions</div>
+                <div className="font-mono-num text-base font-bold text-red-400">
+                  {hud.executionsCount ?? 0}
                 </div>
               </div>
-            </div>
-            <button
-              type="button"
-              onClick={onRestart}
-              className="mt-6 inline-flex items-center gap-2 rounded-lg bg-red-600 px-6 py-2.5 font-display text-sm font-bold text-white hover:bg-red-500 transition-colors cursor-pointer"
-            >
-              <RotateCcw className="h-4 w-4" />
-              Retry Mission
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* ===================================================================== */}
-      {/* VICTORY SCREEN                                                        */}
-      {/* ===================================================================== */}
-      {hud.phase === 'victory' && (
-        <div className="pointer-events-auto fixed inset-0 flex items-center justify-center bg-zinc-950/82 p-6">
-          <div className="w-full max-w-md rounded-xl border border-purple-400/45 bg-zinc-950 p-7 text-center shadow-2xl">
-            <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-lg border border-purple-400/40 bg-purple-950/60 text-purple-300">
-              <Package className="h-6 w-6" />
-            </div>
-            <h2 className="mt-3 font-display text-3xl font-bold text-white">Safe House Reached</h2>
-            <p className="mt-2 text-sm text-zinc-300">
-              All 3 Antizin crates delivered inside the Taj Mahal UV perimeter. Survivors in Agra
-              live to see dawn.
-            </p>
-            <div className="mt-5 grid grid-cols-3 gap-2 border-y border-white/10 py-3 text-xs">
               <div>
-                <div className="text-zinc-500">Time</div>
-                <div className="font-mono-num text-base font-bold text-white">
+                <div className="text-zinc-500">Time Survived</div>
+                <div className="font-mono-num text-base font-bold text-amber-400">
                   {hud.elapsedSeconds}s
                 </div>
               </div>
-              <div>
-                <div className="text-zinc-500">Infected</div>
-                <div className="font-mono-num text-base font-bold text-white">{hud.killCount}</div>
-              </div>
-              <div>
-                <div className="text-zinc-500">Max Combo</div>
-                <div className="font-mono-num text-base font-bold text-amber-400">
-                  {hud.maxCombo}x
-                </div>
-              </div>
             </div>
             <button
               type="button"
               onClick={onRestart}
-              className="mt-6 inline-flex items-center gap-2 rounded-lg bg-purple-600 px-6 py-2.5 font-display text-sm font-bold text-white hover:bg-purple-500 transition-colors cursor-pointer"
+              className="mt-6 inline-flex items-center gap-2 rounded-lg bg-amber-500 px-6 py-2.5 font-display text-sm font-bold text-zinc-950 hover:bg-amber-400 transition-colors cursor-pointer"
             >
               <RotateCcw className="h-4 w-4" />
-              Play Again
+              PLAY AGAIN
             </button>
           </div>
         </div>

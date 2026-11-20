@@ -6,6 +6,7 @@ import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import type {
+  AllyNameplate,
   BoxCollider,
   CounterIndicator,
   DirectionalDamageIndicator,
@@ -13,6 +14,7 @@ import type {
   HudSnapshot,
   LadderVolume,
   MinimapTelemetry,
+  ScreenBloodSpatter,
   ZiplineRoute,
 } from '../types/game';
 import { AwakeningSystem } from './awakening';
@@ -31,6 +33,10 @@ import {
 } from './weapons';
 import { buildAgraWorld, type WorldBuildResult } from './world';
 import { ZombieManager, type ZombieActor } from './zombies';
+import { InfectedEnemy, type MeleeSwingDirection } from './infectedEnemy';
+import { NightRunner } from './nightRunner';
+import { TerritoryManager, type ActiveTerritoryHudInfo } from './territories';
+import { AllyManager } from './allies';
 
 declare global {
   interface Window {
@@ -46,6 +52,20 @@ const _moveDir = new THREE.Vector3();
 const _projVec = new THREE.Vector3();
 const _tmpVecA = new THREE.Vector3();
 const _tmpVecB = new THREE.Vector3();
+const _grabFwd = new THREE.Vector3();
+const _grabHeadWorld = new THREE.Vector3();
+const _grabImpulse = new THREE.Vector3();
+
+const SCREAMER_SPAWN_POINTS: ReadonlyArray<{ x: number; y: number; z: number; yaw: number }> = [
+  { x: -27.5, y: 4.0, z: 21.0, yaw: 0.1 }, // West Rooftop bldg_w1 (directly across launch ramp)
+  { x: -26.5, y: 5.8, z: 4.5, yaw: 0.4 }, // West Rooftop bldg_w2
+  { x: 27.5, y: 3.9, z: 23.0, yaw: -0.3 }, // East Rooftop bldg_e1
+  { x: 26.5, y: 5.5, z: 4.5, yaw: 2.8 }, // East Rooftop bldg_e2
+  { x: -8.5, y: 0.0, z: 2.0, yaw: 0.8 }, // Courtyard West Charbagh
+  { x: 8.5, y: 0.0, z: -24.0, yaw: 2.6 }, // Courtyard East North Walkway
+  { x: -70.5, y: 1.05, z: -18.0, yaw: 1.4 }, // Agra Cantt Platform 1 near Blue ICF Coach S5
+  { x: -94.5, y: 1.05, z: -26.0, yaw: 0.3 }, // Agra City Island Platform 2
+];
 
 const FULL_CYCLE_SECONDS = 180; // 3 minutes per full 24h cycle so Golden Dusk lingers warmly
 
@@ -203,8 +223,15 @@ export class AgraSurvivalEngine {
   private readonly world: WorldBuildResult;
   private readonly viewmodel: WeaponAndEffects;
   private readonly zombies: ZombieManager;
+  private readonly infectedEnemies: InfectedEnemy[] = [];
+  private readonly nightRunners: NightRunner[] = [];
+  private readonly territories: TerritoryManager;
+  private readonly allies: AllyManager;
   private readonly awakening = new AwakeningSystem();
   public readonly sound = new SoundEngine();
+
+  /** External hook invoked once when a Head-Grab capture locks cleanly at t >= 0.35s. */
+  public onHeadGrabLocked: ((grabbedEnemy: InfectedEnemy) => void) | null = null;
 
   // SkyDome Shader, Atmospheric Lighting & Intro Sequence rig
   private readonly lighting: TimeOfDayLightingSystem;
@@ -310,6 +337,13 @@ export class AgraSurvivalEngine {
   private stamina = 100;
   private readonly maxStamina = 100;
   private staminaPauseTimer = 0;
+  private exhaustionTimer = 0;
+  private hitSlowTimer = 0;
+  private hitMarkerFlash = 0;
+  private executionsCount = 0;
+  private waveNumber = 1;
+  private readonly killsTarget = 15;
+  private extractionReady = false;
   private comboCount = 0;
   private maxCombo = 0;
   private comboTimer = 0;
@@ -328,6 +362,8 @@ export class AgraSurvivalEngine {
   private preMantleSpeed = 0;
   private directionalHits: DirectionalDamageIndicator[] = [];
   private nextHitId = 1;
+  private screenSpatters: Array<ScreenBloodSpatter & { age: number; maxLife: number; dripSpeed: number }> = [];
+  private nextSpatterId = 1;
 
   // Gadgets, Weapon Selector Wheel & Day/Night
   private activeWeapon: WeaponId = 'bat';
@@ -339,10 +375,54 @@ export class AgraSurvivalEngine {
   private wheelCursorX = 0;
   private wheelCursorY = 0;
   private wheelTimeScale = 1.0;
-  private wheelTriggerSource: 'KeyQ' | 'Tab' | 'MMB' | null = null;
+  private wheelTriggerSource: 'KeyQ' | 'Tab' | null = null;
   private qHoldPending = false;
   private qPressTimeMs = 0;
+  private meleeSwingToggle = false;
+  private readonly headGrabState = {
+    active: false,
+    enemy: null as InfectedEnemy | null,
+    timer: 0,
+    impactTriggered: false,
+    holdTriggered: false,
+    lockedInvoked: false,
+    startPos: new THREE.Vector3(),
+    startYaw: 0,
+  };
+  private isGrabbingEnemy = false;
+  private grabbedEnemy: InfectedEnemy | null = null;
+  private isExecutingFinisher = false;
+  private finisherGoreOpacity = 0;
+  private readonly batFaceDriveState = {
+    active: false,
+    enemy: null as InfectedEnemy | null,
+    timer: 0,
+    impactTriggered: false,
+    yankBurstTriggered: false,
+    ragdollTriggered: false,
+    dripTimer: 0,
+  };
   private flashlightOn = false;
+  private flashlightBattery = 100;
+  private lowStaminaPulseTimer = 0;
+  private isFinisherActive = false;
+  private finisherTimer = 0;
+  private finisherAttacker: NightRunner | null = null;
+  private finisherVignetteOpacity = 0;
+  private finisherBlackoutOpacity = 0;
+  private finisherPhaseStep = 0;
+  private finisherDropStartY = 0;
+  private finisherStartYaw = 0;
+  private finisherStartPitch = 0;
+  private deathCause: 'night_runner' | 'overrun' = 'overrun';
+  private survivedDays = 1;
+  private activeTerritoryHud: ActiveTerritoryHudInfo | null = null;
+  private liberationToastName: string | null = null;
+  private liberationToastTimer = 0;
+  private squadCommandToast: string | null = null;
+  private squadCommandToastTimer = 0;
+  private allyDownAlert: string | null = null;
+  private allyDownAlertTimer = 0;
   private firecrackerCooldown = 0;
   private timeOfDay = 0.0; // Starts at 17:15 warm golden sunset
   private wasNight = false;
@@ -377,7 +457,7 @@ export class AgraSurvivalEngine {
     });
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    this.renderer.toneMappingExposure = 0.94;
+    this.renderer.toneMappingExposure = 1.15;
     this.renderer.setPixelRatio(this.isSoftwareGl ? 1 : Math.min(window.devicePixelRatio, 1.5));
     this.renderer.setSize(mountEl.clientWidth || window.innerWidth, mountEl.clientHeight || window.innerHeight);
     this.renderer.shadowMap.enabled = !this.isSoftwareGl;
@@ -423,6 +503,11 @@ export class AgraSurvivalEngine {
     this.viewmodel = new WeaponAndEffects(this.scene, this.camera, this.textures);
     this.viewmodel.setVisible(false);
     this.zombies = new ZombieManager(this.scene, this.textures);
+    this.spawnInitialScreamers();
+    this.territories = new TerritoryManager(this.scene, (x, z) => this.sampleTerritoryFloorY(x, z));
+    this.spawnTerritoryDefenders();
+    this.allies = new AllyManager(this.scene, (x, z, curY) => this.sampleNpcGroundHeight(x, z, curY));
+    this.allies.spawnStarterCompanion();
 
     this.playerPos.copy(this.world.spawnPos);
     this.yaw = this.world.spawnYaw;
@@ -518,10 +603,19 @@ export class AgraSurvivalEngine {
   }
 
   public skipTime(): void {
+    const prev = this.timeOfDay;
     this.timeOfDay = (this.timeOfDay + 0.14) % 1;
+    if (prev + 0.14 >= 1) {
+      this.survivedDays++;
+    }
     this.updateAtmosphere(0);
     if (this.isNightTime()) {
       this.zombies.spawnNightRunners();
+      for (let i = 0; i < this.nightRunners.length; i++) {
+        if (this.nightRunners[i].state !== 'DEAD') {
+          this.nightRunners[i].alerted = true;
+        }
+      }
     }
     this.emitHud();
   }
@@ -607,13 +701,75 @@ export class AgraSurvivalEngine {
   }
 
   public devClearNearbyEnemies(radius = 26): number {
-    const cleared = this.zombies.clearNearbyZombies(this.playerPos, radius);
+    let cleared = this.zombies.clearNearbyZombies(this.playerPos, radius);
+    const rSq = radius * radius;
+    for (let i = 0; i < this.infectedEnemies.length; i++) {
+      const e = this.infectedEnemies[i];
+      if (e.aiState === 'DEAD' || e.aiState === 'DEAD_RAGDOLL') continue;
+      if (this.batFaceDriveState.active && this.batFaceDriveState.enemy === e) continue;
+      if (this.headGrabState.active && this.headGrabState.enemy === e) {
+        this.clearHeadGrabState();
+      }
+      if (e.root.position.distanceToSquared(this.playerPos) <= rSq) {
+        e.markDead();
+        cleared++;
+      }
+    }
+    for (let i = 0; i < this.nightRunners.length; i++) {
+      const nr = this.nightRunners[i];
+      if (nr.state === 'DEAD' || this.finisherAttacker === nr) continue;
+      if (nr.group.position.distanceToSquared(this.playerPos) <= rSq) {
+        _tmpVecA.set(0, 0, -1);
+        nr.applyDamage(9999, _tmpVecA, 0, 0);
+        cleared++;
+      }
+    }
     this.emitHud();
     return cleared;
   }
 
+  public devSpawnInfectedInFront(): void {
+    const fwdX = -Math.sin(this.yaw);
+    const fwdZ = -Math.cos(this.yaw);
+    const sx = THREE.MathUtils.clamp(this.playerPos.x + fwdX * 2.6, -105, 55);
+    const sz = THREE.MathUtils.clamp(this.playerPos.z + fwdZ * 2.6, -52, 48);
+    const sy = this.sampleGroundHeight(sx, sz);
+
+    let target: InfectedEnemy | null = null;
+    for (let i = 0; i < this.infectedEnemies.length; i++) {
+      const candidate = this.infectedEnemies[i];
+      if (
+        (candidate.aiState === 'DEAD' || candidate.aiState === 'DEAD_RAGDOLL') &&
+        !(this.headGrabState.active && this.headGrabState.enemy === candidate) &&
+        !(this.batFaceDriveState.active && this.batFaceDriveState.enemy === candidate)
+      ) {
+        target = candidate;
+        break;
+      }
+    }
+
+    if (!target) {
+      target = new InfectedEnemy(
+        9000 + this.infectedEnemies.length,
+        this.scene,
+        this.textures,
+        sx,
+        sy,
+        sz,
+        this.yaw,
+      );
+      this.infectedEnemies.push(target);
+    }
+
+    // Screamer +Z faces the player when enemy.yaw === player.yaw
+    target.reset(sx, sy, sz, this.yaw);
+    target.alerted = true;
+    this.sound.playScreamerScreech();
+    this.emitHud();
+  }
+
   public takeDamage(amount: number, attackerPos?: THREE.Vector3): void {
-    if (window.devImmortal || this.awakening.state.isActivating) return;
+    if (window.devImmortal || this.awakening.state.isActivating || this.isExecutingFinisher || this.isFinisherActive) return;
     if (this.phase !== 'playing' || amount <= 0) return;
 
     this.health = Math.max(0, this.health - amount);
@@ -623,8 +779,10 @@ export class AgraSurvivalEngine {
       this.awakening.addAwakeningCharge(8);
       this.comboCount = 0;
       this.comboTimer = 0;
+      this.hitSlowTimer = 0.55;
+      this.pitch = THREE.MathUtils.clamp(this.pitch - 0.045, -1.42, 1.42);
       this.damageFlash = 0.72;
-      this.cameraShake = 0.28;
+      this.cameraShake = Math.max(this.cameraShake, 0.35);
 
       // Directional damage indicator pointing toward side/rear attacker
       const dx = attackerPos.x - this.playerPos.x;
@@ -647,12 +805,83 @@ export class AgraSurvivalEngine {
     }
 
     if (this.health <= 0) {
+      this.deathCause = 'overrun';
       this.phase = 'gameover';
       this.intro.resetIdle();
       this.sound.stopContinuousLoops();
       this.sound.playGameOver();
       this.safeExitPointerLock();
     }
+    this.emitHud();
+  }
+
+  public respawnAtSafeZone(): void {
+    const safeX = 0;
+    const safeZ = 12;
+    const safeY = this.sampleTerritoryFloorY(safeX, safeZ);
+
+    this.playerPos.set(safeX, safeY, safeZ);
+    this.playerVel.set(0, 0, 0);
+    this.yaw = 0;
+    this.pitch = 0;
+    this.onGround = true;
+    this.airPeakY = safeY;
+    this.slideTimer = 0;
+    this.rollTimer = 0;
+    this.rollPitchOffset = 0;
+    this.mantling = false;
+    this.vaulting = false;
+    this.activeZipline = null;
+    this.activeLadder = null;
+    this.wallRunSide = 0;
+
+    this.health = this.maxHealth;
+    this.stamina = this.maxStamina;
+    this.flashlightBattery = 100;
+    this.sprintExhausted = false;
+    this.exhaustionTimer = 0;
+    this.staminaPauseTimer = 0;
+    this.damageFlash = 0;
+    this.cameraShake = 0;
+
+    this.isFinisherActive = false;
+    this.finisherTimer = 0;
+    this.finisherPhaseStep = 0;
+    this.finisherVignetteOpacity = 0;
+    this.finisherBlackoutOpacity = 0;
+    this.deathCause = 'overrun';
+
+    if (this.finisherAttacker) {
+      this.finisherAttacker.frozenForFinisher = false;
+      this.finisherAttacker.resetArmPositions();
+      this.finisherAttacker.group.position.set(safeX + 16, this.sampleTerritoryFloorY(safeX + 16, safeZ - 8), safeZ - 8);
+      this.finisherAttacker.state = 'STALK';
+      this.finisherAttacker = null;
+    }
+
+    this.zombies.clearNearbyZombies(this.playerPos, 11);
+    for (let i = 0; i < this.nightRunners.length; i++) {
+      const nr = this.nightRunners[i];
+      nr.frozenForFinisher = false;
+      if (nr.state !== 'DEAD') {
+        nr.resetArmPositions();
+        if (nr.group.position.distanceTo(this.playerPos) < 12) {
+          const rx = safeX + (i % 2 === 0 ? -15 : 15);
+          const rz = safeZ - 14;
+          nr.group.position.set(rx, this.sampleTerritoryFloorY(rx, rz), rz);
+          nr.state = 'STALK';
+        }
+      }
+    }
+
+    this.camera.fov = MOVEMENT_CONFIG.BASE_FOV;
+    this.camera.rotation.z = 0;
+    this.camera.updateProjectionMatrix();
+
+    this.phase = 'playing';
+    this.viewmodel.setVisible(true);
+    this.syncCameraToPlayer(0);
+    this.lockPointer();
     this.emitHud();
   }
 
@@ -727,6 +956,13 @@ export class AgraSurvivalEngine {
     this.health = this.maxHealth;
     this.stamina = this.maxStamina;
     this.staminaPauseTimer = 0;
+    this.exhaustionTimer = 0;
+    this.hitSlowTimer = 0;
+    this.hitMarkerFlash = 0;
+    this.executionsCount = 0;
+    this.waveNumber = 1;
+    this.extractionReady = false;
+    this.world.setExtractionActive(false);
     this.comboCount = 0;
     this.maxCombo = 0;
     this.comboTimer = 0;
@@ -744,6 +980,7 @@ export class AgraSurvivalEngine {
     this.preVaultSpeed = 0;
     this.preMantleSpeed = 0;
     this.directionalHits = [];
+    this.screenSpatters = [];
     this.firecrackerCooldown = 0;
     this.activeWeapon = 'bat';
     this.previousWeapon = 'unarmed';
@@ -760,6 +997,23 @@ export class AgraSurvivalEngine {
     this.viewmodel.setWeapon('bat', true);
     this.flashlightOn = false;
     this.flashlight.intensity = 0;
+    this.flashlightBattery = 100;
+    this.lowStaminaPulseTimer = 0;
+    this.isFinisherActive = false;
+    this.finisherTimer = 0;
+    this.finisherAttacker = null;
+    this.finisherVignetteOpacity = 0;
+    this.finisherBlackoutOpacity = 0;
+    this.finisherPhaseStep = 0;
+    this.deathCause = 'overrun';
+    this.survivedDays = 1;
+    this.activeTerritoryHud = null;
+    this.liberationToastName = null;
+    this.liberationToastTimer = 0;
+    this.squadCommandToast = null;
+    this.squadCommandToastTimer = 0;
+    this.allyDownAlert = null;
+    this.allyDownAlertTimer = 0;
 
     this.timeOfDay = 0.0;
     this.wasNight = false;
@@ -770,9 +1024,72 @@ export class AgraSurvivalEngine {
       c.collected = false;
       c.group.visible = true;
     });
+    this.world.resetInteractiveWorld();
 
+    this.clearHeadGrabState();
+    this.clearBatFaceDriveState();
+    this.finisherGoreOpacity = 0;
+    this.viewmodel.setBatBloodStained(false);
+    this.viewmodel.clearBloodPuddles();
     this.zombies.resetAll();
+    this.resetScreamers();
     this.awakening.reset(this.scene);
+    for (let i = 0; i < this.nightRunners.length; i++) {
+      this.nightRunners[i].dispose(this.scene);
+    }
+    this.nightRunners.length = 0;
+    this.territories.resetAll();
+    this.spawnTerritoryDefenders();
+    this.allies.resetAll();
+  }
+
+  private spawnInitialScreamers(): void {
+    for (let i = 0; i < SCREAMER_SPAWN_POINTS.length; i++) {
+      const sp = SCREAMER_SPAWN_POINTS[i];
+      const screamer = new InfectedEnemy(
+        9000 + i,
+        this.scene,
+        this.textures,
+        sp.x,
+        sp.y,
+        sp.z,
+        sp.yaw,
+      );
+      this.infectedEnemies.push(screamer);
+    }
+  }
+
+  private resetScreamers(): void {
+    for (let i = this.infectedEnemies.length - 1; i >= SCREAMER_SPAWN_POINTS.length; i--) {
+      const extra = this.infectedEnemies.pop();
+      extra?.dispose(this.scene);
+    }
+    for (let i = 0; i < this.infectedEnemies.length; i++) {
+      const sp = SCREAMER_SPAWN_POINTS[i];
+      this.infectedEnemies[i].reset(sp.x, sp.y, sp.z, sp.yaw);
+    }
+  }
+
+  private clearHeadGrabState(): void {
+    this.headGrabState.active = false;
+    this.headGrabState.enemy = null;
+    this.headGrabState.timer = 0;
+    this.headGrabState.impactTriggered = false;
+    this.headGrabState.holdTriggered = false;
+    this.headGrabState.lockedInvoked = false;
+    this.isGrabbingEnemy = false;
+    this.grabbedEnemy = null;
+  }
+
+  private clearBatFaceDriveState(): void {
+    this.batFaceDriveState.active = false;
+    this.batFaceDriveState.enemy = null;
+    this.batFaceDriveState.timer = 0;
+    this.batFaceDriveState.impactTriggered = false;
+    this.batFaceDriveState.yankBurstTriggered = false;
+    this.batFaceDriveState.ragdollTriggered = false;
+    this.batFaceDriveState.dripTimer = 0;
+    this.isExecutingFinisher = false;
   }
 
   private setSubtitle(speaker: string, text: string, duration = 7.5): void {
@@ -852,7 +1169,7 @@ export class AgraSurvivalEngine {
   };
 
   private equipWeapon(nextWeapon: WeaponId, immediate = false): void {
-    if (this.awakening.state.isActivating) return;
+    if (this.awakening.state.isActivating || this.isExecutingFinisher || this.isFinisherActive) return;
     if (nextWeapon !== this.activeWeapon) {
       this.previousWeapon = this.activeWeapon;
       this.activeWeapon = nextWeapon;
@@ -872,7 +1189,10 @@ export class AgraSurvivalEngine {
       this.radioOpen ||
       this.intro.isIntroPlaying ||
       !this.awakening.state.isReady ||
-      this.awakening.state.isActivating
+      this.awakening.state.isActivating ||
+      this.isExecutingFinisher ||
+      this.isFinisherActive ||
+      this.isGrabbingEnemy
     ) {
       return;
     }
@@ -922,6 +1242,41 @@ export class AgraSurvivalEngine {
         if (killCount > 0) {
           this.killCount += killCount;
         }
+        for (let i = 0; i < this.infectedEnemies.length; i++) {
+          const e = this.infectedEnemies[i];
+          if (e.aiState === 'DEAD' || e.aiState === 'GRABBED') continue;
+          const dx = e.root.position.x - this.playerPos.x;
+          const dz = e.root.position.z - this.playerPos.z;
+          const dist = Math.hypot(dx, dz);
+          if (dist <= 11.0) {
+            const nx = dist > 0.001 ? dx / dist : -Math.sin(this.yaw);
+            const nz = dist > 0.001 ? dz / dist : -Math.cos(this.yaw);
+            e.health -= 25;
+            if (e.health <= 0) {
+              _grabImpulse.set(nx, 0, nz);
+              e.markDead(_grabImpulse);
+              this.killCount++;
+            } else {
+              _grabImpulse.set(nx * 18.0, 6.0, nz * 18.0);
+              e.applyKnockdown(_grabImpulse);
+            }
+          }
+        }
+        for (let i = 0; i < this.nightRunners.length; i++) {
+          const nr = this.nightRunners[i];
+          if (nr.state === 'DEAD' || nr.state === 'FINISHER_GRAB') continue;
+          const dx = nr.group.position.x - this.playerPos.x;
+          const dz = nr.group.position.z - this.playerPos.z;
+          const dist = Math.hypot(dx, dz);
+          if (dist <= 11.0) {
+            const nx = dist > 0.001 ? dx / dist : -Math.sin(this.yaw);
+            const nz = dist > 0.001 ? dz / dist : -Math.cos(this.yaw);
+            _grabImpulse.set(nx, 0, nz);
+            if (nr.applyDamage(25, _grabImpulse, 2.0, 14.0)) {
+              this.killCount++;
+            }
+          }
+        }
         this.emitHud();
       },
       () => {
@@ -938,7 +1293,7 @@ export class AgraSurvivalEngine {
   }
 
   private quickSwapWeapon(): void {
-    if (this.awakening.state.isActivating) return;
+    if (this.awakening.state.isActivating || this.isExecutingFinisher || this.isFinisherActive) return;
     const target =
       this.previousWeapon && this.previousWeapon !== this.activeWeapon
         ? this.previousWeapon
@@ -948,13 +1303,16 @@ export class AgraSurvivalEngine {
     this.equipWeapon(target);
   }
 
-  private openWeaponWheel(source: 'KeyQ' | 'Tab' | 'MMB'): void {
+  private openWeaponWheel(source: 'KeyQ' | 'Tab'): void {
     if (
       this.phase !== 'playing' ||
       this.radioOpen ||
       this.intro.isIntroPlaying ||
       this.weaponWheelOpen ||
-      this.awakening.state.isActivating
+      this.awakening.state.isActivating ||
+      this.headGrabState.active ||
+      this.isExecutingFinisher ||
+      this.isFinisherActive
     ) {
       return;
     }
@@ -1001,7 +1359,8 @@ export class AgraSurvivalEngine {
       this.devOverlayOpen ||
       this.phase !== 'playing' ||
       this.intro.isIntroPlaying ||
-      this.awakening.state.isActivating
+      this.awakening.state.isActivating ||
+      this.isFinisherActive
     ) {
       return;
     }
@@ -1047,13 +1406,7 @@ export class AgraSurvivalEngine {
   private onMouseDown = (e: MouseEvent) => {
     if (this.devOverlayOpen || this.phase !== 'playing' || this.radioOpen) return;
     this.sound.unlock();
-    if (this.intro.isIntroPlaying || this.awakening.state.isActivating) return;
-
-    if (e.button === 1) {
-      e.preventDefault();
-      this.openWeaponWheel('MMB');
-      return;
-    }
+    if (this.intro.isIntroPlaying || this.awakening.state.isActivating || this.isExecutingFinisher || this.isFinisherActive) return;
 
     if (this.weaponWheelOpen) {
       if (e.button === 0) {
@@ -1064,22 +1417,39 @@ export class AgraSurvivalEngine {
       return;
     }
 
+    if (e.button === 1) {
+      e.preventDefault();
+      if (!this.pointerLocked) {
+        this.lockPointer();
+      }
+      if (this.isGrabbingEnemy && this.grabbedEnemy && !this.isExecutingFinisher) {
+        this.shoveGrabbedEnemyAway(8.0);
+      } else {
+        this.tryStartHeadGrab();
+      }
+      return;
+    }
+
     if (!this.pointerLocked) {
       this.lockPointer();
       return;
     }
 
     if (e.button === 0) {
+      if (this.isGrabbingEnemy && this.grabbedEnemy && !this.isExecutingFinisher) {
+        this.executeBatFaceDrive(this.grabbedEnemy);
+        return;
+      }
+      if (this.headGrabState.active) return;
       this.performMeleeAttack();
     } else if (e.button === 2) {
+      if (this.headGrabState.active) return;
       this.performCounterParry();
     }
   };
 
-  private onMouseUp = (e: MouseEvent) => {
-    if (e.button === 1 && this.weaponWheelOpen && this.wheelTriggerSource === 'MMB') {
-      this.closeWeaponWheel(true);
-    }
+  private onMouseUp = () => {
+    // Reserved for mouse button release behaviors
   };
 
   private onKeyDown = (e: KeyboardEvent) => {
@@ -1104,7 +1474,7 @@ export class AgraSurvivalEngine {
       }
       return;
     }
-    if (this.phase === 'playing' && this.awakening.state.isActivating) {
+    if (this.phase === 'playing' && (this.awakening.state.isActivating || this.isExecutingFinisher || this.isFinisherActive)) {
       return;
     }
     this.keys[e.code] = true;
@@ -1198,7 +1568,23 @@ export class AgraSurvivalEngine {
       if (this.awakening.state.isReady && !this.awakening.state.isActivating) {
         this.tryTriggerActivationSmack();
       } else {
-        this.throwFirecracker();
+        const cmd = this.allies.toggleSquadCommand(this.playerPos, this.territories.sectors);
+        if (cmd.count > 0 && cmd.toast) {
+          this.squadCommandToast = cmd.toast;
+          this.squadCommandToastTimer = 3.2;
+          this.sound.playTacticalWhistle();
+          this.emitHud();
+        } else {
+          this.throwFirecracker();
+        }
+      }
+    } else if (e.code === 'KeyH' && !e.repeat) {
+      const res = this.allies.callReinforcements(this.playerPos);
+      if (res.summonedCount > 0 && res.toast) {
+        this.squadCommandToast = res.toast;
+        this.squadCommandToastTimer = 3.4;
+        this.sound.playTacticalWhistle();
+        this.emitHud();
       }
     } else if (e.code === 'BracketRight' && !e.repeat) {
       this.awakening.setDebugFullCharge();
@@ -1243,13 +1629,13 @@ export class AgraSurvivalEngine {
         }
       }
     } else if (e.code === 'Digit1' && !e.repeat) {
-      this.equipWeapon('bat');
+      this.equipWeapon('unarmed');
     } else if (e.code === 'Digit2' && !e.repeat) {
-      this.equipWeapon('dagger');
+      this.equipWeapon('bat');
     } else if (e.code === 'Digit3' && !e.repeat) {
       this.equipWeapon('cleaver');
     } else if (e.code === 'Digit4' && !e.repeat) {
-      this.equipWeapon('unarmed');
+      this.equipWeapon('dagger');
     } else if ((e.code === 'KeyB' || e.code === 'KeyI') && !e.repeat) {
       this.viewmodel.triggerInspect();
     } else if (e.code === 'KeyT' && !e.repeat) {
@@ -1291,6 +1677,13 @@ export class AgraSurvivalEngine {
   };
 
   private toggleFlashlight(): void {
+    if (!this.flashlightOn && this.flashlightBattery <= 0) {
+      this.flashlightOn = false;
+      this.flashlight.intensity = 0;
+      this.sound.playFlashlightClick();
+      this.emitHud();
+      return;
+    }
     this.flashlightOn = !this.flashlightOn;
     this.flashlight.intensity = this.flashlightOn ? 6.5 : 0;
     this.sound.playFlashlightClick();
@@ -1429,6 +1822,21 @@ export class AgraSurvivalEngine {
       }
     }
 
+    if (this.world.tryUseHaveliMedkit(this.playerPos)) {
+      this.health = Math.min(this.maxHealth, this.health + 35);
+      this.sound.playMedkitUse();
+      this.setSubtitle('MEDICAL SUPPLIES', 'First-Aid Kit applied (+35 HP).', 3.4);
+      this.emitHud();
+      return;
+    }
+
+    const toggledDoor = this.world.toggleNearestDoor(this.playerPos);
+    if (toggledDoor) {
+      this.sound.playDoorToggle(toggledDoor.open);
+      this.emitHud();
+      return;
+    }
+
     if (this.isNearGuardTower()) {
       this.openRadio();
       return;
@@ -1452,13 +1860,177 @@ export class AgraSurvivalEngine {
       const dot = (dx * lookX + dz * lookZ) / (dist || 1);
       if (dot > 0.25) return true;
     }
+    for (const e of this.infectedEnemies) {
+      if (
+        e.aiState === 'DEAD' ||
+        e.aiState === 'IMPALED_DEAD' ||
+        e.aiState === 'DEAD_RAGDOLL' ||
+        e.aiState === 'GRABBED'
+      ) {
+        continue;
+      }
+      const dx = e.root.position.x - this.playerPos.x;
+      const dz = e.root.position.z - this.playerPos.z;
+      const dist = Math.hypot(dx, dz);
+      if (dist > 4.0 || Math.abs(e.root.position.y - this.playerPos.y) > 2.4) continue;
+      const dot = (dx * lookX + dz * lookZ) / (dist || 1);
+      if (dot > 0.25) return true;
+    }
     return false;
+  }
+
+  private findScreamerInGrabCone(): InfectedEnemy | null {
+    const cosPitch = Math.cos(this.pitch);
+    const camFwdX = -Math.sin(this.yaw) * cosPitch;
+    const camFwdY = Math.sin(this.pitch);
+    const camFwdZ = -Math.cos(this.yaw) * cosPitch;
+    const coneCosLimit = Math.cos(THREE.MathUtils.degToRad(35)); // 35 deg forward half-cone
+
+    let bestEnemy: InfectedEnemy | null = null;
+    let bestScore = Infinity;
+
+    for (let i = 0; i < this.infectedEnemies.length; i++) {
+      const e = this.infectedEnemies[i];
+      if (
+        e.aiState === 'DEAD' ||
+        e.aiState === 'IMPALED_DEAD' ||
+        e.aiState === 'DEAD_RAGDOLL' ||
+        e.aiState === 'GRABBED'
+      ) {
+        continue;
+      }
+
+      e.getHeadWorldPosition(_grabHeadWorld);
+      const dx = _grabHeadWorld.x - this.camera.position.x;
+      const dy = _grabHeadWorld.y - this.camera.position.y;
+      const dz = _grabHeadWorld.z - this.camera.position.z;
+      const dist = Math.hypot(dx, dy, dz);
+      const horizDist = Math.hypot(e.root.position.x - this.playerPos.x, e.root.position.z - this.playerPos.z);
+
+      if (Math.min(dist, horizDist) > 3.4 || Math.abs(e.root.position.y - this.playerPos.y) > 2.4) {
+        continue;
+      }
+
+      const invDist = 1 / (dist || 1);
+      const dot = (dx * camFwdX + dy * camFwdY + dz * camFwdZ) * invDist;
+      if (dot >= coneCosLimit) {
+        const score = dist - dot * 1.2;
+        if (score < bestScore) {
+          bestScore = score;
+          bestEnemy = e;
+        }
+      }
+    }
+    return bestEnemy;
+  }
+
+  private tryStartHeadGrab(): void {
+    if (
+      this.phase !== 'playing' ||
+      this.radioOpen ||
+      this.intro.isIntroPlaying ||
+      this.awakening.state.isActivating ||
+      this.headGrabState.active ||
+      this.isExecutingFinisher ||
+      this.isFinisherActive ||
+      this.mantling ||
+      this.vaulting ||
+      this.activeZipline !== null ||
+      this.activeLadder !== null ||
+      this.rollTimer > 0
+    ) {
+      return;
+    }
+
+    const bestEnemy = this.findScreamerInGrabCone();
+    if (!bestEnemy) {
+      this.viewmodel.triggerHeadGrabWhiff();
+      this.sound.playHeadGrabWhiff();
+      return;
+    }
+
+    if (!bestEnemy.canBeHeadGrabbed()) {
+      this.viewmodel.triggerHeadGrabWhiff();
+      this.sound.playHeadGrabWhiff();
+      this.sound.playWeaponHit(this.activeWeapon, true);
+      this.takeDamage(20, bestEnemy.root.position);
+      this.setSubtitle(
+        'COMBAT WARNING',
+        'Infected too healthy — weaken below 65% HP or stagger before [MMB] Head-Grab!',
+        3.2,
+      );
+      return;
+    }
+
+    this.headGrabState.active = true;
+    this.headGrabState.enemy = bestEnemy;
+    this.headGrabState.timer = 0;
+    this.headGrabState.impactTriggered = false;
+    this.headGrabState.holdTriggered = false;
+    this.headGrabState.lockedInvoked = false;
+    this.headGrabState.startPos.copy(bestEnemy.root.position);
+    this.headGrabState.startYaw = bestEnemy.yaw;
+    this.isGrabbingEnemy = true;
+    this.grabbedEnemy = bestEnemy;
+
+    bestEnemy.setGrabbed();
+    this.slideTimer = 0;
+    this.lungeTimer = 0;
+    this.sound.updateSlideLoop(false, 0);
+    this.emitHud();
+  }
+
+  private shoveGrabbedEnemyAway(speed = 8.0): void {
+    const released = this.grabbedEnemy ?? this.headGrabState.enemy;
+    this.clearHeadGrabState();
+    if (!released) return;
+
+    _grabFwd.set(-Math.sin(this.yaw), 0, -Math.cos(this.yaw)).normalize();
+    const shoveX = THREE.MathUtils.clamp(this.playerPos.x + _grabFwd.x * 1.45, -105, 54);
+    const shoveZ = THREE.MathUtils.clamp(this.playerPos.z + _grabFwd.z * 1.45, -52, 48);
+    released.root.position.set(shoveX, this.sampleGroundHeight(shoveX, shoveZ) + 0.15, shoveZ);
+    _grabImpulse.set(_grabFwd.x * speed, 3.6, _grabFwd.z * speed);
+    released.applyKnockdown(_grabImpulse);
+    this.sound.playKick(true);
+    this.emitHud();
+  }
+
+  private executeBatFaceDrive(enemy: InfectedEnemy): void {
+    if (this.isExecutingFinisher || this.phase !== 'playing') return;
+
+    this.clearHeadGrabState();
+    this.isExecutingFinisher = true;
+    this.qHoldPending = false;
+    this.slideTimer = 0;
+    this.rollTimer = 0;
+    this.lungeTimer = 0;
+    this.sound.updateSlideLoop(false, 0);
+
+    // Ensure Wooden Baseball Bat is in the right hand immediately for the execution
+    if (this.activeWeapon !== 'bat') {
+      this.previousWeapon = this.activeWeapon;
+      this.activeWeapon = 'bat';
+    }
+    this.viewmodel.setWeapon('bat', true);
+
+    this.batFaceDriveState.active = true;
+    this.batFaceDriveState.enemy = enemy;
+    this.batFaceDriveState.timer = 0;
+    this.batFaceDriveState.impactTriggered = false;
+    this.batFaceDriveState.yankBurstTriggered = false;
+    this.batFaceDriveState.ragdollTriggered = false;
+    this.batFaceDriveState.dripTimer = 0;
+
+    enemy.setImpaledWindup();
+    this.sound.playWeaponSwing('bat');
+    this.emitHud();
   }
 
   private sampleGroundHeight(x: number, z: number): number {
     let groundHeight = 0;
     for (let i = 0; i < this.world.colliders.length; i++) {
       const b = this.world.colliders[i];
+      if (b.disabled) continue;
       if (
         x + PLAYER_RADIUS * 0.6 > b.minX &&
         x - PLAYER_RADIUS * 0.6 < b.maxX &&
@@ -1479,6 +2051,7 @@ export class AgraSurvivalEngine {
     const minCheckY = this.playerPos.y + 0.55;
     for (let i = 0; i < this.world.colliders.length; i++) {
       const b = this.world.colliders[i];
+      if (b.disabled) continue;
       if (
         this.playerPos.x + PLAYER_RADIUS * 0.85 > b.minX &&
         this.playerPos.x - PLAYER_RADIUS * 0.85 < b.maxX &&
@@ -1527,32 +2100,61 @@ export class AgraSurvivalEngine {
   // ARKHAM-STYLE FREEFLOW COMBAT: STRIKE + LUNGE, COUNTER, KICK, TAKEDOWN
   // =========================================================================
   private performMeleeAttack(): void {
-    if (this.attackCooldown > 0 || this.mantling || this.awakening.state.isActivating) return;
+    if (
+      this.attackCooldown > 0 ||
+      this.mantling ||
+      this.awakening.state.isActivating ||
+      this.headGrabState.active ||
+      this.isExecutingFinisher ||
+      this.isFinisherActive
+    ) {
+      return;
+    }
     const cfg = WEAPONS_BY_ID[this.activeWeapon];
+    const isExhaustedBefore = !window.devInfStamina && (this.exhaustionTimer > 0 || this.sprintExhausted);
     const lowStamina = !window.devInfStamina && this.stamina < cfg.staminaCost;
-    if (!window.devInfStamina) {
-      this.stamina = Math.max(0, this.stamina - cfg.staminaCost);
-      this.staminaPauseTimer = 0.55;
-    } else {
-      this.stamina = this.maxStamina;
-      this.sprintExhausted = false;
+
+    // Dedicated Unarmed Fists state machine + 12 stamina lockout + Left Hook impact timing
+    if (this.activeWeapon === 'unarmed') {
+      if (lowStamina) {
+        this.lowStaminaPulseTimer = 0.55;
+        this.sound.playLowStaminaBreath();
+        this.emitHud();
+        return;
+      }
+      this.spendStamina(cfg.staminaCost);
+      const fatigueDurationMult = !window.devInfStamina && (this.exhaustionTimer > 0 || isExhaustedBefore) ? 1.35 : 1.0;
+      this.attackCooldown = cfg.attackCooldown * fatigueDurationMult;
+      this.sound.playWeaponSwing('unarmed');
+      this.viewmodel.triggerUnarmedHook(() => {
+        this.resolveMeleeStrikeHitCheck(cfg, true);
+      });
+      return;
     }
 
+    this.spendStamina(cfg.staminaCost);
+    const isExhausted = !window.devInfStamina && (this.exhaustionTimer > 0 || isExhaustedBefore);
+
+    this.meleeSwingToggle = !this.meleeSwingToggle;
     const batAwakened = this.activeWeapon === 'bat' && this.awakening.state.isActive;
     const swingSpeedMult = batAwakened ? this.awakening.getSwingSpeedMultiplier() : 1.0;
-    this.attackCooldown = (lowStamina ? cfg.attackCooldown * 1.25 : cfg.attackCooldown) / swingSpeedMult;
-    this.viewmodel.triggerSwing(cfg.swingDuration / swingSpeedMult);
+    const fatigueDurationMult = isExhausted ? 1.4 : lowStamina ? 1.25 : 1.0;
+    this.attackCooldown = (cfg.attackCooldown * fatigueDurationMult) / swingSpeedMult;
+    this.viewmodel.triggerSwing((cfg.swingDuration * fatigueDurationMult) / swingSpeedMult);
     this.sound.playWeaponSwing(this.activeWeapon);
 
+    this.resolveMeleeStrikeHitCheck(cfg, false);
+  }
+
+  private resolveMeleeStrikeHitCheck(cfg: (typeof WEAPONS_BY_ID)[WeaponId], isUnarmedImpact: boolean): void {
+    const batAwakened = cfg.id === 'bat' && this.awakening.state.isActive;
     const lookX = -Math.sin(this.yaw);
     const lookZ = -Math.cos(this.yaw);
 
-    interface TargetCandidate {
-      zombie: ZombieActor;
-      dist: number;
-      dot: number;
-      score: number;
-    }
+    type TargetCandidate =
+      | { kind: 'zombie'; zombie: ZombieActor; pos: THREE.Vector3; dist: number; dot: number; score: number }
+      | { kind: 'screamer'; screamer: InfectedEnemy; pos: THREE.Vector3; dist: number; dot: number; score: number }
+      | { kind: 'night_runner'; nightRunner: NightRunner; pos: THREE.Vector3; dist: number; dot: number; score: number };
     const candidates: TargetCandidate[] = [];
 
     for (const z of this.zombies.zombies) {
@@ -1565,14 +2167,63 @@ export class AgraSurvivalEngine {
 
       const dot = (dx * lookX + dz * lookZ) / (dist || 1);
       if (dot > cfg.arcDot) {
-        candidates.push({ zombie: z, dist, dot, score: dist - dot * 1.4 });
+        candidates.push({ kind: 'zombie', zombie: z, pos: z.pos, dist, dot, score: dist - dot * 1.4 });
+      }
+    }
+
+    for (const e of this.infectedEnemies) {
+      if (
+        e.aiState === 'DEAD' ||
+        e.aiState === 'IMPALED_DEAD' ||
+        e.aiState === 'DEAD_RAGDOLL' ||
+        e.aiState === 'GRABBED'
+      ) {
+        continue;
+      }
+      const dx = e.root.position.x - this.playerPos.x;
+      const dz = e.root.position.z - this.playerPos.z;
+      const dy = Math.abs(e.root.position.y - this.playerPos.y);
+      const dist = Math.hypot(dx, dz);
+      if (dist > cfg.reach || dy > 2.2) continue;
+
+      const dot = (dx * lookX + dz * lookZ) / (dist || 1);
+      if (dot > cfg.arcDot) {
+        candidates.push({
+          kind: 'screamer',
+          screamer: e,
+          pos: e.root.position,
+          dist,
+          dot,
+          score: dist - dot * 1.4,
+        });
+      }
+    }
+
+    for (const nr of this.nightRunners) {
+      if (nr.state === 'DEAD' || nr.state === 'FINISHER_GRAB') continue;
+      const dx = nr.group.position.x - this.playerPos.x;
+      const dz = nr.group.position.z - this.playerPos.z;
+      const dy = Math.abs(nr.group.position.y - this.playerPos.y);
+      const dist = Math.hypot(dx, dz);
+      if (dist > cfg.reach + 0.35 || dy > 2.2) continue;
+
+      const dot = (dx * lookX + dz * lookZ) / (dist || 1);
+      if (dot > cfg.arcDot) {
+        candidates.push({
+          kind: 'night_runner',
+          nightRunner: nr,
+          pos: nr.group.position,
+          dist,
+          dot,
+          score: dist - dot * 1.4,
+        });
       }
     }
 
     if (candidates.length === 0) return;
     candidates.sort((a, b) => a.score - b.score);
 
-    const primary = candidates[0].zombie;
+    const primary = candidates[0];
     const pdx = primary.pos.x - this.playerPos.x;
     const pdz = primary.pos.z - this.playerPos.z;
     const pDist = Math.hypot(pdx, pdz) || 1;
@@ -1585,13 +2236,21 @@ export class AgraSurvivalEngine {
       this.lungeVel.set(pnx * 14, 0, pnz * 14);
     }
 
-    const targets = cfg.cleaveMultiTarget ? candidates.slice(0, 3).map((c) => c.zombie) : [primary];
+    const targets = cfg.cleaveMultiTarget ? candidates.slice(0, 3) : [primary];
     const lureActive = this.viewmodel.getActiveLurePosition() !== null;
     const durabilityScale =
-      cfg.maxDurability > 0 && (this.weaponDurability[this.activeWeapon] ?? 0) <= 0 ? 0.72 : 1.0;
+      cfg.maxDurability > 0 && (this.weaponDurability[cfg.id] ?? 0) <= 0 ? 0.72 : 1.0;
 
     let hitAny = false;
+    let hitCrit = false;
     let blockedPrimary = false;
+    const aimSlope = Math.tan(THREE.MathUtils.clamp(this.pitch, -1.1, 1.1));
+    const swingDir: MeleeSwingDirection =
+      !this.onGround || batAwakened
+        ? 'overhead'
+        : this.meleeSwingToggle
+          ? 'left_to_right'
+          : 'right_to_left';
 
     for (const target of targets) {
       const dx = target.pos.x - this.playerPos.x;
@@ -1599,46 +2258,160 @@ export class AgraSurvivalEngine {
       const dist = Math.hypot(dx, dz) || 1;
       const nx = dx / dist;
       const nz = dz / dist;
+      const aimWorldY = this.camera.position.y + aimSlope * dist;
 
-      const bruteToPlayerX = -nx;
-      const bruteToPlayerZ = -nz;
-      const bruteForwardX = Math.sin(target.yaw);
-      const bruteForwardZ = Math.cos(target.yaw);
-      const facingPlayer = bruteToPlayerX * bruteForwardX + bruteToPlayerZ * bruteForwardZ;
+      if (target.kind === 'zombie') {
+        const z = target.zombie;
+        const bruteToPlayerX = -nx;
+        const bruteToPlayerZ = -nz;
+        const bruteForwardX = Math.sin(z.yaw);
+        const bruteForwardZ = Math.cos(z.yaw);
+        const facingPlayer = bruteToPlayerX * bruteForwardX + bruteToPlayerZ * bruteForwardZ;
 
-      if (target.kind === 'brute' && target.state !== 'stunned' && facingPlayer > 0.2 && !lureActive) {
-        if (target === primary) {
-          blockedPrimary = true;
+        if (z.kind === 'brute' && z.state !== 'stunned' && facingPlayer > 0.2 && !lureActive) {
+          if (target === primary) {
+            blockedPrimary = true;
+          }
+          continue;
         }
-        continue;
-      }
 
-      hitAny = true;
-      if (this.activeWeapon === 'bat') {
-        this.awakening.addAwakeningCharge(14);
-      }
-      const awkDmgMult = this.activeWeapon === 'bat' ? this.awakening.getDamageMultiplier() : 1.0;
-      const awkKbMult = this.activeWeapon === 'bat' ? this.awakening.getKnockbackMultiplier() : 1.0;
-      const baseDmg = cfg.damage * durabilityScale * awkDmgMult + Math.min(20, this.comboCount * 3);
-      const damage = Math.round(target === primary ? baseDmg : baseDmg * 0.75);
-      _tmpVecB.set(nx, 0, nz);
-      const killed = this.zombies.damageZombie(
-        target,
-        damage,
-        _tmpVecB,
-        cfg.knockback * awkKbMult,
-        cfg.stunDuration,
-      );
-      if (killed) this.killCount++;
+        hitAny = true;
+        if (cfg.id === 'bat') {
+          this.awakening.addAwakeningCharge(9);
+        }
+        const headY = z.pos.y + (z.kind === 'brute' ? 2.45 : z.kind === 'dog' ? 0.85 : 1.72);
+        const isHeadCrit = Math.abs(aimWorldY - headY) <= (z.kind === 'dog' ? 0.42 : 0.46) && target.dot > 0.72;
+        if (isHeadCrit) hitCrit = true;
 
-      const sparkY = target.kind === 'dog' ? 0.65 : 1.35;
-      _tmpVecA.copy(target.pos).setY(target.pos.y + sparkY);
-      this.viewmodel.spawnBloodAndSparks(_tmpVecA, _tmpVecB, this.activeWeapon === 'cleaver' ? 14 : 10);
+        const awkDmgMult = cfg.id === 'bat' ? this.awakening.getDamageMultiplier() : 1.0;
+        const awkKbMult = cfg.id === 'bat' ? this.awakening.getKnockbackMultiplier() : 1.0;
+        const critMult = isHeadCrit ? 1.75 : 1.0;
+        const baseDmg = (cfg.damage * durabilityScale * awkDmgMult + Math.min(20, this.comboCount * 3)) * critMult;
+        const damage = Math.round(target === primary ? baseDmg : baseDmg * 0.75);
+        _tmpVecB.set(nx, 0, nz);
+        const killed = this.zombies.damageZombie(
+          z,
+          damage,
+          _tmpVecB,
+          cfg.knockback * awkKbMult,
+          isHeadCrit ? Math.max(cfg.stunDuration, 0.95) : cfg.stunDuration,
+          isHeadCrit || batAwakened,
+        );
+        if (killed) this.killCount++;
+
+        const sparkY = z.kind === 'dog' ? 0.65 : 1.35;
+        _tmpVecA.copy(z.pos).setY(z.pos.y + sparkY);
+        this.viewmodel.spawnBloodAndSparks(
+          _tmpVecA,
+          _tmpVecB,
+          isHeadCrit ? 18 : cfg.id === 'cleaver' ? 14 : 10,
+        );
+        if (killed || isHeadCrit) {
+          this.viewmodel.spawnGroundBloodSplatter(z.pos, killed ? 3 : 2);
+        }
+        if (killed || isHeadCrit || batAwakened || this.comboCount + 1 >= 3) {
+          const zFloorY = this.sampleGroundHeight(z.pos.x, z.pos.z);
+          this.viewmodel.spawnComboBloodSpatter(
+            _tmpVecA,
+            _tmpVecB,
+            Math.max(zFloorY, z.pos.y),
+            killed || isHeadCrit ? 12 : 8,
+            batAwakened ? 1.25 : 1.0,
+          );
+        }
+      } else if (target.kind === 'screamer') {
+        const e = target.screamer;
+        hitAny = true;
+        if (cfg.id === 'bat') {
+          this.awakening.addAwakeningCharge(9);
+        }
+        e.getHeadWorldPosition(_tmpVecA);
+        const isHeadCrit = Math.abs(aimWorldY - _tmpVecA.y) <= 0.45 && target.dot > 0.72;
+        if (isHeadCrit) hitCrit = true;
+
+        const awkDmgMult = cfg.id === 'bat' ? this.awakening.getDamageMultiplier() : 1.0;
+        const awkKbMult = cfg.id === 'bat' ? this.awakening.getKnockbackMultiplier() : 1.0;
+        const critMult = isHeadCrit ? 1.75 : 1.0;
+        const baseDmg = (cfg.damage * durabilityScale * awkDmgMult + Math.min(20, this.comboCount * 3)) * critMult;
+        const damage = Math.round(target === primary ? baseDmg : baseDmg * 0.75);
+        _tmpVecB.set(nx, 0, nz);
+        e.health -= damage;
+        if (e.health <= 0) {
+          e.markDead(_tmpVecB);
+          this.killCount++;
+        } else if (batAwakened || cfg.knockback * awkKbMult >= 11) {
+          _grabImpulse.set(nx * cfg.knockback * awkKbMult * 0.85, 4.4, nz * cfg.knockback * awkKbMult * 0.85);
+          e.applyKnockdown(_grabImpulse);
+        } else {
+          e.applyStagger(_tmpVecB, swingDir, isHeadCrit);
+        }
+
+        this.viewmodel.spawnBloodAndSparks(
+          _tmpVecA,
+          _tmpVecB,
+          isHeadCrit ? 18 : cfg.id === 'cleaver' ? 14 : 10,
+        );
+        if (e.health <= 0 || isHeadCrit) {
+          this.viewmodel.spawnGroundBloodSplatter(e.root.position, e.health <= 0 ? 3 : 2);
+        }
+        if (e.health <= 0 || isHeadCrit || batAwakened || this.comboCount + 1 >= 3) {
+          const eFloorY = this.sampleGroundHeight(e.root.position.x, e.root.position.z);
+          this.viewmodel.spawnComboBloodSpatter(
+            _tmpVecA,
+            _tmpVecB,
+            Math.max(eFloorY, e.root.position.y),
+            e.health <= 0 || isHeadCrit ? 12 : 8,
+            batAwakened ? 1.25 : 1.0,
+          );
+        }
+      } else {
+        const nr = target.nightRunner;
+        hitAny = true;
+        if (cfg.id === 'bat') {
+          this.awakening.addAwakeningCharge(9);
+        }
+        nr.getHeadWorldPosition(_tmpVecA);
+        const isHeadCrit = Math.abs(aimWorldY - _tmpVecA.y) <= 0.45 && target.dot > 0.72;
+        if (isHeadCrit) hitCrit = true;
+
+        const awkDmgMult = cfg.id === 'bat' ? this.awakening.getDamageMultiplier() : 1.0;
+        const awkKbMult = cfg.id === 'bat' ? this.awakening.getKnockbackMultiplier() : 1.0;
+        const critMult = isHeadCrit ? 1.75 : 1.0;
+        const baseDmg = (cfg.damage * durabilityScale * awkDmgMult + Math.min(20, this.comboCount * 3)) * critMult;
+        const damage = Math.round(target === primary ? baseDmg : baseDmg * 0.75);
+        _tmpVecB.set(nx, 0, nz);
+        const killed = nr.applyDamage(
+          damage,
+          _tmpVecB,
+          Math.max(0.6, cfg.stunDuration),
+          Math.max(4.5, cfg.knockback * awkKbMult * 0.7),
+        );
+        if (killed) this.killCount++;
+
+        this.viewmodel.spawnBloodAndSparks(
+          _tmpVecA,
+          _tmpVecB,
+          isHeadCrit ? 18 : cfg.id === 'cleaver' ? 14 : 10,
+        );
+        if (killed || isHeadCrit) {
+          this.viewmodel.spawnGroundBloodSplatter(nr.group.position, killed ? 3 : 2);
+        }
+        if (killed || isHeadCrit || batAwakened || this.comboCount + 1 >= 3) {
+          const nrFloorY = this.sampleGroundHeight(nr.group.position.x, nr.group.position.z);
+          this.viewmodel.spawnComboBloodSpatter(
+            _tmpVecA,
+            _tmpVecB,
+            Math.max(nrFloorY, nr.group.position.y),
+            killed || isHeadCrit ? 12 : 8,
+            batAwakened ? 1.25 : 1.0,
+          );
+        }
+      }
     }
 
-    if (blockedPrimary && !hitAny) {
+    if (blockedPrimary && !hitAny && primary.kind === 'zombie') {
       this.viewmodel.triggerBlocked();
-      this.sound.playWeaponHit(this.activeWeapon, true);
+      this.sound.playWeaponHit(cfg.id, true);
       this.cameraShake = 0.22;
       _tmpVecA.copy(primary.pos).setY(primary.pos.y + 1.3);
       this.viewmodel.spawnSparks(_tmpVecA, 0x94a3b8, 12);
@@ -1652,21 +2425,37 @@ export class AgraSurvivalEngine {
 
     if (hitAny) {
       if (cfg.maxDurability > 0) {
-        this.weaponDurability[this.activeWeapon] = Math.max(
+        this.weaponDurability[cfg.id] = Math.max(
           0,
-          (this.weaponDurability[this.activeWeapon] ?? cfg.maxDurability) - 2,
+          (this.weaponDurability[cfg.id] ?? cfg.maxDurability) - 2,
         );
       }
-      const awkHitstop = this.activeWeapon === 'bat' ? this.awakening.getHitstopBonus() : 0;
-      this.hitstopTimer = (this.activeWeapon === 'cleaver' ? 0.055 : 0.035) + awkHitstop;
-      this.cameraShake = (this.activeWeapon === 'cleaver' ? 0.24 : 0.16) + (batAwakened ? 0.08 : 0);
+      if (isUnarmedImpact) {
+        this.viewmodel.triggerUnarmedHitstop(0.045);
+      }
+      const awkHitstop = cfg.id === 'bat' ? this.awakening.getHitstopBonus() : 0;
+      this.hitstopTimer = Math.max(0.04, (cfg.id === 'cleaver' ? 0.055 : 0.04) + awkHitstop);
+      this.hitMarkerFlash = hitCrit ? 0.22 : 0.14;
+      this.cameraShake = (cfg.id === 'cleaver' ? 0.26 : 0.18) + (hitCrit ? 0.1 : 0) + (batAwakened ? 0.08 : 0);
       this.registerComboHit(1);
-      this.sound.playWeaponHit(this.activeWeapon, false);
+      if (this.comboCount >= 3 || hitCrit || batAwakened) {
+        const heavy = hitCrit || batAwakened || this.comboCount >= 5;
+        this.spawnScreenBloodSpatter(heavy ? 6 : 4, heavy);
+      }
+      this.sound.playWeaponHit(cfg.id, false);
     }
   }
 
   private performParkourKick(): void {
-    if (this.kickCooldown > 0 || this.mantling || this.awakening.state.isActivating) return;
+    if (
+      this.kickCooldown > 0 ||
+      this.mantling ||
+      this.awakening.state.isActivating ||
+      this.headGrabState.active ||
+      this.isExecutingFinisher
+    ) {
+      return;
+    }
     const airborne = !this.onGround;
     this.kickCooldown = airborne ? 1.05 : 0.85;
     this.viewmodel.triggerKick(airborne);
@@ -1706,6 +2495,68 @@ export class AgraSurvivalEngine {
         const sparkY = z.kind === 'dog' ? 0.6 : 1.1;
         _tmpVecA.copy(z.pos).setY(z.pos.y + sparkY);
         this.viewmodel.spawnBloodAndSparks(_tmpVecA, _tmpVecB, airborne ? 10 : 7);
+        if (killed || airborne || this.comboCount + 1 >= 3) {
+          this.viewmodel.spawnComboBloodSpatter(_tmpVecA, _tmpVecB, z.pos.y, airborne ? 10 : 7, 1.0);
+        }
+      }
+    }
+
+    for (const e of this.infectedEnemies) {
+      if (
+        e.aiState === 'DEAD' ||
+        e.aiState === 'IMPALED_DEAD' ||
+        e.aiState === 'DEAD_RAGDOLL' ||
+        e.aiState === 'GRABBED'
+      ) {
+        continue;
+      }
+      const dx = e.root.position.x - this.playerPos.x;
+      const dz = e.root.position.z - this.playerPos.z;
+      const dist = Math.hypot(dx, dz);
+      if (dist > reach || Math.abs(e.root.position.y - this.playerPos.y) > 2.4) continue;
+
+      const dot = (dx * lookX + dz * lookZ) / (dist || 1);
+      if (dot > 0.32) {
+        kickedAny = true;
+        const nx = dx / (dist || 1);
+        const nz = dz / (dist || 1);
+        _tmpVecB.set(nx, 0, nz);
+        e.health -= damage;
+        if (e.health <= 0) {
+          e.markDead(_tmpVecB);
+          this.killCount++;
+        } else {
+          _grabImpulse.set(nx * knockForce * 0.78, airborne ? 5.2 : 4.2, nz * knockForce * 0.78);
+          e.applyKnockdown(_grabImpulse);
+        }
+        e.getHeadWorldPosition(_tmpVecA);
+        this.viewmodel.spawnBloodAndSparks(_tmpVecA, _tmpVecB, airborne ? 10 : 7);
+        if (e.health <= 0 || airborne || this.comboCount + 1 >= 3) {
+          this.viewmodel.spawnComboBloodSpatter(_tmpVecA, _tmpVecB, e.root.position.y, airborne ? 10 : 7, 1.0);
+        }
+      }
+    }
+
+    for (const nr of this.nightRunners) {
+      if (nr.state === 'DEAD' || nr.state === 'FINISHER_GRAB') continue;
+      const dx = nr.group.position.x - this.playerPos.x;
+      const dz = nr.group.position.z - this.playerPos.z;
+      const dist = Math.hypot(dx, dz);
+      if (dist > reach || Math.abs(nr.group.position.y - this.playerPos.y) > 2.4) continue;
+
+      const dot = (dx * lookX + dz * lookZ) / (dist || 1);
+      if (dot > 0.32) {
+        kickedAny = true;
+        const nx = dx / (dist || 1);
+        const nz = dz / (dist || 1);
+        _tmpVecB.set(nx, 0, nz);
+        const killed = nr.applyDamage(damage, _tmpVecB, stunDur, knockForce * 0.75);
+        if (killed) this.killCount++;
+        nr.getHeadWorldPosition(_tmpVecA);
+        this.viewmodel.spawnBloodAndSparks(_tmpVecA, _tmpVecB, airborne ? 10 : 7);
+        if (killed || airborne || this.comboCount + 1 >= 3) {
+          this.viewmodel.spawnComboBloodSpatter(_tmpVecA, _tmpVecB, nr.group.position.y, airborne ? 10 : 7, 1.0);
+        }
       }
     }
 
@@ -1714,11 +2565,21 @@ export class AgraSurvivalEngine {
       this.hitstopTimer = airborne ? 0.055 : 0.04;
       this.cameraShake = airborne ? 0.3 : 0.22;
       this.registerComboHit(1);
+      if (airborne || this.comboCount >= 3) {
+        this.spawnScreenBloodSpatter(airborne ? 5 : 3, airborne);
+      }
     }
   }
 
   private performCounterParry(): void {
-    if (this.mantling || this.awakening.state.isActivating) return;
+    if (
+      this.mantling ||
+      this.awakening.state.isActivating ||
+      this.headGrabState.active ||
+      this.isExecutingFinisher
+    ) {
+      return;
+    }
     let counteredAny = false;
 
     for (const z of this.zombies.zombies) {
@@ -1744,6 +2605,33 @@ export class AgraSurvivalEngine {
       }
     }
 
+    for (const e of this.infectedEnemies) {
+      if (!e.isWindingUp) continue;
+      const dx = e.root.position.x - this.playerPos.x;
+      const dz = e.root.position.z - this.playerPos.z;
+      const dist = Math.hypot(dx, dz);
+      if (dist <= 5.5 && Math.abs(e.root.position.y - this.playerPos.y) < 2.5) {
+        counteredAny = true;
+        const nx = dx / (dist || 1);
+        const nz = dz / (dist || 1);
+        this.targetYawGoal = Math.atan2(-nx, -nz);
+
+        _tmpVecB.set(nx, 0, nz);
+        e.health -= 52;
+        if (e.health <= 0) {
+          e.markDead(_tmpVecB);
+          this.killCount++;
+        } else {
+          _grabImpulse.set(nx * 9.5, 4.2, nz * 9.5);
+          e.applyKnockdown(_grabImpulse);
+        }
+        e.getHeadWorldPosition(_tmpVecA);
+        this.viewmodel.spawnSparks(_tmpVecA, 0xfef08a, 14);
+        this.viewmodel.spawnBloodAndSparks(_tmpVecA, _tmpVecB, 10);
+        this.registerComboHit(2);
+      }
+    }
+
     this.viewmodel.triggerParry();
     if (counteredAny) {
       this.awakening.addAwakeningCharge(10);
@@ -1759,7 +2647,15 @@ export class AgraSurvivalEngine {
   }
 
   private performHeavyTakedown(): void {
-    if (this.comboCount < 5 || this.mantling || this.awakening.state.isActivating) return;
+    if (
+      this.comboCount < 5 ||
+      this.mantling ||
+      this.awakening.state.isActivating ||
+      this.headGrabState.active ||
+      this.isExecutingFinisher
+    ) {
+      return;
+    }
 
     this.comboCount = 0;
     this.comboTimer = 0;
@@ -1783,9 +2679,100 @@ export class AgraSurvivalEngine {
         const sparkY = z.kind === 'dog' ? 0.65 : 1.2;
         _tmpVecA.copy(z.pos).setY(z.pos.y + sparkY);
         this.viewmodel.spawnBloodAndSparks(_tmpVecA, _tmpVecB, 12);
+        this.viewmodel.spawnComboBloodSpatter(_tmpVecA, _tmpVecB, z.pos.y, 12, 1.25);
       }
     }
+
+    for (const e of this.infectedEnemies) {
+      if (
+        e.aiState === 'DEAD' ||
+        e.aiState === 'IMPALED_DEAD' ||
+        e.aiState === 'DEAD_RAGDOLL' ||
+        e.aiState === 'GRABBED'
+      ) {
+        continue;
+      }
+      const dx = e.root.position.x - this.playerPos.x;
+      const dz = e.root.position.z - this.playerPos.z;
+      const dist = Math.hypot(dx, dz);
+      if (dist <= 7.0 && Math.abs(e.root.position.y - this.playerPos.y) < 3.0) {
+        const nx = dx / (dist || 1);
+        const nz = dz / (dist || 1);
+        _tmpVecB.set(nx, 0, nz);
+        e.health -= 95;
+        if (e.health <= 0) {
+          e.markDead(_tmpVecB);
+          this.killCount++;
+        } else {
+          _grabImpulse.set(nx * 11.5, 4.8, nz * 11.5);
+          e.applyKnockdown(_grabImpulse);
+        }
+        e.getHeadWorldPosition(_tmpVecA);
+        this.viewmodel.spawnBloodAndSparks(_tmpVecA, _tmpVecB, 12);
+        this.viewmodel.spawnComboBloodSpatter(_tmpVecA, _tmpVecB, e.root.position.y, 12, 1.25);
+      }
+    }
+    for (const nr of this.nightRunners) {
+      if (nr.state === 'DEAD' || nr.state === 'FINISHER_GRAB') continue;
+      const dx = nr.group.position.x - this.playerPos.x;
+      const dz = nr.group.position.z - this.playerPos.z;
+      const dist = Math.hypot(dx, dz);
+      if (dist <= 7.0 && Math.abs(nr.group.position.y - this.playerPos.y) < 3.0) {
+        const nx = dx / (dist || 1);
+        const nz = dz / (dist || 1);
+        _tmpVecB.set(nx, 0, nz);
+        if (nr.applyDamage(95, _tmpVecB, 2.2, 11.5)) {
+          this.killCount++;
+        }
+        nr.getHeadWorldPosition(_tmpVecA);
+        this.viewmodel.spawnBloodAndSparks(_tmpVecA, _tmpVecB, 12);
+        this.viewmodel.spawnComboBloodSpatter(_tmpVecA, _tmpVecB, nr.group.position.y, 12, 1.25);
+      }
+    }
+    this.spawnScreenBloodSpatter(9, true);
     this.emitHud();
+  }
+
+  private spawnScreenBloodSpatter(count: number, heavy = false): void {
+    for (let i = 0; i < count; i++) {
+      const edge = Math.floor(Math.random() * 4); // 0=left, 1=right, 2=top, 3=bottom
+      let xPct = 50;
+      let yPct = 50;
+      if (edge === 0) {
+        xPct = 1.5 + Math.random() * 11.5;
+        yPct = 4 + Math.random() * 90;
+      } else if (edge === 1) {
+        xPct = 87 + Math.random() * 11.5;
+        yPct = 4 + Math.random() * 90;
+      } else if (edge === 2) {
+        xPct = 6 + Math.random() * 88;
+        yPct = 1.5 + Math.random() * 10.5;
+      } else {
+        xPct = 6 + Math.random() * 88;
+        yPct = 87 + Math.random() * 10.5;
+      }
+
+      const maxLife = heavy ? 4.4 + Math.random() * 1.4 : 3.4 + Math.random() * 1.1;
+      const baseOp = heavy ? 0.72 + Math.random() * 0.22 : 0.56 + Math.random() * 0.22;
+      this.screenSpatters.push({
+        id: this.nextSpatterId++,
+        xPct,
+        yPct,
+        sizePx: heavy ? 42 + Math.random() * 54 : 28 + Math.random() * 34,
+        rotDeg: Math.round(Math.random() * 360),
+        scaleX: 0.78 + Math.random() * 0.55,
+        scaleY: 0.92 + Math.random() * 0.62,
+        dripPx: 0,
+        opacity: baseOp,
+        variant: (Math.floor(Math.random() * 3) as 0 | 1 | 2),
+        age: 0,
+        maxLife,
+        dripSpeed: heavy ? 11 + Math.random() * 14 : 6 + Math.random() * 9,
+      });
+    }
+    if (this.screenSpatters.length > 26) {
+      this.screenSpatters.splice(0, this.screenSpatters.length - 26);
+    }
   }
 
   private registerComboHit(amount = 1): void {
@@ -1881,7 +2868,7 @@ export class AgraSurvivalEngine {
 
       for (let i = 0; i < this.world.colliders.length; i++) {
         const b = this.world.colliders[i];
-        if (b.ramp) continue;
+        if (b.disabled || b.ramp) continue;
         if (!b.wallrunnable && b.maxY - b.minY < 2.2) continue;
         if (b.id && b.id === this.lastWallColliderId) continue;
         if (this.playerPos.y < b.minY - 0.35 || this.playerPos.y > b.maxY - 0.85) continue;
@@ -1931,7 +2918,7 @@ export class AgraSurvivalEngine {
     const checkMaxY = topY + 1.68;
     for (let i = 0; i < this.world.colliders.length; i++) {
       const b = this.world.colliders[i];
-      if (b.id === ignoreId || b.ramp) continue;
+      if (b.disabled || b.id === ignoreId || b.ramp) continue;
       if (b.maxY <= checkMinY || b.minY >= checkMaxY) continue;
       if (
         tx + PLAYER_RADIUS * 0.65 > b.minX &&
@@ -1972,7 +2959,7 @@ export class AgraSurvivalEngine {
 
       for (let i = 0; i < this.world.colliders.length; i++) {
         const b = this.world.colliders[i];
-        if (!b.mantleable || b.ramp) continue;
+        if (b.disabled || !b.mantleable || b.ramp) continue;
 
         if (
           px >= b.minX - PLAYER_RADIUS * 0.9 &&
@@ -2064,6 +3051,7 @@ export class AgraSurvivalEngine {
     if (this.onGround || this.coyoteTimer > 0) {
       const onRamp = this.playerPos.y > 0.16 && this.world.colliders.some(
         (b) =>
+          !b.disabled &&
           b.ramp &&
           this.playerPos.x >= b.minX - 0.35 &&
           this.playerPos.x <= b.maxX + 0.35 &&
@@ -2085,6 +3073,7 @@ export class AgraSurvivalEngine {
       this.jumpBufferTimer = 0;
       this.slideTimer = 0;
       this.airPeakY = this.playerPos.y;
+      this.spendStamina(12);
       this.sound.playWindRush(0.45);
       return;
     }
@@ -2096,6 +3085,22 @@ export class AgraSurvivalEngine {
       } else {
         this.beginMantle(mantle.box, mantle.targetX, mantle.targetZ);
       }
+    }
+  }
+
+  private spendStamina(cost: number): void {
+    if (window.devInfStamina) {
+      this.stamina = this.maxStamina;
+      this.sprintExhausted = false;
+      this.exhaustionTimer = 0;
+      return;
+    }
+    this.stamina = Math.max(0, this.stamina - cost);
+    this.staminaPauseTimer = 0.65;
+    if (this.stamina <= 0) {
+      this.stamina = 0;
+      this.sprintExhausted = true;
+      this.exhaustionTimer = Math.max(this.exhaustionTimer, 1.8);
     }
   }
 
@@ -2115,6 +3120,7 @@ export class AgraSurvivalEngine {
     this.airPeakY = this.mantleEnd.y;
     this.playerVel.set(0, 0, 0);
     this.jumpBufferTimer = 0;
+    this.spendStamina(14);
     this.awardParkourCombo(PARKOUR_CONFIG.LEDGE_STYLE_POINTS, 'LEDGE MANTLE', 0.32);
     this.awakening.addAwakeningCharge(6);
     this.sound.playLedgeGrab(false);
@@ -2141,6 +3147,7 @@ export class AgraSurvivalEngine {
     this.vaultPeakY = b.maxY + 0.45;
     this.airPeakY = this.vaultEnd.y;
     this.jumpBufferTimer = 0;
+    this.spendStamina(14);
     this.awardParkourCombo(PARKOUR_CONFIG.VAULT_STYLE_POINTS, 'SPEED VAULT', 0.36);
     this.awakening.addAwakeningCharge(6);
     this.sound.playLedgeGrab(true);
@@ -2151,6 +3158,8 @@ export class AgraSurvivalEngine {
     this.rollBufferTimer = Math.max(0, this.rollBufferTimer - dt);
     this.ziplineDetachCooldown = Math.max(0, this.ziplineDetachCooldown - dt);
     this.parkourMoveTimer = Math.max(0, this.parkourMoveTimer - dt);
+    this.exhaustionTimer = Math.max(0, this.exhaustionTimer - dt);
+    this.hitSlowTimer = Math.max(0, this.hitSlowTimer - dt);
 
     if (window.devImmortal) {
       this.health = this.maxHealth;
@@ -2178,8 +3187,8 @@ export class AgraSurvivalEngine {
 
     this.fovPunch = THREE.MathUtils.lerp(this.fovPunch, 0, 1 - Math.exp(-dt * 10));
 
-    // Lock WASD/sprint/jump locomotion cleanly during the 4.60s anime Awakening cutscene
-    if (this.awakening.state.isActivating) {
+    // Lock WASD/sprint/jump locomotion cleanly during Awakening cutscene, Bat Face-Drive finisher, or Night Runner finisher
+    if (this.awakening.state.isActivating || this.isExecutingFinisher || this.isFinisherActive) {
       this.playerVel.x = 0;
       this.playerVel.z = 0;
       this.sprintMomentum = 0;
@@ -2412,14 +3421,15 @@ export class AgraSurvivalEngine {
       this.isCrouching = false;
     }
 
-    // Stamina & exhaustion lockout (cannot sprint again until stamina regenerates past 20%)
+    // Stamina & 1.8s Exhaustion lockout (cannot sprint until exhaustion ends & stamina > 20%)
     const wantsSprint = Boolean(this.keys['ShiftLeft'] || this.keys['ShiftRight']);
-    if (this.sprintExhausted && this.stamina >= MOVEMENT_CONFIG.STAMINA_RECOVERY_THRESHOLD) {
+    if (this.sprintExhausted && this.exhaustionTimer <= 0 && this.stamina >= MOVEMENT_CONFIG.STAMINA_RECOVERY_THRESHOLD) {
       this.sprintExhausted = false;
     }
     const isSprinting =
       wantsSprint &&
       rawFwd > 0 &&
+      this.exhaustionTimer <= 0 &&
       !this.sprintExhausted &&
       !this.isCrouching &&
       this.slideTimer <= 0 &&
@@ -2428,6 +3438,7 @@ export class AgraSurvivalEngine {
     if (window.devInfStamina) {
       this.stamina = this.maxStamina;
       this.sprintExhausted = false;
+      this.exhaustionTimer = 0;
       this.staminaPauseTimer = 0;
     } else if (isSprinting) {
       this.stamina = Math.max(0, this.stamina - MOVEMENT_CONFIG.STAMINA_DRAIN_RATE * dt);
@@ -2435,11 +3446,13 @@ export class AgraSurvivalEngine {
       if (this.stamina <= 0) {
         this.stamina = 0;
         this.sprintExhausted = true;
+        this.exhaustionTimer = 1.8;
       }
     } else {
       this.staminaPauseTimer = Math.max(0, this.staminaPauseTimer - dt);
       if (this.staminaPauseTimer <= 0) {
-        this.stamina = Math.min(this.maxStamina, this.stamina + MOVEMENT_CONFIG.STAMINA_REGEN_RATE * dt);
+        const regenScale = this.exhaustionTimer > 0 ? 0.45 : 1.0;
+        this.stamina = Math.min(this.maxStamina, this.stamina + MOVEMENT_CONFIG.STAMINA_REGEN_RATE * regenScale * dt);
       }
     }
 
@@ -2511,9 +3524,10 @@ export class AgraSurvivalEngine {
 
     // 3. Smooth Ground Acceleration/Deceleration, Air Momentum, and Physics-Driven Parkour Slide
     const smoothSprint = this.sprintMomentum * this.sprintMomentum * (3 - 2 * this.sprintMomentum);
+    const hitSlowMult = this.hitSlowTimer > 0 ? 0.65 : 1.0;
     const activeTopSpeed = (this.isCrouching
       ? MOVEMENT_CONFIG.CROUCH_SPEED
-      : THREE.MathUtils.lerp(MOVEMENT_CONFIG.WALK_SPEED, MOVEMENT_CONFIG.SPRINT_SPEED, smoothSprint)) * moveSpeedMult;
+      : THREE.MathUtils.lerp(MOVEMENT_CONFIG.WALK_SPEED, MOVEMENT_CONFIG.SPRINT_SPEED, smoothSprint)) * moveSpeedMult * hitSlowMult;
 
     if (this.lungeTimer > 0) {
       this.lungeTimer -= dt;
@@ -2571,12 +3585,34 @@ export class AgraSurvivalEngine {
       // Continuous velocity-scaled slide foley loop
       this.sound.updateSlideLoop(this.onGround, this.slideSpeed);
 
-      // Slide knocks down/trips zombies in path
+      // Slide knocks down/trips zombies & Screamers in path
       for (const z of this.zombies.zombies) {
         if (z.state === 'dead' || z.state === 'stunned') continue;
         if (this.playerPos.distanceTo(z.pos) < 1.9 && Math.abs(this.playerPos.y - z.pos.y) < 1.5) {
           const killed = this.zombies.damageZombie(z, 14, this.slideDir, 10.2, 1.25);
           if (killed) this.killCount++;
+          this.sound.playKick(true);
+        }
+      }
+      for (const e of this.infectedEnemies) {
+        if (
+          e.aiState === 'DEAD' ||
+          e.aiState === 'IMPALED_DEAD' ||
+          e.aiState === 'DEAD_RAGDOLL' ||
+          e.aiState === 'KNOCKDOWN' ||
+          e.aiState === 'GRABBED'
+        ) {
+          continue;
+        }
+        if (this.playerPos.distanceTo(e.root.position) < 1.9 && Math.abs(this.playerPos.y - e.root.position.y) < 1.5) {
+          e.health -= 14;
+          if (e.health <= 0) {
+            e.markDead(this.slideDir);
+            this.killCount++;
+          } else {
+            _grabImpulse.set(this.slideDir.x * 8.5, 3.8, this.slideDir.z * 8.5);
+            e.applyKnockdown(_grabImpulse);
+          }
           this.sound.playKick(true);
         }
       }
@@ -2686,6 +3722,7 @@ export class AgraSurvivalEngine {
         this.isVariableJump = true;
         this.onGround = false;
         this.coyoteTimer = 0;
+        this.spendStamina(12);
         this.sound.playWindRush(0.42);
       }
     } else {
@@ -2751,6 +3788,7 @@ export class AgraSurvivalEngine {
 
     for (let i = 0; i < this.world.colliders.length; i++) {
       const b = this.world.colliders[i];
+      if (b.disabled) continue;
       const boxTop = this.getColliderTopAt(b, this.playerPos.x, this.playerPos.z);
       if (this.playerPos.y >= boxTop - 0.12 || this.playerPos.y + currentPlayerHeight < b.minY) continue;
 
@@ -2782,7 +3820,7 @@ export class AgraSurvivalEngine {
       }
     }
 
-    this.playerPos.x = THREE.MathUtils.clamp(this.playerPos.x, -44.2, 44.2);
+    this.playerPos.x = THREE.MathUtils.clamp(this.playerPos.x, -106.2, 56.2);
     this.playerPos.z = THREE.MathUtils.clamp(this.playerPos.z, -93, 49.5);
 
     // Integrate Y and resolve ground / roof / thin bridge planks / sloped ramps
@@ -2794,6 +3832,7 @@ export class AgraSurvivalEngine {
     let landedCushion = false;
     for (let i = 0; i < this.world.colliders.length; i++) {
       const b = this.world.colliders[i];
+      if (b.disabled) continue;
       if (
         this.playerPos.x + PLAYER_RADIUS * 0.72 > b.minX &&
         this.playerPos.x - PLAYER_RADIUS * 0.72 < b.maxX &&
@@ -2891,7 +3930,7 @@ export class AgraSurvivalEngine {
       this.fovPunch +
       this.awakening.getFovOffset();
 
-    if (Math.abs(this.camera.fov - targetFov) > 0.05) {
+    if (!this.batFaceDriveState.active && Math.abs(this.camera.fov - targetFov) > 0.05) {
       this.camera.fov = THREE.MathUtils.lerp(this.camera.fov, targetFov, 1 - Math.exp(-dt * 11));
       this.camera.updateProjectionMatrix();
     }
@@ -3024,7 +4063,7 @@ export class AgraSurvivalEngine {
 
       for (let i = 0; i < this.world.colliders.length; i++) {
         const b = this.world.colliders[i];
-        if (b.ramp) continue;
+        if (b.disabled || b.ramp) continue;
         if (
           px >= b.minX - 0.14 &&
           px <= b.maxX + 0.14 &&
@@ -3061,13 +4100,26 @@ export class AgraSurvivalEngine {
 
   private updateAtmosphere(dt: number): void {
     if (this.phase === 'playing' && !this.intro.isIntroPlaying) {
-      this.timeOfDay = (this.timeOfDay + dt / FULL_CYCLE_SECONDS) % 1;
+      const nextTime = (this.timeOfDay + dt / FULL_CYCLE_SECONDS) % 1;
+      if (nextTime < this.timeOfDay) {
+        this.survivedDays++;
+      }
+      this.timeOfDay = nextTime;
+
+      if (this.flashlightOn && !this.isFinisherActive) {
+        this.flashlightBattery = Math.max(0, this.flashlightBattery - 1.8 * dt);
+        if (this.flashlightBattery <= 0) {
+          this.flashlightOn = false;
+          this.flashlight.intensity = 0;
+          this.sound.playFlashlightClick();
+        }
+      }
     }
 
     const isNight = this.isNightTime();
 
     if (this.phase === 'playing' && isNight && !this.wasNight) {
-      if (!this.flashlightOn) {
+      if (!this.flashlightOn && this.flashlightBattery > 0) {
         this.flashlightOn = true;
         this.flashlight.intensity = 6.5;
         this.sound.playFlashlightClick();
@@ -3193,14 +4245,47 @@ export class AgraSurvivalEngine {
             this.dropkickTimer = Math.max(0, this.dropkickTimer - rawDt);
             this.slideCooldown = Math.max(0, this.slideCooldown - rawDt);
             this.firecrackerCooldown = Math.max(0, this.firecrackerCooldown - rawDt);
+            this.lowStaminaPulseTimer = Math.max(0, this.lowStaminaPulseTimer - rawDt);
+            if (this.liberationToastTimer > 0) {
+              this.liberationToastTimer = Math.max(0, this.liberationToastTimer - rawDt);
+              if (this.liberationToastTimer <= 0) {
+                this.liberationToastName = null;
+              }
+            }
+            if (this.squadCommandToastTimer > 0) {
+              this.squadCommandToastTimer = Math.max(0, this.squadCommandToastTimer - rawDt);
+              if (this.squadCommandToastTimer <= 0) {
+                this.squadCommandToast = null;
+              }
+            }
+            if (this.allyDownAlertTimer > 0) {
+              this.allyDownAlertTimer = Math.max(0, this.allyDownAlertTimer - rawDt);
+              if (this.allyDownAlertTimer <= 0) {
+                this.allyDownAlert = null;
+              }
+            }
             this.cameraShake = Math.max(0, this.cameraShake - rawDt * 1.6);
             this.damageFlash = Math.max(0, this.damageFlash - rawDt * 2.2);
             this.parryFlash = Math.max(0, this.parryFlash - rawDt * 2.4);
+            this.hitMarkerFlash = Math.max(0, this.hitMarkerFlash - rawDt * 1.4);
+            this.finisherGoreOpacity = Math.max(0, this.finisherGoreOpacity - rawDt / 0.8);
 
             for (let i = this.directionalHits.length - 1; i >= 0; i--) {
               this.directionalHits[i].intensity -= rawDt * 1.35;
               if (this.directionalHits[i].intensity <= 0) {
                 this.directionalHits.splice(i, 1);
+              }
+            }
+
+            for (let i = this.screenSpatters.length - 1; i >= 0; i--) {
+              const sp = this.screenSpatters[i];
+              sp.age += rawDt;
+              sp.dripPx += sp.dripSpeed * rawDt;
+              const fadeRatio = 1 - Math.max(0, (sp.age - sp.maxLife * 0.55) / (sp.maxLife * 0.45));
+              if (sp.age >= sp.maxLife) {
+                this.screenSpatters.splice(i, 1);
+              } else {
+                sp.opacity = Math.min(sp.opacity, fadeRatio * 0.92);
               }
             }
 
@@ -3224,13 +4309,18 @@ export class AgraSurvivalEngine {
               this.sound.getAudioContext(),
               this.sound.isMuted(),
             );
-            const bonkHitstopPaused = this.awakening.state.isActivating && this.hitstopTimer > 0;
-            if (!bonkHitstopPaused) {
+            const bonkHitstopPaused =
+              (this.awakening.state.isActivating || this.batFaceDriveState.active) && this.hitstopTimer > 0;
+            if (!bonkHitstopPaused && !this.isFinisherActive) {
               this.updatePlayerPhysics(dt);
             }
-            this.syncCameraToPlayer(dt);
+            if (!this.isFinisherActive) {
+              this.syncCameraToPlayer(dt);
+            } else {
+              this.updateNightRunnerFinisher(rawDt);
+            }
 
-            const isCutsceneLocked = this.awakening.state.isActivating;
+            const isCutsceneLocked = this.awakening.state.isActivating || this.isExecutingFinisher || this.isFinisherActive;
             const horizVelMag = isCutsceneLocked ? 0 : Math.hypot(this.playerVel.x, this.playerVel.z);
             const moveSpeedRatio = Math.min(1, horizVelMag / MOVEMENT_CONFIG.WALK_SPEED);
             const isSprinting =
@@ -3250,6 +4340,11 @@ export class AgraSurvivalEngine {
               this.playerPos.z <= safeZone.maxZ &&
               this.playerPos.x >= safeZone.minX &&
               this.playerPos.x <= safeZone.maxX;
+
+            if (!this.isFinisherActive) {
+              this.updateHeadGrabSequence(rawDt);
+              this.updateBatFaceDriveSequence(rawDt);
+            }
 
             this.viewmodel.update(
               dt,
@@ -3285,6 +4380,11 @@ export class AgraSurvivalEngine {
                 awakeningPose: this.awakening.getViewmodelPose(),
                 awakeningBatEmissive: this.awakening.getBatCrimsonEmissive(),
                 awakeningBatEmissiveIntensity: this.awakening.getBatEmissiveIntensity(),
+                headGrabActive: this.headGrabState.active,
+                headGrabTimer: this.headGrabState.timer,
+                batFaceDriveActive: this.batFaceDriveState.active,
+                batFaceDriveTimer: this.batFaceDriveState.timer,
+                inspectLeftArm: Boolean(this.keys['KeyV']),
               },
             );
             this.viewmodelYawDelta = 0;
@@ -3303,7 +4403,93 @@ export class AgraSurvivalEngine {
                   this.takeDamage(dmg, attackerPos);
                 },
                 (kind) => this.sound.playZombieGroan(kind),
+                this.isFinisherActive,
               );
+
+              if (!this.isFinisherActive) {
+                for (let i = 0; i < this.infectedEnemies.length; i++) {
+                  const e = this.infectedEnemies[i];
+                  e.update(
+                    dt,
+                    this.elapsed,
+                    this.playerPos,
+                    this.isNightTime(),
+                    lurePos,
+                    this.world.colliders,
+                    this.world.tajSafeZone,
+                    (dmg, attackerPos) => this.takeDamage(dmg, attackerPos),
+                    () => this.sound.playScreamerScreech(),
+                    () => this.sound.playZombieGroan('screamer'),
+                  );
+                }
+                this.applyScreamerSeparation();
+                if (this.headGrabState.active) {
+                  this.syncGrabbedEnemyTransform();
+                } else if (this.batFaceDriveState.active && !this.batFaceDriveState.ragdollTriggered) {
+                  this.syncFinisherEnemyTransform();
+                }
+                this.updateNightRunners(dt);
+              }
+            }
+
+            const terrEvents = this.territories.update(
+              dt,
+              this.elapsed,
+              this.playerPos,
+              this.zombies.zombies,
+              (z, dmg, dir, kb = 5.0) => this.zombies.damageZombie(z, dmg, dir, kb, 0.45),
+              this.infectedEnemies,
+              this.nightRunners,
+              this.isFinisherActive,
+            );
+            this.activeTerritoryHud = terrEvents.activeHudTerritory;
+            if (terrEvents.pulleyClicked) {
+              this.sound.playPulleyClick();
+            }
+            if (terrEvents.newlyLiberatedName) {
+              this.liberationToastName = terrEvents.newlyLiberatedName;
+              this.liberationToastTimer = 4.0;
+              this.sound.playLiberationChord();
+              this.setSubtitle(
+                'OVERWATCH RADIO',
+                `${terrEvents.newlyLiberatedName} liberated! Allied runners deployed and UV perimeter online.`,
+                6.5,
+              );
+            }
+            if (terrEvents.playerInsideLiberated && !this.isFinisherActive) {
+              this.health = Math.min(this.maxHealth, this.health + 6 * dt);
+              this.flashlightBattery = Math.min(100, this.flashlightBattery + 10 * dt);
+            }
+            if (terrEvents.killDelta > 0) {
+              this.killCount += terrEvents.killDelta;
+            }
+
+            if (!bonkHitstopPaused) {
+              const allyEvents = this.allies.update(
+                dt,
+                this.elapsed,
+                this.playerPos,
+                this.yaw,
+                this.territories.sectors,
+                this.zombies.zombies,
+                (z, dmg, dir, kb = 3.2, stun = 0.55, forceInterrupt = true) =>
+                  this.zombies.damageZombie(z, dmg, dir, kb, stun, forceInterrupt),
+                this.infectedEnemies,
+                this.nightRunners,
+                this.world.colliders,
+                this.isFinisherActive,
+              );
+              if (allyEvents.killDelta > 0) {
+                this.killCount += allyEvents.killDelta;
+              }
+              for (let ai = 0; ai < allyEvents.impactPositions.length; ai++) {
+                this.viewmodel.spawnSparks(allyEvents.impactPositions[ai], 0x94a3b8, 6);
+                this.sound.playAllyPipeImpact();
+              }
+              if (allyEvents.newlyDeadNames.length > 0) {
+                this.allyDownAlert = `ALLY DOWN: ${allyEvents.newlyDeadNames[0]} WAS KILLED`;
+                this.allyDownAlertTimer = 3.8;
+              }
             }
 
             this.world.crates.forEach((c) => {
@@ -3313,14 +4499,50 @@ export class AgraSurvivalEngine {
               }
             });
 
+            const nextWave = this.killCount >= 10 ? 3 : this.killCount >= 5 ? 2 : 1;
+            if (nextWave > this.waveNumber) {
+              this.waveNumber = nextWave;
+              this.zombies.spawnWavePack(this.waveNumber, this.playerPos);
+              // Respawn any dead Screamers on escalating waves to keep courtyard intense
+              for (let i = 0; i < this.infectedEnemies.length && i < SCREAMER_SPAWN_POINTS.length; i++) {
+                const e = this.infectedEnemies[i];
+                if (e.aiState === 'DEAD' || e.aiState === 'DEAD_RAGDOLL' || e.aiState === 'IMPALED_DEAD') {
+                  const sp = SCREAMER_SPAWN_POINTS[i];
+                  if (Math.hypot(sp.x - this.playerPos.x, sp.z - this.playerPos.z) > 10) {
+                    e.reset(sp.x, sp.y, sp.z, sp.yaw);
+                    e.alerted = true;
+                  }
+                }
+              }
+              this.sound.playScreamerScreech();
+              this.setSubtitle(
+                'OUTBREAK ALERT',
+                `Wave ${this.waveNumber} incoming — Elite Infected flanking through the courtyard!`,
+                5.5,
+              );
+            }
+
+            if (!this.extractionReady && this.killCount >= this.killsTarget) {
+              this.extractionReady = true;
+              this.world.setExtractionActive(true);
+              this.setSubtitle(
+                'OVERWATCH RADIO',
+                '15 Infected Eliminated! Extraction Flare lit at the Taj Courtyard Plinth — reach the beacon!',
+                9.0,
+              );
+            }
+
             const allCollected = this.world.crates.every((c) => c.collected);
             const sz = this.world.tajSafeZone;
-            if (
-              allCollected &&
+            const inTajSafeZone =
               this.playerPos.z <= sz.maxZ &&
               this.playerPos.x >= sz.minX &&
-              this.playerPos.x <= sz.maxX
-            ) {
+              this.playerPos.x <= sz.maxX;
+            const reachedFlare =
+              this.extractionReady &&
+              this.playerPos.distanceTo(this.world.extractionPoint) <= 3.6;
+
+            if ((this.extractionReady && (reachedFlare || inTajSafeZone)) || (allCollected && inTajSafeZone)) {
               this.phase = 'victory';
               this.intro.resetIdle();
               this.sound.stopContinuousLoops();
@@ -3334,19 +4556,20 @@ export class AgraSurvivalEngine {
       } else if (this.phase === 'start') {
         this.sound.stopContinuousLoops();
         this.world.updateWorldProps(this.elapsed);
+        const panT = this.elapsed * 0.14;
         this.camera.position.set(
-          -28.0 + Math.sin(this.elapsed * 0.16) * 1.4,
-          6.8 + Math.cos(this.elapsed * 0.22) * 0.15,
-          42.5,
+          Math.sin(panT) * 26.0,
+          7.4 + Math.sin(panT * 1.6) * 0.6,
+          18.0 + Math.cos(panT * 0.85) * 16.0,
         );
-        this.camera.lookAt(0, 7.5, -72);
+        this.camera.lookAt(Math.sin(panT * 0.5) * 4.0, 2.6, -24.0);
         this.world.updateGuard(this.elapsed, this.playerPos, false);
       } else {
         this.sound.stopContinuousLoops();
       }
 
       this.updateAtmosphere(this.radioOpen ? 0 : dt);
-      const showVm = this.phase === 'playing';
+      const showVm = this.phase === 'playing' && !this.isFinisherActive;
       this.viewmodel.setVisible(showVm);
       if (this.composer) {
         if (this.viewmodelPass) {
@@ -3438,13 +4661,66 @@ export class AgraSurvivalEngine {
           }
         }
       }
+      for (let i = 0; i < this.infectedEnemies.length; i++) {
+        const e = this.infectedEnemies[i];
+        if (!e.isWindingUp) continue;
+        e.getHeadWorldPosition(_projVec);
+        _projVec.y += 0.35;
+        _projVec.project(this.camera);
+        if (_projVec.z > 0 && _projVec.z < 1) {
+          const rawSx = (_projVec.x * 0.5 + 0.5) * w;
+          const rawSy = (-_projVec.y * 0.5 + 0.5) * h;
+          if (rawSx >= -40 && rawSx <= w + 40 && rawSy >= -40 && rawSy <= h + 40) {
+            counterIndicators.push({
+              id: 9000 + i,
+              x: Math.max(40, Math.min(w - 40, rawSx)),
+              y: Math.max(58, Math.min(h - 48, rawSy)),
+              progress: e.windupProgress,
+            });
+          }
+        }
+      }
+    }
+
+    const allyNameplates: AllyNameplate[] = [];
+    let livingAllyCount = 0;
+    for (let i = 0; i < this.allies.allies.length; i++) {
+      const a = this.allies.allies[i];
+      if (a.state === 'DEAD') continue;
+      livingAllyCount++;
+      if (this.phase !== 'playing' || this.intro.isIntroPlaying || this.isFinisherActive) continue;
+      const dist = Math.hypot(a.mesh.position.x - this.playerPos.x, a.mesh.position.z - this.playerPos.z);
+      if (dist > 22.0) continue;
+      a.getNameplateWorldPos(_projVec);
+      _projVec.project(this.camera);
+      if (_projVec.z > 0 && _projVec.z < 1) {
+        const sx = (_projVec.x * 0.5 + 0.5) * w;
+        const sy = (-_projVec.y * 0.5 + 0.5) * h;
+        if (sx >= 24 && sx <= w - 24 && sy >= 24 && sy <= h - 24) {
+          allyNameplates.push({
+            id: a.id,
+            name: a.name,
+            hp: Math.round(a.hp),
+            maxHp: a.maxHp,
+            mode: a.commandMode === 'FOLLOW' ? 'FOLLOW' : 'GUARD',
+            x: Math.round(sx),
+            y: Math.round(sy),
+            dist: Math.round(dist),
+            inCombat: a.state === 'COMBAT',
+          });
+        }
+      }
     }
 
     let interactionPrompt = '';
     const cratesCollected = this.world.crates.filter((c) => c.collected).length;
     const nearGuardTower = this.phase === 'playing' && this.isNearGuardTower();
     if (this.phase === 'playing' && !this.radioOpen && !this.intro.isIntroPlaying) {
-      if (this.wallRunSide !== 0) {
+      if (this.isExecutingFinisher) {
+        interactionPrompt = '';
+      } else if (this.headGrabState.active) {
+        interactionPrompt = '[MMB] Shove Away';
+      } else if (this.wallRunSide !== 0) {
         interactionPrompt = '[SPACE] Tic-Tac Wall Kick';
       } else if (this.activeZipline) {
         interactionPrompt = '[SPACE] Launch Off Zipline';
@@ -3456,6 +4732,12 @@ export class AgraSurvivalEngine {
             interactionPrompt = `[E] Scavenge ${c.label}`;
             break;
           }
+        }
+        if (!interactionPrompt && this.world.isNearHaveliMedkit(this.playerPos)) {
+          interactionPrompt = '[E] Use First-Aid Kit (+35 HP)';
+        }
+        if (!interactionPrompt) {
+          interactionPrompt = this.world.getNearbyDoorPrompt(this.playerPos);
         }
         if (!interactionPrompt && nearGuardTower) {
           interactionPrompt = '[E] Radio Watchtower Guard';
@@ -3473,7 +4755,9 @@ export class AgraSurvivalEngine {
         ) {
           interactionPrompt = '[C / Ctrl] Safety Landing Roll';
         }
-        if (!interactionPrompt && cratesCollected === this.world.crates.length) {
+        if (!interactionPrompt && this.extractionReady) {
+          interactionPrompt = 'Extraction Flare Lit — Reach the Beacon at Taj Courtyard Plinth!';
+        } else if (!interactionPrompt && cratesCollected === this.world.crates.length) {
           interactionPrompt = 'All Antizin Secured — Return to the Taj Mahal UV Safe House Gate!';
         }
       }
@@ -3514,6 +4798,19 @@ export class AgraSurvivalEngine {
     const nightHunterNearby =
       nearestNightHunterDistRaw !== null && nearestNightHunterDistRaw <= NIGHT_HUNTER_ALERT_RANGE;
 
+    const grabCandidate =
+      this.phase === 'playing' && !this.isGrabbingEnemy && !this.isExecutingFinisher
+        ? this.findScreamerInGrabCone()
+        : null;
+    const canGrabEnemy = grabCandidate !== null;
+    const grabTargetHealthy = grabCandidate !== null && !grabCandidate.canBeHeadGrabbed();
+    const moveSpread = THREE.MathUtils.clamp(
+      Math.hypot(this.playerVel.x, this.playerVel.z) / MOVEMENT_CONFIG.SPRINT_SPEED +
+        (this.attackCooldown > 0 ? 0.35 : 0),
+      0,
+      1.3,
+    );
+
     this.onHudUpdate({
       phase: this.phase,
       health: Math.round(this.health),
@@ -3545,6 +4842,19 @@ export class AgraSurvivalEngine {
       nightHunterNearby,
       nearestNightHunterDistance,
       flashlightOn: this.flashlightOn,
+      flashlightBattery: Math.round(this.flashlightBattery),
+      lowStaminaPulse: this.lowStaminaPulseTimer > 0,
+      isFinisherActive: this.isFinisherActive,
+      finisherVignetteOpacity: Number(this.finisherVignetteOpacity.toFixed(3)),
+      finisherBlackoutOpacity: Number(this.finisherBlackoutOpacity.toFixed(3)),
+      deathCause: this.deathCause,
+      survivedDays: this.survivedDays,
+      activeTerritory: this.activeTerritoryHud ? { ...this.activeTerritoryHud } : null,
+      territoryLiberationToast: this.liberationToastTimer > 0 ? this.liberationToastName : null,
+      allyNameplates,
+      squadCommandToast: this.squadCommandToastTimer > 0 ? this.squadCommandToast : null,
+      allyDownAlert: this.allyDownAlertTimer > 0 ? this.allyDownAlert : null,
+      allyCount: livingAllyCount,
       firecrackerCooldown: Math.max(0, Number(this.firecrackerCooldown.toFixed(1))),
       kickCooldown: Math.max(0, Number(this.kickCooldown.toFixed(1))),
       canMantle: this.canMantle,
@@ -3579,6 +4889,32 @@ export class AgraSurvivalEngine {
       introRadioText: this.intro.introRadioText,
       tutorialHintOpacity: this.intro.tutorialHintOpacity,
       awakening: this.awakening.getHudSnapshot(),
+      isGrabbingEnemy: this.isGrabbingEnemy,
+      isExecutingFinisher: this.isExecutingFinisher,
+      finisherGoreOpacity: Number(this.finisherGoreOpacity.toFixed(3)),
+      exhausted: !window.devInfStamina && (this.exhaustionTimer > 0 || this.sprintExhausted),
+      exhaustionRemaining: Number(this.exhaustionTimer.toFixed(1)),
+      executionsCount: this.executionsCount,
+      waveNumber: this.waveNumber,
+      killsTarget: this.killsTarget,
+      extractionReady: this.extractionReady,
+      extractionDistance: Math.round(this.playerPos.distanceTo(this.world.extractionPoint)),
+      hitMarkerFlash: Number(this.hitMarkerFlash.toFixed(3)),
+      moveSpread: Number(moveSpread.toFixed(2)),
+      canGrabEnemy,
+      grabTargetHealthy,
+      screenBloodSpatters: this.screenSpatters.map((s) => ({
+        id: s.id,
+        xPct: s.xPct,
+        yPct: s.yPct,
+        sizePx: s.sizePx,
+        rotDeg: s.rotDeg,
+        scaleX: s.scaleX,
+        scaleY: s.scaleY,
+        dripPx: Number(s.dripPx.toFixed(1)),
+        opacity: Number(s.opacity.toFixed(3)),
+        variant: s.variant,
+      })),
     });
   }
 
@@ -3595,13 +4931,40 @@ export class AgraSurvivalEngine {
         z: c.position.z,
         collected: c.collected,
       })),
-      enemies: this.zombies.zombies
-        .filter((z) => z.state !== 'dead')
-        .map((z) => ({
-          x: z.pos.x,
-          z: z.pos.z,
-          kind: z.kind,
-          alerted: z.state === 'chase' || z.state === 'windup',
+      enemies: [
+        ...this.zombies.zombies
+          .filter((z) => z.state !== 'dead')
+          .map((z) => ({
+            x: z.pos.x,
+            z: z.pos.z,
+            kind: z.kind,
+            alerted: z.state === 'chase' || z.state === 'windup',
+          })),
+        ...this.infectedEnemies
+          .filter((e) => e.aiState !== 'DEAD' && e.aiState !== 'IMPALED_DEAD' && e.aiState !== 'DEAD_RAGDOLL')
+          .map((e) => ({
+            x: e.root.position.x,
+            z: e.root.position.z,
+            kind: 'screamer' as const,
+            alerted: e.aiState === 'CHASE' || e.aiState === 'GRABBED',
+          })),
+        ...this.nightRunners
+          .filter((nr) => nr.state !== 'DEAD')
+          .map((nr) => ({
+            x: nr.group.position.x,
+            z: nr.group.position.z,
+            kind: 'night_runner' as const,
+            alerted: nr.state === 'CHASE' || nr.state === 'ATTACK_MELEE' || nr.state === 'FINISHER_GRAB',
+          })),
+      ],
+      allies: this.allies.allies
+        .filter((a) => a.state !== 'DEAD')
+        .map((a) => ({
+          id: a.id,
+          name: a.name,
+          x: a.mesh.position.x,
+          z: a.mesh.position.z,
+          mode: a.commandMode === 'FOLLOW' ? ('FOLLOW' as const) : ('GUARD' as const),
         })),
       tajGate: {
         x: this.world.tajGateCenter.x,
@@ -3611,7 +4974,606 @@ export class AgraSurvivalEngine {
         x: this.world.guardTowerCenter.x,
         z: this.world.guardTowerCenter.z,
       },
+      territories: this.territories.sectors.map((s) => ({
+        id: s.data.id,
+        name: s.data.name,
+        x: s.data.center.x,
+        z: s.data.center.z,
+        radius: s.data.radius,
+        captured: s.data.captured,
+        progress: s.data.progress,
+      })),
     };
+  }
+
+  private updateHeadGrabSequence(rawDt: number): void {
+    const hg = this.headGrabState;
+    if (!hg.active || !hg.enemy) return;
+
+    if (
+      hg.enemy.aiState === 'DEAD' ||
+      hg.enemy.aiState === 'IMPALED_DEAD' ||
+      hg.enemy.aiState === 'DEAD_RAGDOLL' ||
+      this.phase !== 'playing'
+    ) {
+      this.clearHeadGrabState();
+      return;
+    }
+
+    hg.timer += rawDt;
+
+    if (!hg.impactTriggered && hg.timer >= 0.18) {
+      hg.impactTriggered = true;
+      this.hitstopTimer = Math.max(this.hitstopTimer, 0.04);
+      this.sound.playHeadGrabImpact();
+      this.fovPunch = -4.0;
+      this.cameraShake = Math.max(this.cameraShake, 0.35);
+    }
+
+    if (!hg.holdTriggered && hg.timer >= 0.22) {
+      hg.holdTriggered = true;
+      this.sound.playGrabbedRasp();
+    }
+
+    if (!hg.lockedInvoked && hg.timer >= 0.35) {
+      hg.lockedInvoked = true;
+      if (this.onHeadGrabLocked) {
+        this.onHeadGrabLocked(hg.enemy);
+      }
+    }
+
+    // Hold window up to 3.0 seconds before shoving enemy away at 8.0 m/s
+    if (hg.timer >= 3.0) {
+      this.shoveGrabbedEnemyAway(8.0);
+    }
+  }
+
+  private updateBatFaceDriveSequence(rawDt: number): void {
+    const bf = this.batFaceDriveState;
+    if (!bf.active || !bf.enemy) return;
+    if (this.phase !== 'playing') {
+      this.clearBatFaceDriveState();
+      return;
+    }
+
+    const enemy = bf.enemy;
+    const baseFov = MOVEMENT_CONFIG.BASE_FOV + this.awakening.getFovOffset();
+
+    // Freeze timeline progression cleanly during the 75ms impact hit-stop
+    if (this.hitstopTimer <= 0) {
+      bf.timer += rawDt;
+    }
+    const t = bf.timer;
+
+    // Phase 1 & 2 (0.00s -> 0.30s): Wind-Up & Ramming Thrust FOV narrow (75 -> 69)
+    if (t < 0.3) {
+      const targetFov = THREE.MathUtils.lerp(baseFov, 69, Math.min(1, t / 0.22));
+      if (Math.abs(this.camera.fov - targetFov) > 0.05) {
+        this.camera.fov = THREE.MathUtils.lerp(this.camera.fov, targetFov, 1 - Math.exp(-rawDt * 18));
+        this.camera.updateProjectionMatrix();
+      }
+    }
+
+    // Exact t = 0.30s Impact Trigger (fires once)
+    if (!bf.impactTriggered && t >= 0.3) {
+      bf.impactTriggered = true;
+      enemy.setImpaledLimp();
+      this.killCount++;
+      this.executionsCount++;
+      this.hitMarkerFlash = 0.28;
+      this.registerComboHit(2);
+      this.awakening.addAwakeningCharge(25);
+
+      // 75ms heavy impact freeze + upward camera recoil + 0.90 trauma shake + 81 deg FOV spike
+      this.hitstopTimer = 0.075;
+      this.pitch = THREE.MathUtils.clamp(this.pitch + 0.07, -1.42, 1.42);
+      this.cameraShake = Math.max(this.cameraShake, 0.9);
+      this.camera.fov = 81;
+      this.camera.updateProjectionMatrix();
+      this.finisherGoreOpacity = 1.0;
+
+      // 26 crimson gore droplets bursting from face/mouth + glistening blood stain on front 40% of bat
+      enemy.getMouthWorldPosition(_grabHeadWorld);
+      _grabFwd.set(-Math.sin(this.yaw), 0, -Math.cos(this.yaw)).normalize();
+      this.viewmodel.spawnFinisherGoreBurst(_grabHeadWorld, _grabFwd, 26);
+      this.viewmodel.spawnGroundBloodSplatter(enemy.root.position, 3);
+      this.viewmodel.spawnComboBloodSpatter(
+        _grabHeadWorld,
+        _grabFwd,
+        this.sampleGroundHeight(enemy.root.position.x, enemy.root.position.z),
+        16,
+        1.35,
+      );
+      this.spawnScreenBloodSpatter(10, true);
+      this.viewmodel.setBatBloodStained(true);
+      this.sound.playBatFaceDriveAudio();
+      this.emitHud();
+    }
+
+    // Phase 3 (0.30s -> 1.05s): Impaled corpse hold, 81 -> 76 FOV settle, & 0.045s blood drips -> floor puddles
+    if (t >= 0.3 && t < 1.05 && this.hitstopTimer <= 0) {
+      this.camera.fov = THREE.MathUtils.lerp(this.camera.fov, 76, 1 - Math.exp(-rawDt * 8));
+      this.camera.updateProjectionMatrix();
+
+      bf.dripTimer -= rawDt;
+      if (bf.dripTimer <= 0) {
+        bf.dripTimer = 0.045;
+        enemy.getMouthWorldPosition(_grabHeadWorld);
+        _grabHeadWorld.x += (Math.random() - 0.5) * 0.07;
+        _grabHeadWorld.z += (Math.random() - 0.5) * 0.07;
+        const mouthFloorY = this.sampleGroundHeight(_grabHeadWorld.x, _grabHeadWorld.z);
+        this.viewmodel.spawnBloodDrip(_grabHeadWorld, mouthFloorY);
+
+        if (Math.random() < 0.65) {
+          this.viewmodel.getBatTipWorldPosition(_tmpVecA);
+          const tipFloorY = this.sampleGroundHeight(_tmpVecA.x, _tmpVecA.z);
+          this.viewmodel.spawnBloodDrip(_tmpVecA, tipFloorY);
+        }
+      }
+    }
+
+    // Phase 4a (1.05s): Yank bat free & fling 6 final crimson droplets off bat tip
+    if (!bf.yankBurstTriggered && t >= 1.05) {
+      bf.yankBurstTriggered = true;
+      _grabFwd.set(-Math.sin(this.yaw), 0, -Math.cos(this.yaw)).normalize();
+      this.viewmodel.getBatTipWorldPosition(_tmpVecA);
+      this.viewmodel.spawnFinisherGoreBurst(_tmpVecA, _grabFwd, 6);
+      this.viewmodel.spawnComboBloodSpatter(
+        _tmpVecA,
+        _grabFwd,
+        this.sampleGroundHeight(enemy.root.position.x, enemy.root.position.z),
+        8,
+        1.0,
+      );
+      this.spawnScreenBloodSpatter(4, false);
+    }
+
+    // Phase 4b (1.10s): Dead corpse flung backward/downward onto its blood puddle
+    if (!bf.ragdollTriggered && t >= 1.1) {
+      bf.ragdollTriggered = true;
+      _grabFwd.set(-Math.sin(this.yaw), 0, -Math.cos(this.yaw)).normalize();
+      _grabImpulse.set(_grabFwd.x * 2.5, -6.0, _grabFwd.z * 2.5);
+      enemy.startDeadRagdoll(_grabImpulse, (Math.random() < 0.5 ? 1 : -1) * 0.24);
+    }
+
+    if (t >= 1.05) {
+      this.camera.fov = THREE.MathUtils.lerp(this.camera.fov, baseFov, 1 - Math.exp(-rawDt * 10));
+      this.camera.updateProjectionMatrix();
+    }
+
+    if (t >= 1.35) {
+      this.camera.fov = baseFov;
+      this.camera.updateProjectionMatrix();
+      this.clearBatFaceDriveState();
+      this.attackCooldown = 0.18;
+      this.emitHud();
+    }
+  }
+
+  private syncFinisherEnemyTransform(): void {
+    const bf = this.batFaceDriveState;
+    if (!bf.active || !bf.enemy) return;
+    const enemy = bf.enemy;
+
+    _grabFwd.set(-Math.sin(this.yaw), 0, -Math.cos(this.yaw)).normalize();
+    const t = bf.timer;
+    const lockDist = t >= 0.3 ? 1.02 : 1.05;
+    const sagOffset = t >= 0.3 ? Math.min(1, (t - 0.3) / 0.75) * 0.06 : 0;
+
+    enemy.root.position.x = this.camera.position.x + _grabFwd.x * lockDist;
+    enemy.root.position.z = this.camera.position.z + _grabFwd.z * lockDist;
+    enemy.yaw = this.yaw;
+    enemy.root.rotation.set(0, enemy.yaw, 0);
+
+    enemy.getHeadWorldPosition(_grabHeadWorld);
+    const desiredHeadCenterY = this.camera.position.y - 0.2 - sagOffset;
+    enemy.root.position.y += desiredHeadCenterY - _grabHeadWorld.y;
+    enemy.root.updateMatrixWorld(true);
+  }
+
+  private syncGrabbedEnemyTransform(): void {
+    const hg = this.headGrabState;
+    if (!hg.active || !hg.enemy) return;
+    const enemy = hg.enemy;
+
+    _grabFwd.set(-Math.sin(this.yaw), 0, -Math.cos(this.yaw)).normalize();
+    const lockDist = 1.05;
+    const goalX = this.camera.position.x + _grabFwd.x * lockDist;
+    const goalZ = this.camera.position.z + _grabFwd.z * lockDist;
+
+    const pullU = Math.min(1, hg.timer / 0.18);
+    const easePull = 1 - Math.pow(1 - pullU, 3);
+    const clamped = hg.timer >= 0.18;
+    const tremorX = clamped ? Math.sin(this.elapsed * 28) * 0.012 : 0;
+    const tremorY = clamped ? Math.cos(this.elapsed * 31) * 0.008 : 0;
+
+    enemy.root.position.x = THREE.MathUtils.lerp(hg.startPos.x, goalX, easePull) + tremorX;
+    enemy.root.position.z = THREE.MathUtils.lerp(hg.startPos.z, goalZ, easePull);
+
+    let yawDiff = ((this.yaw - hg.startYaw + Math.PI) % (Math.PI * 2)) - Math.PI;
+    if (yawDiff < -Math.PI) yawDiff += Math.PI * 2;
+    enemy.yaw = hg.startYaw + yawDiff * easePull;
+    enemy.root.rotation.set(0, enemy.yaw, 0);
+
+    // Measure current head center height and align skull crown cleanly to camera.position.y - 0.12
+    enemy.getHeadWorldPosition(_grabHeadWorld);
+    const desiredHeadCenterY = this.camera.position.y - 0.23 + tremorY;
+    const targetRootY = enemy.root.position.y + (desiredHeadCenterY - _grabHeadWorld.y);
+    enemy.root.position.y = THREE.MathUtils.lerp(hg.startPos.y, targetRootY, easePull);
+    enemy.root.updateMatrixWorld(true);
+  }
+
+  private applyScreamerSeparation(): void {
+    const count = this.infectedEnemies.length;
+    if (count === 0) return;
+
+    // 1. Screamer <-> Screamer pairwise separation
+    for (let i = 0; i < count; i++) {
+      const a = this.infectedEnemies[i];
+      if (
+        a.aiState === 'DEAD' ||
+        a.aiState === 'IMPALED_DEAD' ||
+        a.aiState === 'DEAD_RAGDOLL' ||
+        a.aiState === 'GRABBED'
+      ) {
+        continue;
+      }
+      for (let j = i + 1; j < count; j++) {
+        const b = this.infectedEnemies[j];
+        if (
+          b.aiState === 'DEAD' ||
+          b.aiState === 'IMPALED_DEAD' ||
+          b.aiState === 'DEAD_RAGDOLL' ||
+          b.aiState === 'GRABBED'
+        ) {
+          continue;
+        }
+        if (Math.abs(a.root.position.y - b.root.position.y) > 1.8) continue;
+
+        let dx = b.root.position.x - a.root.position.x;
+        let dz = b.root.position.z - a.root.position.z;
+        const distSq = dx * dx + dz * dz;
+        const minSep = 1.2;
+        if (distSq < minSep * minSep) {
+          let dist = Math.sqrt(distSq);
+          if (dist < 0.001) {
+            dx = Math.cos(i * 1.7 + j);
+            dz = Math.sin(i * 1.7 + j);
+            dist = 1;
+          }
+          const push = (minSep - dist) * 0.5;
+          const nx = dx / dist;
+          const nz = dz / dist;
+          a.root.position.x -= nx * push;
+          a.root.position.z -= nz * push;
+          b.root.position.x += nx * push;
+          b.root.position.z += nz * push;
+        }
+      }
+
+      // 2. Screamer <-> standard ZombieActor separation
+      for (let k = 0; k < this.zombies.zombies.length; k++) {
+        const z = this.zombies.zombies[k];
+        if (z.state === 'dead') continue;
+        if (Math.abs(a.root.position.y - z.pos.y) > 1.8) continue;
+
+        let dx = z.pos.x - a.root.position.x;
+        let dz = z.pos.z - a.root.position.z;
+        const minSep = z.kind === 'brute' ? 1.45 : 1.2;
+        const distSq = dx * dx + dz * dz;
+        if (distSq < minSep * minSep) {
+          let dist = Math.sqrt(distSq);
+          if (dist < 0.001) {
+            dx = 1;
+            dz = 0;
+            dist = 1;
+          }
+          const push = (minSep - dist) * 0.5;
+          const nx = dx / dist;
+          const nz = dz / dist;
+          a.root.position.x -= nx * push;
+          a.root.position.z -= nz * push;
+          z.pos.x += nx * push;
+          z.pos.z += nz * push;
+          z.group.position.copy(z.pos);
+        }
+      }
+    }
+  }
+
+  private sampleTerritoryFloorY(x: number, z: number): number {
+    let bestY = 0;
+    for (let i = 0; i < this.world.colliders.length; i++) {
+      const b = this.world.colliders[i];
+      if (b.disabled || b.ramp) continue;
+      if (x >= b.minX && x <= b.maxX && z >= b.minZ && z <= b.maxZ) {
+        if (b.maxY <= 4.5 && b.maxY > bestY) {
+          bestY = b.maxY;
+        }
+      }
+    }
+    return bestY;
+  }
+
+  private sampleNpcGroundHeight(x: number, z: number, curY: number): number {
+    let bestY = 0;
+    for (let i = 0; i < this.world.colliders.length; i++) {
+      const b = this.world.colliders[i];
+      if (b.disabled) continue;
+      if (x >= b.minX - 0.15 && x <= b.maxX + 0.15 && z >= b.minZ - 0.15 && z <= b.maxZ + 0.15) {
+        let topY = b.maxY;
+        if (b.ramp) {
+          const coord = b.ramp.axis === 'x' ? x : z;
+          const span = b.ramp.highCoord - b.ramp.lowCoord;
+          const t = span !== 0 ? THREE.MathUtils.clamp((coord - b.ramp.lowCoord) / span, 0, 1) : 1;
+          topY = THREE.MathUtils.lerp(b.ramp.lowY, b.ramp.highY, t);
+        }
+        if (curY >= topY - 0.65 && topY > bestY) {
+          bestY = topY;
+        }
+      }
+    }
+    return bestY;
+  }
+
+  private spawnTerritoryDefenders(): void {
+    const walkerOffsetsBySector: Record<string, Array<[number, number]>> = {
+      sector_plinth: [
+        [-6.5, 4.5],
+        [6.5, 4.5],
+        [-7.5, -5.5],
+        [7.5, -5.5],
+      ],
+      sector_charbagh: [
+        [-7.5, 5.0],
+        [7.5, 5.0],
+        [-8.0, -5.0],
+        [8.0, -5.0],
+        [0, 7.5],
+      ],
+      sector_mausoleum: [
+        [-4.5, -74.5],
+        [4.5, -74.5],
+        [-2.2, -64.5],
+        [2.2, -64.5],
+        [-15.0, -76.0],
+        [15.0, -76.0],
+      ],
+    };
+
+    const nightRunnerOffsetsBySector: Record<string, Array<[number, number]>> = {
+      sector_plinth: [[0, -6.5]],
+      sector_charbagh: [
+        [-5.5, -1.5],
+        [5.5, -1.5],
+      ],
+      sector_mausoleum: [
+        [-5.5, -80.0],
+        [5.5, -80.0],
+        [0, -70.0],
+      ],
+    };
+
+    let nextNrId = 12000;
+    for (let i = 0; i < this.territories.sectors.length; i++) {
+      const sec = this.territories.sectors[i].data;
+      const wOffsets = walkerOffsetsBySector[sec.id] ?? [];
+      for (let w = 0; w < sec.defenderWalkers; w++) {
+        const [ox, oz] = wOffsets[w % wOffsets.length] ?? [((w % 2 === 0 ? 1 : -1) * (4 + w)), 0];
+        const wx = sec.id === 'sector_mausoleum' ? ox : sec.center.x + ox;
+        const wz = sec.id === 'sector_mausoleum' ? oz : sec.center.z + oz;
+        const wy = this.sampleTerritoryFloorY(wx, wz);
+        const actor = this.zombies.spawnActor('shambler', wx, wy, wz, true, sec.id);
+        sec.defenderIds.push(actor.id);
+      }
+
+      const nrOffsets = nightRunnerOffsetsBySector[sec.id] ?? [];
+      for (let n = 0; n < sec.defenderNightRunners; n++) {
+        const [ox, oz] = nrOffsets[n % nrOffsets.length] ?? [0, -5];
+        const nx = sec.id === 'sector_mausoleum' ? ox : sec.center.x + ox;
+        const nz = sec.id === 'sector_mausoleum' ? oz : sec.center.z + oz;
+        const ny = this.sampleTerritoryFloorY(nx, nz);
+        const nr = new NightRunner(nextNrId++, nx, ny, nz, this.scene);
+        nr.territoryId = sec.id;
+        this.nightRunners.push(nr);
+        sec.nightRunnerIds.push(nr.id);
+      }
+
+      sec.aliveDefenders = sec.defenderIds.length + sec.nightRunnerIds.length;
+    }
+    this.territories.syncWindowGlobals();
+  }
+
+  private updateNightRunners(dt: number): void {
+    const isNight = this.isNightTime();
+    const safeSample = (x: number, z: number) => this.sampleTerritoryFloorY(x, z);
+
+    for (let i = 0; i < this.nightRunners.length; i++) {
+      const nr = this.nightRunners[i];
+      const res = nr.update(
+        dt,
+        this.playerPos,
+        this.health,
+        this.world.colliders,
+        safeSample,
+        isNight,
+        this.isFinisherActive,
+      );
+
+      if (res.triggeredFinisher && !this.isFinisherActive && !window.devImmortal) {
+        this.triggerNightRunnerFinisher(nr);
+        return;
+      }
+
+      if (res.dealtDamage > 0) {
+        this.takeDamage(res.dealtDamage, nr.group.position);
+      }
+    }
+  }
+
+  private triggerNightRunnerFinisher(attacker: NightRunner): void {
+    if (this.isFinisherActive || this.phase !== 'playing') return;
+
+    this.isFinisherActive = true;
+    this.finisherTimer = 0;
+    this.finisherPhaseStep = 1;
+    this.finisherAttacker = attacker;
+    this.finisherVignetteOpacity = 0.45;
+    this.finisherBlackoutOpacity = 0;
+    this.finisherDropStartY = this.camera.position.y;
+    this.finisherStartYaw = this.yaw;
+    this.finisherStartPitch = this.pitch;
+
+    this.clearHeadGrabState();
+    this.clearBatFaceDriveState();
+    this.viewmodel.setVisible(false);
+    this.slideTimer = 0;
+    this.rollTimer = 0;
+    this.mantling = false;
+    this.vaulting = false;
+    this.wallRunSide = 0;
+    this.activeZipline = null;
+    this.activeLadder = null;
+    this.playerVel.set(0, 0, 0);
+    this.sound.stopContinuousLoops();
+
+    attacker.state = 'FINISHER_GRAB';
+    attacker.frozenForFinisher = true;
+    for (let i = 0; i < this.nightRunners.length; i++) {
+      if (this.nightRunners[i] !== attacker) {
+        this.nightRunners[i].frozenForFinisher = true;
+      }
+    }
+
+    // Snap Night Runner 0.65m directly in front of camera facing player
+    const camFwdX = -Math.sin(this.yaw);
+    const camFwdZ = -Math.cos(this.yaw);
+    const snapX = this.playerPos.x + camFwdX * 0.65;
+    const snapZ = this.playerPos.z + camFwdZ * 0.65;
+    const snapY = this.sampleTerritoryFloorY(snapX, snapZ);
+    attacker.group.position.set(snapX, snapY, snapZ);
+    attacker.yaw = Math.atan2(this.playerPos.x - snapX, this.playerPos.z - snapZ);
+    attacker.group.rotation.set(0, attacker.yaw, 0);
+    attacker.group.updateMatrixWorld(true);
+
+    this.sound.playNightRunnerShriek();
+    this.sound.playStruggleHeartbeat();
+    this.emitHud();
+  }
+
+  private updateNightRunnerFinisher(rawDt: number): void {
+    const attacker = this.finisherAttacker;
+    if (!this.isFinisherActive || !attacker) return;
+
+    this.finisherTimer += rawDt;
+    const t = this.finisherTimer;
+    const groundY = this.sampleTerritoryFloorY(this.playerPos.x, this.playerPos.z);
+
+    // Compute exact look angles toward attacker's glowing red eyes
+    attacker.getHeadWorldPosition(_tmpVecA);
+    const dx = _tmpVecA.x - this.camera.position.x;
+    const dy = _tmpVecA.y - this.camera.position.y;
+    const dz = _tmpVecA.z - this.camera.position.z;
+    const horiz = Math.hypot(dx, dz) || 0.001;
+    const lookYaw = Math.atan2(-dx, -dz);
+    const lookPitch = Math.atan2(dy, horiz);
+
+    // Phase 1 (0.0s - 0.35s): Sudden lunge & camera snap onto red eyes
+    if (t < 0.35) {
+      const u = THREE.MathUtils.clamp(t / 0.15, 0, 1);
+      const ease = 1 - Math.pow(1 - u, 3);
+      let yawDiff = ((lookYaw - this.finisherStartYaw + Math.PI) % (Math.PI * 2)) - Math.PI;
+      if (yawDiff < -Math.PI) yawDiff += Math.PI * 2;
+      this.yaw = this.finisherStartYaw + yawDiff * ease;
+      this.pitch = THREE.MathUtils.lerp(this.finisherStartPitch, lookPitch, ease);
+
+      this.camera.position.set(this.playerPos.x, this.finisherDropStartY, this.playerPos.z);
+      this.camera.rotation.order = 'YXZ';
+      this.camera.rotation.y = this.yaw;
+      this.camera.rotation.x = this.pitch;
+      this.camera.rotation.z = 0;
+
+      attacker.poseFinisherGrabInCameraSpace(this.camera, 0.22, Math.sin(t * 24));
+      this.finisherVignetteOpacity = 0.45 + 0.25 * Math.sin(t * 16);
+      return;
+    }
+
+    // Phase 2 (0.35s - 1.15s): Struggle, Claw Lock & Violent 0.045 rad shake + 8Hz crimson vignette
+    if (t < 1.15) {
+      if (this.finisherPhaseStep < 2) {
+        this.finisherPhaseStep = 2;
+      }
+      const shakeX = (Math.random() - 0.5) * 0.09;
+      const shakeY = (Math.random() - 0.5) * 0.09;
+      this.camera.position.set(this.playerPos.x, this.finisherDropStartY, this.playerPos.z);
+      this.camera.rotation.order = 'YXZ';
+      this.camera.rotation.y = lookYaw + shakeX * 0.5;
+      this.camera.rotation.x = lookPitch + shakeY * 0.5;
+      this.camera.rotation.z = (Math.random() - 0.5) * 0.045;
+
+      const twitch = Math.sin(t * 36) * 0.65;
+      attacker.poseFinisherGrabInCameraSpace(this.camera, 0.22, twitch);
+      this.finisherVignetteOpacity = 0.55 + 0.35 * (0.5 + 0.5 * Math.sin(t * Math.PI * 16));
+      return;
+    }
+
+    // Phase 3 (1.15s - 1.65s): Skull Crush Execution (spread 0.22 -> 0.08, +0.35 roll, +12 deg FOV)
+    if (t < 1.65) {
+      if (this.finisherPhaseStep < 3) {
+        this.finisherPhaseStep = 3;
+        this.sound.playCrushCrunch();
+        this.spawnScreenBloodSpatter(12, true);
+      }
+      const u = THREE.MathUtils.clamp((t - 1.15) / 0.2, 0, 1);
+      const easeCrush = u * u;
+      const handSpread = THREE.MathUtils.lerp(0.22, 0.08, easeCrush);
+      this.camera.position.set(this.playerPos.x, this.finisherDropStartY, this.playerPos.z);
+      this.camera.rotation.order = 'YXZ';
+      this.camera.rotation.y = lookYaw;
+      this.camera.rotation.x = lookPitch;
+      this.camera.rotation.z = THREE.MathUtils.lerp(0, 0.35, easeCrush);
+      this.camera.fov = MOVEMENT_CONFIG.BASE_FOV + 12 * easeCrush;
+      this.camera.updateProjectionMatrix();
+
+      attacker.poseFinisherGrabInCameraSpace(this.camera, handSpread, 0);
+      this.finisherVignetteOpacity = 0.92;
+      return;
+    }
+
+    // Phase 4 (1.65s - 2.40s): Body collapses to ground + blackout -> Dying Light Game Over UI
+    if (this.finisherPhaseStep < 4) {
+      this.finisherPhaseStep = 4;
+      this.health = 0;
+      this.deathCause = 'night_runner';
+    }
+    const collapseU = THREE.MathUtils.clamp((t - 1.65) / 0.5, 0, 1);
+    const collapseEase = 1 - Math.pow(1 - collapseU, 2);
+    this.camera.position.set(
+      this.playerPos.x,
+      THREE.MathUtils.lerp(this.finisherDropStartY, groundY + 0.4, collapseEase),
+      this.playerPos.z,
+    );
+    this.camera.rotation.order = 'YXZ';
+    this.camera.rotation.y = lookYaw;
+    this.camera.rotation.x = THREE.MathUtils.lerp(lookPitch, -0.55, collapseEase);
+    this.camera.rotation.z = THREE.MathUtils.lerp(0.35, 0.85, collapseEase);
+    this.camera.fov = THREE.MathUtils.lerp(MOVEMENT_CONFIG.BASE_FOV + 12, MOVEMENT_CONFIG.BASE_FOV, collapseEase);
+    this.camera.updateProjectionMatrix();
+
+    if (t >= 2.15) {
+      this.finisherBlackoutOpacity = THREE.MathUtils.clamp((t - 2.15) / 0.25, 0, 1);
+    }
+
+    if (t >= 2.4) {
+      this.finisherBlackoutOpacity = 1;
+      this.isFinisherActive = false;
+      this.phase = 'gameover';
+      this.intro.resetIdle();
+      this.sound.stopContinuousLoops();
+      this.sound.playGameOver();
+      this.safeExitPointerLock();
+      this.emitHud();
+    }
   }
 
   public dispose(): void {
@@ -3627,6 +5589,16 @@ export class AgraSurvivalEngine {
     this.awakening.stopTensionDrone();
     this.awakening.clearEffects(this.scene);
     this.zombies.dispose();
+    this.territories.dispose();
+    this.allies.dispose();
+    for (let i = 0; i < this.nightRunners.length; i++) {
+      this.nightRunners[i].dispose(this.scene);
+    }
+    this.nightRunners.length = 0;
+    for (let i = 0; i < this.infectedEnemies.length; i++) {
+      this.infectedEnemies[i].dispose(this.scene);
+    }
+    this.infectedEnemies.length = 0;
     this.textures.dispose();
     this.composer?.dispose();
     this.renderer.dispose();

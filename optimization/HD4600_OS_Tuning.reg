@@ -1,0 +1,29 @@
+Windows Registry Editor Version 5.00
+
+; ============================================================================
+; Intel HD Graphics 4600 (Haswell GT2) & i5-4690/5690 Windows Tuning Pack
+; Targets locked 30 FPS (33.3ms budget) under shared DDR3 memory bandwidth.
+; ============================================================================
+
+; Increase DedicatedSegmentSize hint to 512 MB for shared DVMT allocation
+[HKEY_LOCAL_MACHINE\SOFTWARE\Intel\GMM]
+"DedicatedSegmentSize"=dword:00000200
+
+; Prevent Windows TDR timeout false resets during shader warmup spikes (10s)
+[HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\GraphicsDrivers]
+"TdrDelay"=dword:0000000a
+"TdrDdiDelay"=dword:0000000a
+
+; Prioritize GPU & foreground multimedia scheduler threads on 4C/4T Haswell CPUs
+[HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile]
+"SystemResponsiveness"=dword:0000000a
+"NetworkThrottlingIndex"=dword:ffffffff
+
+[HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games]
+"Affinity"=dword:00000000
+"Background Only"="False"
+"Clock Rate"=dword:00002710
+"GPU Priority"=dword:00000008
+"Priority"=dword:00000006
+"Scheduling Category"="High"
+"SFIO Priority"="High"

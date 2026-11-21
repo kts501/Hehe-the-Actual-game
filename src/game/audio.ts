@@ -1,4 +1,5 @@
 import type { ZombieKind } from '../types/game';
+import type { SurfaceMaterialKind } from './parkourPhysics';
 import type { WeaponId } from './weapons';
 
 /**
@@ -836,24 +837,33 @@ export class SoundEngine {
   }
 
   /**
-   * Footstep foley triggered at the bottom trough of each procedural head-bob cycle:
-   * filtered low-pass sandstone scuff + randomized 120Hz-180Hz heel thud.
+   * Surface-aware footstep foley triggered at the bottom trough of each stride cycle:
+   * concrete (grit scuff + heel thud), wood (warm hollow plank knock), or metal (brief resonant clack).
    */
-  public playFootstep(sprintRatio = 0, crouching = false): void {
+  public playFootstep(
+    sprintRatio = 0,
+    crouching = false,
+    surface: SurfaceMaterialKind = 'concrete',
+  ): void {
     const ctx = this.ready();
     if (!ctx || !this.noiseBuffer) return;
     const now = ctx.currentTime;
 
-    // Low-pass filtered noise burst (grit/cloth scuff)
+    // 1. Surface grit / scrape burst
     const src = ctx.createBufferSource();
     src.buffer = this.noiseBuffer;
     const lp = ctx.createBiquadFilter();
-    lp.type = 'lowpass';
-    const cutoff = crouching ? 380 + Math.random() * 80 : 540 + sprintRatio * 340 + Math.random() * 140;
+    lp.type = surface === 'metal' ? 'bandpass' : 'lowpass';
+    const baseCutoff =
+      surface === 'wood' ? 460 : surface === 'metal' ? 1480 : 540;
+    const cutoff = crouching
+      ? baseCutoff * 0.72 + Math.random() * 70
+      : baseCutoff + sprintRatio * 340 + Math.random() * 140;
     lp.frequency.setValueAtTime(cutoff, now);
+    if (surface === 'metal') lp.Q.value = 1.6;
 
     const nGain = ctx.createGain();
-    const scuffVol = crouching ? 0.04 : 0.075 + sprintRatio * 0.055;
+    const scuffVol = (crouching ? 0.04 : 0.075 + sprintRatio * 0.055) * (surface === 'wood' ? 0.85 : 1.0);
     nGain.gain.setValueAtTime(0.001, now);
     nGain.gain.linearRampToValueAtTime(scuffVol, now + 0.012);
     nGain.gain.exponentialRampToValueAtTime(0.001, now + 0.075);
@@ -864,22 +874,54 @@ export class SoundEngine {
     src.start(now);
     src.stop(now + 0.085);
 
-    // Subtle 120Hz-180Hz randomized heel thud
+    // 2. Impact resonance (concrete heel thud / hollow wood knock / metallic ping-clack)
+    if (surface === 'metal') {
+      const clack = ctx.createOscillator();
+      clack.type = 'triangle';
+      const f1 = 440 + Math.random() * 90;
+      clack.frequency.setValueAtTime(f1, now);
+      clack.frequency.exponentialRampToValueAtTime(f1 * 0.62, now + 0.075);
+
+      const mGain = ctx.createGain();
+      const vol = crouching ? 0.04 : 0.085 + sprintRatio * 0.06;
+      mGain.gain.setValueAtTime(vol, now);
+      mGain.gain.exponentialRampToValueAtTime(0.001, now + 0.085);
+      clack.connect(mGain);
+      mGain.connect(ctx.destination);
+      clack.start(now);
+      clack.stop(now + 0.09);
+
+      const ping = ctx.createOscillator();
+      ping.type = 'sine';
+      ping.frequency.setValueAtTime(920 + Math.random() * 160, now);
+      const pGain = ctx.createGain();
+      pGain.gain.setValueAtTime(vol * 0.35, now);
+      pGain.gain.exponentialRampToValueAtTime(0.001, now + 0.065);
+      ping.connect(pGain);
+      pGain.connect(ctx.destination);
+      ping.start(now);
+      ping.stop(now + 0.07);
+      return;
+    }
+
     const osc = ctx.createOscillator();
-    osc.type = 'sine';
-    const thudStart = 120 + Math.random() * 60;
+    osc.type = surface === 'wood' ? 'triangle' : 'sine';
+    const thudStart =
+      surface === 'wood' ? 195 + Math.random() * 45 : 120 + Math.random() * 60;
+    const thudEnd = surface === 'wood' ? 78 : 48;
     osc.frequency.setValueAtTime(thudStart, now);
-    osc.frequency.exponentialRampToValueAtTime(48, now + 0.07);
+    osc.frequency.exponentialRampToValueAtTime(thudEnd, now + (surface === 'wood' ? 0.085 : 0.07));
 
     const tGain = ctx.createGain();
-    const thudVol = crouching ? 0.045 : 0.085 + sprintRatio * 0.06;
+    const thudVol =
+      (crouching ? 0.045 : 0.085 + sprintRatio * 0.06) * (surface === 'wood' ? 1.1 : 1.0);
     tGain.gain.setValueAtTime(thudVol, now);
-    tGain.gain.exponentialRampToValueAtTime(0.001, now + 0.08);
+    tGain.gain.exponentialRampToValueAtTime(0.001, now + (surface === 'wood' ? 0.095 : 0.08));
 
     osc.connect(tGain);
     tGain.connect(ctx.destination);
     osc.start(now);
-    osc.stop(now + 0.088);
+    osc.stop(now + 0.1);
   }
 
   /**
@@ -932,10 +974,15 @@ export class SoundEngine {
   }
 
   /**
-   * Continuous subtle high-pass wind noise that fades in when moving > 12.5 m/s
-   * or during a 2x+ Freeflow Combo.
+   * Continuous high-pass wind noise that fades in when sprinting > 12.5 m/s,
+   * during 2x+ Freeflow Combo, or with quadratic air-rush during fast falls.
    */
-  public updateWindLoop(active: boolean, speed: number, comboCount: number): void {
+  public updateWindLoop(
+    active: boolean,
+    speed: number,
+    comboCount: number,
+    verticalSpeed = 0,
+  ): void {
     const ctx = this.ready();
     if (!ctx || !this.noiseBuffer) {
       if (this.windGain && this.ctx) {
@@ -945,7 +992,9 @@ export class SoundEngine {
     }
 
     const now = ctx.currentTime;
-    const shouldPlay = active && (speed > 12.5 || comboCount >= 2);
+    const fallSpeed = verticalSpeed < -7.5 ? Math.min(1, (-verticalSpeed - 7.5) / 14.5) : 0;
+    const fallFactor = fallSpeed * fallSpeed; // quadratic falling rush
+    const shouldPlay = active && (speed > 12.5 || comboCount >= 2 || fallFactor > 0.02);
     if (!this.windSrc || !this.windFilter || !this.windGain) {
       if (!shouldPlay) return;
       const src = ctx.createBufferSource();
@@ -973,11 +1022,11 @@ export class SoundEngine {
     if (shouldPlay) {
       const speedFactor = speed > 12.5 ? Math.min(1, (speed - 12.5) / 5.5) : 0;
       const comboFactor = comboCount >= 2 ? Math.min(0.85, 0.32 + (comboCount - 2) * 0.1) : 0;
-      const intensity = Math.max(speedFactor, comboFactor);
-      const targetFreq = 520 + intensity * 680;
-      const targetVol = 0.012 + intensity * 0.075;
+      const intensity = Math.max(speedFactor, comboFactor, fallFactor * 1.15);
+      const targetFreq = 520 + intensity * 740;
+      const targetVol = 0.012 + intensity * 0.082;
       this.windFilter.frequency.setTargetAtTime(targetFreq, now, 0.08);
-      this.windGain.gain.setTargetAtTime(targetVol, now, 0.12);
+      this.windGain.gain.setTargetAtTime(targetVol, now, 0.1);
     } else {
       this.windGain.gain.setTargetAtTime(0, now, 0.12);
     }
@@ -1992,6 +2041,32 @@ export class SoundEngine {
     gain.connect(ctx.destination);
     src.start(now);
     src.stop(now + 0.28);
+  }
+
+  public playLowStaminaHeartbeat(): void {
+    const ctx = this.ready();
+    if (!ctx) return;
+    const now = ctx.currentTime;
+
+    for (const [offset, startFreq, peak] of [
+      [0.0, 74, 0.16],
+      [0.18, 62, 0.11],
+    ] as const) {
+      const osc = ctx.createOscillator();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(startFreq, now + offset);
+      osc.frequency.exponentialRampToValueAtTime(34, now + offset + 0.12);
+
+      const gain = ctx.createGain();
+      gain.gain.setValueAtTime(0.001, now + offset);
+      gain.gain.linearRampToValueAtTime(peak, now + offset + 0.018);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + offset + 0.14);
+
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(now + offset);
+      osc.stop(now + offset + 0.15);
+    }
   }
 
   public playPulleyClick(): void {

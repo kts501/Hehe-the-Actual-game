@@ -2,6 +2,12 @@ import * as THREE from 'three';
 import { Reflector } from 'three/addons/objects/Reflector.js';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import type { BoxCollider, LadderVolume, SupplyCrateObj, ZiplineRoute } from '../types/game';
+import {
+  applyCrysisFoliageShader,
+  applyCrysisWetPomShader,
+  createCrysisWaterMaterial,
+  type CrysisShaderUniforms,
+} from './crysisShaders';
 import type { ProceduralTextureSet } from './textures';
 
 export interface WorldBuildResult {
@@ -39,6 +45,7 @@ const _batchMatrix = new THREE.Matrix4();
 
 export interface WorldBuildOptions {
   isIntelIntegrated?: boolean;
+  crysisUniforms?: CrysisShaderUniforms;
 }
 
 export function buildAgraWorld(
@@ -48,6 +55,7 @@ export function buildAgraWorld(
   options?: WorldBuildOptions,
 ): WorldBuildResult {
   const isIntelIntegrated = Boolean(options?.isIntelIntegrated);
+  const crysisUniforms = options?.crysisUniforms;
   const worldGroup = new THREE.Group();
   scene.add(worldGroup);
 
@@ -184,6 +192,13 @@ export function buildAgraWorld(
       metalness: 0.08,
     }),
   );
+  if (crysisUniforms && !isSoftwareGl) {
+    applyCrysisWetPomShader(marbleMat, crysisUniforms, {
+      porosity: 0.25,
+      pomHeightScale: 0.012,
+      wetnessBias: 0.35,
+    });
+  }
   const marbleTrimMat = trackMat(
     new THREE.MeshStandardMaterial({
       map: textures.marble,
@@ -241,15 +256,23 @@ export function buildAgraWorld(
       metalness: 0.05,
     }),
   );
-  const yamunaWaterMat = trackMat(
-    new THREE.MeshStandardMaterial({
-      color: 0x1c3d4a,
-      bumpMap: textures.waterRippleBump,
-      bumpScale: 0.038,
-      roughness: 0.08,
-      metalness: 0.75,
-    }),
-  );
+  const yamunaWaterMat: THREE.Material = crysisUniforms
+    ? trackMat(
+        createCrysisWaterMaterial(textures, crysisUniforms, {
+          opacity: 0.96,
+          uvScaleX: 16.0,
+          uvScaleY: 6.0,
+        }),
+      )
+    : trackMat(
+        new THREE.MeshStandardMaterial({
+          color: 0x1c3d4a,
+          bumpMap: textures.waterRippleBump,
+          bumpScale: 0.038,
+          roughness: 0.08,
+          metalness: 0.75,
+        }),
+      );
   const brassLampMat = trackMat(
     new THREE.MeshStandardMaterial({
       color: 0xd4a438,
@@ -334,6 +357,23 @@ export function buildAgraWorld(
       metalness: 0.0,
     }),
   );
+  if (crysisUniforms && !isSoftwareGl) {
+    applyCrysisWetPomShader(sandstoneMat, crysisUniforms, {
+      porosity: 0.65,
+      pomHeightScale: 0.028,
+      wetnessBias: 0.55,
+    });
+    applyCrysisWetPomShader(courtyardMat, crysisUniforms, {
+      porosity: 0.8,
+      pomHeightScale: 0.032,
+      wetnessBias: 0.72,
+    });
+    applyCrysisWetPomShader(charbaghLawnMat, crysisUniforms, {
+      porosity: 0.75,
+      pomHeightScale: 0.022,
+      wetnessBias: 0.6,
+    });
+  }
   const outerGroundMat = trackMat(
     new THREE.MeshStandardMaterial({
       color: 0x40372b,
@@ -465,6 +505,29 @@ export function buildAgraWorld(
       side: THREE.DoubleSide,
     }),
   );
+  if (crysisUniforms) {
+    applyCrysisFoliageShader(cypressMat, crysisUniforms, {
+      bendBaseY: 0.7,
+      bendHeight: 6.2,
+      windScale: 0.85,
+      sssScale: 0.9,
+      ditherCull: false,
+    });
+    applyCrysisFoliageShader(foliageMat, crysisUniforms, {
+      bendBaseY: 2.5,
+      bendHeight: 6.5,
+      windScale: 0.72,
+      sssScale: 1.05,
+      ditherCull: false,
+    });
+    applyCrysisFoliageShader(palmFrondMat, crysisUniforms, {
+      bendBaseY: 8.2,
+      bendHeight: 1.8,
+      windScale: 1.35,
+      sssScale: 1.2,
+      ditherCull: false,
+    });
+  }
   const trunkMat = trackMat(
     new THREE.MeshStandardMaterial({
       color: 0x453325,
@@ -727,6 +790,16 @@ export function buildAgraWorld(
         flatShading: true,
       }),
     );
+    if (crysisUniforms) {
+      applyCrysisFoliageShader(tuftMat, crysisUniforms, {
+        bendBaseY: 0.0,
+        bendHeight: 0.62,
+        windScale: 1.25,
+        sssScale: 1.15,
+        ditherCull: true,
+        isInstanced: true,
+      });
+    }
     const instLawnGrass = new THREE.InstancedMesh(tuftGeo, tuftMat, lawnGrassPositions.length);
     instLawnGrass.layers.set(1);
     const dummy = new THREE.Object3D();
@@ -748,16 +821,14 @@ export function buildAgraWorld(
     worldGroup.add(instLawnGrass);
   }
 
-  // Long Central Marble Reflecting Pool (crisp Taj reflection, throttled every 2nd frame for high FPS!)
+  // Long Central Marble Reflecting Pool (planar Reflector on discrete GPUs; low-bandwidth Crysis Water Shader on HD 4600 / SwiftShader)
   const poolGeo = trackGeo(new THREE.PlaneGeometry(8.8, 76));
 
-  if (!isSoftwareGl) {
-    const reflectorSize = isIntelIntegrated ? 256 : 512;
-    const reflectorInterval = isIntelIntegrated ? 4 : 2;
+  if (!isSoftwareGl && !isIntelIntegrated) {
     const reflector = new Reflector(poolGeo, {
       clipBias: 0.003,
-      textureWidth: reflectorSize,
-      textureHeight: reflectorSize,
+      textureWidth: 512,
+      textureHeight: 512,
       color: 0x89a9ad,
     });
     reflector.rotation.x = -Math.PI / 2;
@@ -768,52 +839,58 @@ export function buildAgraWorld(
     let reflectFrame = 0;
     reflector.onBeforeRender = (renderer, scn, cam, geometry, material, group) => {
       const idx = reflectFrame++;
-      if (idx > 0 && idx % reflectorInterval !== 0) return;
+      if (idx > 0 && idx % 2 !== 0) return;
       if (cam.position.z < -92 || cam.position.z > 42 || Math.abs(cam.position.x) > 48) return;
       origOnBeforeRender(renderer, scn, cam, geometry, material, group);
     };
 
     worldGroup.add(reflector);
     disposables.push(reflector);
-  } else {
-    const poolBase = new THREE.Mesh(
-      poolGeo,
-      trackMat(
-        new THREE.MeshStandardMaterial({
-          color: 0x1c3d4a,
-          bumpMap: textures.waterRippleBump,
-          bumpScale: 0.038,
-          roughness: 0.08,
-          metalness: 0.75,
-        }),
-      ),
+
+    // Glossy reflective water ripple surface over mirror pool
+    const poolSheenMat = trackMat(
+      new THREE.MeshStandardMaterial({
+        color: 0x1c3d4a,
+        bumpMap: textures.waterRippleBump,
+        bumpScale: 0.038,
+        transparent: true,
+        opacity: 0.42,
+        roughness: 0.08,
+        metalness: 0.75,
+        depthWrite: false,
+        polygonOffset: true,
+        polygonOffsetFactor: -1,
+      }),
     );
+    const poolSheen = new THREE.Mesh(poolGeo, poolSheenMat);
+    poolSheen.rotation.x = -Math.PI / 2;
+    poolSheen.position.set(0, 0.042, -12);
+    poolSheen.receiveShadow = true;
+    worldGroup.add(poolSheen);
+  } else {
+    const poolWaterMat: THREE.Material = crysisUniforms
+      ? trackMat(
+          createCrysisWaterMaterial(textures, crysisUniforms, {
+            opacity: 0.92,
+            uvScaleX: 4.0,
+            uvScaleY: 24.0,
+          }),
+        )
+      : trackMat(
+          new THREE.MeshStandardMaterial({
+            color: 0x1c3d4a,
+            bumpMap: textures.waterRippleBump,
+            bumpScale: 0.038,
+            roughness: 0.08,
+            metalness: 0.75,
+          }),
+        );
+    const poolBase = new THREE.Mesh(poolGeo, poolWaterMat);
     poolBase.rotation.x = -Math.PI / 2;
-    poolBase.position.set(0, 0.03, -12);
+    poolBase.position.set(0, 0.036, -12);
     poolBase.receiveShadow = true;
     worldGroup.add(poolBase);
   }
-
-  // Glossy reflective water ripple surface over mirror pool
-  const poolSheenMat = trackMat(
-    new THREE.MeshStandardMaterial({
-      color: 0x1c3d4a,
-      bumpMap: textures.waterRippleBump,
-      bumpScale: 0.038,
-      transparent: true,
-      opacity: isSoftwareGl ? 0.92 : 0.42,
-      roughness: 0.08,
-      metalness: 0.75,
-      depthWrite: false,
-      polygonOffset: true,
-      polygonOffsetFactor: -1,
-    }),
-  );
-  const poolSheen = new THREE.Mesh(poolGeo, poolSheenMat);
-  poolSheen.rotation.x = -Math.PI / 2;
-  poolSheen.position.set(0, 0.042, -12);
-  poolSheen.receiveShadow = true;
-  worldGroup.add(poolSheen);
 
   // White Marble Pool Curbs bordering the sandstone walkways
   addBox(worldGroup, 0.68, 0.24, 76, -4.74, 0.12, -12, marbleMat, {
@@ -2250,6 +2327,16 @@ export function buildAgraWorld(
         flatShading: true,
       }),
     );
+    if (crysisUniforms) {
+      applyCrysisFoliageShader(grassMat, crysisUniforms, {
+        bendBaseY: 0.0,
+        bendHeight: 0.55,
+        windScale: 1.3,
+        sssScale: 1.1,
+        ditherCull: true,
+        isInstanced: true,
+      });
+    }
     const instGrass = new THREE.InstancedMesh(grassGeo, grassMat, roofGrassPositions.length);
     instGrass.layers.set(1);
     const dummy = new THREE.Object3D();

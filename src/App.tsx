@@ -149,6 +149,11 @@ export default function App() {
   }, [radioMessages]);
 
   useEffect(() => {
+    document.body.dataset.state =
+      hud.phase === 'start' ? 'title' : hud.phase === 'playing' ? 'playing' : 'gameover';
+  }, [hud.phase]);
+
+  useEffect(() => {
     const el = mountRef.current;
     if (!el) return;
 
@@ -157,6 +162,10 @@ export default function App() {
       setHud(snapshot);
     });
     engineRef.current = engine;
+
+    if (new URLSearchParams(window.location.search).get('autostart') === '1') {
+      engine.startGame(false);
+    }
 
     return () => {
       engine.dispose();
@@ -435,6 +444,7 @@ export default function App() {
       {/* Isolated WebGL mount container */}
       <div
         ref={mountRef}
+        data-testid="game-canvas-mount"
         className="h-full w-full"
         style={
           (hud.awakening?.desaturateProgress ?? 0) > 0.005

@@ -7,11 +7,61 @@ export interface GpuHardwareProfile {
 }
 
 export interface GovernorRenderConfig {
+  tier: 0 | 1 | 2 | 3;
   pixelRatio: number;
+  foliageCullMeters: number;
+  pomMaxMeters: number;
+  shadowDistance: number;
+  sunShaftsEnabled: boolean;
   bloomEnabled: boolean;
   useDirectForward: boolean;
   shadowRefreshInterval: number;
 }
+
+const CRYSIS_GOVERNOR_TIERS: ReadonlyArray<
+  Omit<GovernorRenderConfig, 'shadowRefreshInterval'>
+> = [
+  {
+    tier: 0,
+    pixelRatio: 1.0,
+    foliageCullMeters: 38,
+    pomMaxMeters: 12,
+    shadowDistance: 75,
+    sunShaftsEnabled: true,
+    bloomEnabled: true,
+    useDirectForward: false,
+  },
+  {
+    tier: 1,
+    pixelRatio: 0.875,
+    foliageCullMeters: 28,
+    pomMaxMeters: 7,
+    shadowDistance: 62,
+    sunShaftsEnabled: true,
+    bloomEnabled: true,
+    useDirectForward: false,
+  },
+  {
+    tier: 2,
+    pixelRatio: 0.75,
+    foliageCullMeters: 25,
+    pomMaxMeters: 0,
+    shadowDistance: 48,
+    sunShaftsEnabled: true,
+    bloomEnabled: false,
+    useDirectForward: false,
+  },
+  {
+    tier: 3,
+    pixelRatio: 0.667,
+    foliageCullMeters: 22,
+    pomMaxMeters: 0,
+    shadowDistance: 40,
+    sunShaftsEnabled: false,
+    bloomEnabled: false,
+    useDirectForward: true,
+  },
+];
 
 /**
  * Probes WebGL2 UNMASKED_RENDERER_WEBGL once during engine startup and immediately
@@ -47,49 +97,58 @@ export function probeGpuHardwareProfile(): GpuHardwareProfile {
 }
 
 /**
- * Hardware-aware frame-time & pixel fill-rate governor tuned for
- * Intel Core i5-4690S + Intel HD Graphics 4600 (shared DDR3 bandwidth):
+ * Hardware-aware 500ms-window frame-time & pixel fill-rate governor tuned for
+ * Intel Core i5-4690/5690 + Intel HD Graphics 4600 (30 FPS / 33.3ms frame budget):
  *
- * - Forces initial pixel ratio strictly to 1.0 (overriding Windows 125%/150% DPI scaling).
- * - Dynamically steps internal render scale (1.0 -> 0.875 -> 0.75) with hysteresis
- *   when fragment fill-rate pushes frame time above target budget, and restores
- *   cleanly once sustained headroom returns.
- * - Throttles shadow-map re-evaluation cadence (every 2nd frame on integrated GPUs)
- *   without disabling shadows or altering scene lighting.
- * - Keeps half-resolution bloom active by default and only toggles direct-forward
- *   ACES Filmic rendering under sustained severe GPU pressure.
+ * - Evaluates rolling average frame time every 500ms.
+ * - If frame time exceeds 31.5ms (approaching 33.3ms 30 FPS ceiling), gracefully
+ *   steps down through Tiers 0 -> 3 (trimming foliage cull radius 38m->22m,
+ *   POM distance 12m->0m, shadow frustum 75m->40m, and render scale 1.0->0.667).
+ * - Asymmetric recovery hysteresis: restores one tier only after 3.5s of
+ *   sustained < 26.5ms headroom to avoid visual oscillation.
+ * - Throttles shadow-map updates (every 2nd frame on integrated GPUs) while
+ *   keeping frame 0 immediately valid.
  */
 export class HD4600Governor {
   public readonly profile: GpuHardwareProfile;
-  private readonly scaleSteps = [1.0, 0.875, 0.75] as const;
-  private scaleIndex = 0;
-  private emaFrameMs = 16.67;
-  private pressureAccumSec = 0;
-  private headroomAccumSec = 0;
-  private cooldownSec = 0;
+  private tierIndex = 0;
+  private windowMsAccum = 0;
+  private windowFrames = 0;
+  private recoveryTimerMs = 0;
+  private cooldownMs = 0;
   private frameCounter = 0;
-
-  private bloomEnabled: boolean;
-  private useDirectForward: boolean;
   private shadowRefreshInterval: number;
-  private dirty = false;
+
+  private readonly triggerThresholdMs = 31.5;
+  private readonly recoveryThresholdMs = 26.5;
+  private readonly sampleIntervalMs = 500.0;
 
   constructor(profile: GpuHardwareProfile) {
     this.profile = profile;
-    this.bloomEnabled = !profile.isSoftwareGl;
-    this.useDirectForward = profile.isSoftwareGl;
+    // Software WebGL stays on direct forward path with zero multi-pass stalls
+    this.tierIndex = profile.isSoftwareGl ? 3 : 0;
     this.shadowRefreshInterval = profile.isIntelIntegrated ? 2 : 1;
   }
 
   public get currentPixelRatio(): number {
-    return this.scaleSteps[this.scaleIndex];
+    return this.profile.isSoftwareGl ? 1.0 : CRYSIS_GOVERNOR_TIERS[this.tierIndex].pixelRatio;
   }
 
   public get config(): GovernorRenderConfig {
+    const base = CRYSIS_GOVERNOR_TIERS[this.tierIndex];
+    if (this.profile.isSoftwareGl) {
+      return {
+        ...base,
+        pixelRatio: 1.0,
+        pomMaxMeters: 0,
+        sunShaftsEnabled: false,
+        bloomEnabled: false,
+        useDirectForward: true,
+        shadowRefreshInterval: 1,
+      };
+    }
     return {
-      pixelRatio: this.scaleSteps[this.scaleIndex],
-      bloomEnabled: this.bloomEnabled,
-      useDirectForward: this.useDirectForward,
+      ...base,
       shadowRefreshInterval: this.shadowRefreshInterval,
     };
   }
@@ -105,71 +164,52 @@ export class HD4600Governor {
   }
 
   /**
-   * Feeds measured frame delta into the smoothed frame-time estimator and applies
-   * any needed resolution-scale or bloom adjustments via callback (zero GC).
+   * Feeds measured frame delta (in seconds) into the 500ms window estimator and
+   * invokes onApplyConfig whenever quality tier transitions occur.
    */
   public sampleFrame(
     rawDtSec: number,
-    onApplyScale: (pixelRatio: number, bloomEnabled: boolean, useDirectForward: boolean) => void,
+    onApplyConfig: (config: GovernorRenderConfig) => void,
   ): void {
     if (this.profile.isSoftwareGl) return;
 
-    const frameMs = THREE.MathUtils.clamp(rawDtSec * 1000, 4, 120);
-    this.emaFrameMs = this.emaFrameMs * 0.9 + frameMs * 0.1;
+    const frameMs = THREE.MathUtils.clamp(rawDtSec * 1000, 4.0, 100.0);
+    this.windowMsAccum += frameMs;
+    this.windowFrames++;
 
-    if (this.cooldownSec > 0) {
-      this.cooldownSec = Math.max(0, this.cooldownSec - rawDtSec);
+    if (this.cooldownMs > 0) {
+      this.cooldownMs = Math.max(0, this.cooldownMs - frameMs);
     }
 
-    // Downscale hysteresis: sustained > 21.5ms (~46 FPS) triggers graceful step-down
-    if (this.emaFrameMs > 21.5) {
-      this.pressureAccumSec += rawDtSec;
-      this.headroomAccumSec = 0;
-    } else if (this.emaFrameMs < 14.8) {
-      this.headroomAccumSec += rawDtSec;
-      this.pressureAccumSec = 0;
-    } else {
-      this.pressureAccumSec = Math.max(0, this.pressureAccumSec - rawDtSec * 0.5);
-      this.headroomAccumSec = Math.max(0, this.headroomAccumSec - rawDtSec * 0.5);
-    }
+    if (this.windowMsAccum < this.sampleIntervalMs) return;
 
-    if (this.cooldownSec <= 0) {
-      if (this.pressureAccumSec >= 1.25) {
-        this.pressureAccumSec = 0;
-        if (this.scaleIndex < this.scaleSteps.length - 1) {
-          this.scaleIndex++;
-          this.dirty = true;
-          this.cooldownSec = 2.0;
-        } else if (this.bloomEnabled) {
-          this.bloomEnabled = false;
-          this.dirty = true;
-          this.cooldownSec = 2.5;
-        } else if (this.profile.isIntelIntegrated && !this.useDirectForward) {
-          this.useDirectForward = true;
-          this.dirty = true;
-          this.cooldownSec = 3.0;
-        }
-      } else if (this.headroomAccumSec >= 3.0) {
-        this.headroomAccumSec = 0;
-        if (this.useDirectForward) {
-          this.useDirectForward = false;
-          this.dirty = true;
-          this.cooldownSec = 3.0;
-        } else if (!this.bloomEnabled) {
-          this.bloomEnabled = true;
-          this.dirty = true;
-          this.cooldownSec = 2.5;
-        } else if (this.scaleIndex > 0) {
-          this.scaleIndex--;
-          this.dirty = true;
-          this.cooldownSec = 2.5;
-        }
+    const avgFrameMs = this.windowMsAccum / Math.max(1, this.windowFrames);
+    const elapsedWindowMs = this.windowMsAccum;
+    this.windowMsAccum = 0;
+    this.windowFrames = 0;
+
+    if (avgFrameMs > this.triggerThresholdMs && this.cooldownMs <= 0) {
+      this.recoveryTimerMs = 0;
+      if (this.tierIndex < CRYSIS_GOVERNOR_TIERS.length - 1) {
+        this.tierIndex++;
+        this.cooldownMs = 1500;
+        this.shadowRefreshInterval = this.tierIndex >= 2 ? 2 : this.profile.isIntelIntegrated ? 2 : 1;
+        onApplyConfig(this.config);
       }
+      return;
     }
 
-    if (this.dirty) {
-      this.dirty = false;
-      onApplyScale(this.scaleSteps[this.scaleIndex], this.bloomEnabled, this.useDirectForward);
+    if (avgFrameMs < this.recoveryThresholdMs) {
+      this.recoveryTimerMs += elapsedWindowMs;
+      if (this.recoveryTimerMs >= 3500 && this.cooldownMs <= 0 && this.tierIndex > 0) {
+        this.tierIndex--;
+        this.recoveryTimerMs = 0;
+        this.cooldownMs = 2500;
+        this.shadowRefreshInterval = this.tierIndex >= 2 ? 2 : this.profile.isIntelIntegrated ? 2 : 1;
+        onApplyConfig(this.config);
+      }
+    } else {
+      this.recoveryTimerMs = Math.max(0, this.recoveryTimerMs - elapsedWindowMs * 0.5);
     }
   }
 }

@@ -84,6 +84,11 @@ export interface HudSnapshot {
   elapsedSeconds: number;
   parkourFlow?: number;
   parkourMove?: string;
+  parkourState?: import('../game/parkourPhysics').ParkourStateId;
+  speedKmh?: number;
+  overheadCharge?: number;
+  lookDownInspect?: boolean;
+  heavyLanding?: boolean;
   playerHeadingRad?: number;
   tajBearingRad?: number;
   nearestCrateBearingRad?: number | null;

@@ -112,13 +112,21 @@ export const GameHud: React.FC<GameHudProps> = ({
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (hud.phase === 'start' && (e.code === 'Enter' || e.code === 'Space') && !e.repeat) {
+        const tag = (e.target as HTMLElement | null)?.tagName;
+        if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+        e.preventDefault();
+        (document.activeElement as HTMLElement | null)?.blur();
+        onStart();
+        return;
+      }
       if (hud.phase === 'playing' && !hud.radioOpen && e.code === 'KeyM' && !e.repeat) {
         setShowMinimaps((prev) => !prev);
       }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [hud.phase, hud.radioOpen]);
+  }, [hud.phase, hud.radioOpen, onStart]);
 
   useEffect(() => {
     if (hud.radioOpen) {
@@ -574,32 +582,65 @@ export const GameHud: React.FC<GameHudProps> = ({
         !awakeningCinematic &&
         !hud.weaponWheelOpen &&
         effectiveHudOpacity > 0.1 && (() => {
-          const spreadGap = 5 + (hud.moveSpread ?? 0) * 9;
+          const mantleReady = Boolean(hud.canMantle);
+          const charge = Math.max(0, Math.min(1, hud.overheadCharge ?? 0));
+          const spreadGap = 5 + (hud.moveSpread ?? 0) * 9 + (mantleReady ? 4 : 0);
           const hitActive = (hud.hitMarkerFlash ?? 0) > 0.02;
+          const tickColor = hitActive
+            ? 'bg-red-400'
+            : mantleReady
+              ? 'bg-amber-300 shadow-[0_0_6px_rgba(252,211,77,0.85)]'
+              : 'bg-white/60';
           return (
             <div className="pointer-events-none fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2">
               <div
                 className={`h-1.5 w-1.5 rounded-full transition-colors duration-75 ${
-                  hitActive ? 'bg-red-500 shadow-[0_0_8px_rgba(239,68,68,0.95)]' : 'bg-white/95 ring-1 ring-black/75'
+                  hitActive
+                    ? 'bg-red-500 shadow-[0_0_8px_rgba(239,68,68,0.95)]'
+                    : mantleReady
+                      ? 'bg-amber-300 ring-1 ring-black/80 shadow-[0_0_8px_rgba(252,211,77,0.8)]'
+                      : 'bg-white/95 ring-1 ring-black/75'
                 }`}
               />
-              {/* 4 subtle dynamic outer ticks expanding with speed/swing */}
+              {/* 4 dynamic outer ticks expanding with speed/swing or mantle reach */}
               <div
-                className={`absolute left-1/2 h-1.5 w-px -translate-x-1/2 ${hitActive ? 'bg-red-400' : 'bg-white/60'}`}
+                className={`absolute left-1/2 h-1.5 w-px -translate-x-1/2 transition-all duration-100 ${tickColor}`}
                 style={{ bottom: `${spreadGap}px` }}
               />
               <div
-                className={`absolute left-1/2 h-1.5 w-px -translate-x-1/2 ${hitActive ? 'bg-red-400' : 'bg-white/60'}`}
+                className={`absolute left-1/2 h-1.5 w-px -translate-x-1/2 transition-all duration-100 ${tickColor}`}
                 style={{ top: `${spreadGap}px` }}
               />
               <div
-                className={`absolute top-1/2 h-px w-1.5 -translate-y-1/2 ${hitActive ? 'bg-red-400' : 'bg-white/60'}`}
+                className={`absolute top-1/2 h-px w-1.5 -translate-y-1/2 transition-all duration-100 ${tickColor}`}
                 style={{ right: `${spreadGap}px` }}
               />
               <div
-                className={`absolute top-1/2 h-px w-1.5 -translate-y-1/2 ${hitActive ? 'bg-red-400' : 'bg-white/60'}`}
+                className={`absolute top-1/2 h-px w-1.5 -translate-y-1/2 transition-all duration-100 ${tickColor}`}
                 style={{ left: `${spreadGap}px` }}
               />
+              {mantleReady && (
+                <>
+                  <span
+                    className="absolute top-1/2 -translate-y-1/2 h-3.5 w-1.5 border-l-2 border-t-2 border-b-2 border-amber-300/90"
+                    style={{ right: `${spreadGap + 5}px` }}
+                  />
+                  <span
+                    className="absolute top-1/2 -translate-y-1/2 h-3.5 w-1.5 border-r-2 border-t-2 border-b-2 border-amber-300/90"
+                    style={{ left: `${spreadGap + 5}px` }}
+                  />
+                </>
+              )}
+              {charge > 0.05 && (
+                <div className="absolute left-1/2 top-5 -translate-x-1/2 w-16 h-1 overflow-hidden rounded-full bg-zinc-950/85 ring-1 ring-white/20">
+                  <div
+                    className={`h-full transition-[width] duration-75 ${
+                      charge >= 0.98 ? 'bg-red-500 shadow-[0_0_8px_rgba(239,68,68,0.9)]' : 'bg-amber-400'
+                    }`}
+                    style={{ width: `${Math.round(charge * 100)}%` }}
+                  />
+                </div>
+              )}
               {hitActive && (
                 <div
                   className="absolute left-1/2 top-1/2 h-5 w-5 -translate-x-1/2 -translate-y-1/2 rotate-45"
@@ -1117,8 +1158,23 @@ export const GameHud: React.FC<GameHudProps> = ({
                 className={`text-sm font-medium tracking-wide font-mono-num ${
                   hud.kickCooldown > 0 ? 'text-white/55' : 'text-white'
                 } ${hudTextShadow}`}
+                title="Slide while sprinting, Roll on landing, or Kick"
               >
-                [C] {hud.kickCooldown > 0 ? `${hud.kickCooldown}s` : 'Kick'}
+                [C] {hud.kickCooldown > 0 ? `${hud.kickCooldown}s` : 'Slide / Kick'}
+              </span>
+              <span
+                className={`text-sm font-medium tracking-wide font-mono-num text-white/90 ${hudTextShadow}`}
+                title="Quick-equip Unarmed Fists [1] or Bat [2]"
+              >
+                [1] Fists · [2] Bat
+              </span>
+              <span
+                className={`text-sm font-medium tracking-wide font-mono-num ${
+                  hud.lookDownInspect ? 'text-cyan-300 font-semibold' : 'text-white/90'
+                } ${hudTextShadow}`}
+                title="Look down to inspect legs and footing"
+              >
+                [V] {hud.lookDownInspect ? 'Looking Down' : 'Look Down'}
               </span>
               <button
                 type="button"
@@ -1132,7 +1188,7 @@ export const GameHud: React.FC<GameHudProps> = ({
           </div>
 
           {/* Center-Bottom: Intro Overwatch Radio, Tutorial Hint, Interaction Prompt & Radio Subtitles */}
-          <div className="pointer-events-none fixed bottom-5 left-1/2 z-30 flex w-full max-w-2xl -translate-x-1/2 flex-col items-center gap-2 px-4">
+          <div className="pointer-events-none fixed bottom-12 left-1/2 z-30 flex w-full max-w-2xl -translate-x-1/2 flex-col items-center gap-2 px-4">
             {hud.introRadioVisible && (
               <div className="w-full rounded-lg border border-amber-400/35 bg-zinc-950/90 px-5 py-3 shadow-2xl">
                 <div className="flex items-center gap-2 text-[11px] font-bold tracking-[0.14em] text-amber-400 uppercase">
@@ -1193,9 +1249,77 @@ export const GameHud: React.FC<GameHudProps> = ({
             <div className={`pointer-events-none z-30 text-xs font-semibold tracking-wider text-white/80 uppercase ${hudTextShadow}`}>
               <span className="font-mono-num text-amber-300">[SPACE]</span> Skip Intro
             </div>
-          ) : (
-            <div className="w-40" aria-hidden="true" />
-          )}
+          ) : (() => {
+            const speedKmh = Math.round(hud.speedKmh ?? 0);
+            const stateId = hud.parkourState ?? 'GROUNDED';
+            let stateLabel = 'READY';
+            let stateTone = 'border-white/15 bg-zinc-950/75 text-zinc-300';
+            if (stateId === 'SPEED_VAULT') {
+              stateLabel = 'SPEED VAULT';
+              stateTone = 'border-amber-400/50 bg-amber-950/75 text-amber-200';
+            } else if (stateId === 'KONG_VAULT') {
+              stateLabel = 'KONG VAULT';
+              stateTone = 'border-amber-400/50 bg-amber-950/75 text-amber-200';
+            } else if (stateId === 'MUSCLE_UP') {
+              stateLabel = 'MUSCLE UP';
+              stateTone = 'border-amber-400/50 bg-amber-950/75 text-amber-200';
+            } else if (stateId === 'LEDGE_CATCH') {
+              stateLabel = 'LEDGE CATCH';
+              stateTone = 'border-amber-400/50 bg-amber-950/75 text-amber-200';
+            } else if (stateId === 'WALL_RUN_LEFT') {
+              stateLabel = 'WALL RUN L';
+              stateTone = 'border-cyan-400/50 bg-cyan-950/75 text-cyan-200';
+            } else if (stateId === 'WALL_RUN_RIGHT') {
+              stateLabel = 'WALL RUN R';
+              stateTone = 'border-cyan-400/50 bg-cyan-950/75 text-cyan-200';
+            } else if (stateId === 'WALL_SCRAMBLE') {
+              stateLabel = 'WALL CLIMB';
+              stateTone = 'border-amber-400/50 bg-amber-950/75 text-amber-200';
+            } else if (stateId === 'PARKOUR_ROLL') {
+              stateLabel = 'SAFETY ROLL';
+              stateTone = 'border-emerald-400/50 bg-emerald-950/75 text-emerald-200';
+            } else if (stateId === 'HEAVY_LANDING') {
+              stateLabel = 'HEAVY IMPACT';
+              stateTone = 'border-red-400/60 bg-red-950/80 text-red-200';
+            } else if (stateId === 'SLIDE') {
+              stateLabel = 'SLIDE';
+              stateTone = 'border-cyan-400/50 bg-cyan-950/75 text-cyan-200';
+            } else if (stateId === 'AIRBORNE') {
+              stateLabel = 'AIRBORNE';
+              stateTone = 'border-sky-400/40 bg-zinc-950/80 text-sky-200';
+            } else if (speedKmh >= 24) {
+              stateLabel = 'SPRINT';
+              stateTone = 'border-cyan-400/40 bg-zinc-950/80 text-cyan-200';
+            } else if (speedKmh >= 6) {
+              stateLabel = 'MOVING';
+              stateTone = 'border-white/20 bg-zinc-950/75 text-zinc-100';
+            }
+            return (
+              <div
+                className="pointer-events-none flex flex-col items-end gap-1 transition-opacity duration-300"
+                style={{ opacity: effectiveHudOpacity }}
+                data-testid="parkour-telemetry"
+              >
+                <div className="flex items-baseline gap-1.5">
+                  <span
+                    className={`font-mono-num tabular-nums text-2xl font-bold tracking-tight text-white ${hudTextShadow}`}
+                    data-testid="hud-speed-kmh"
+                  >
+                    {speedKmh}
+                  </span>
+                  <span className={`font-mono-num text-[11px] font-semibold tracking-widest text-zinc-300 ${hudTextShadow}`}>
+                    KM/H
+                  </span>
+                </div>
+                <span
+                  className={`rounded px-2 py-0.5 border font-mono-num text-[10px] font-bold tracking-[0.16em] uppercase ${stateTone}`}
+                  data-testid="hud-parkour-state"
+                >
+                  {stateLabel}
+                </span>
+              </div>
+            );
+          })()}
         </div>
       )}
 
@@ -1586,7 +1710,11 @@ export const GameHud: React.FC<GameHudProps> = ({
             <div className="mt-7 flex items-center gap-3">
               <button
                 type="button"
-                onClick={onStart}
+                data-start="true"
+                onClick={() => {
+                  (document.activeElement as HTMLElement | null)?.blur();
+                  onStart();
+                }}
                 className="rounded-lg bg-gradient-to-r from-amber-500 to-orange-500 px-8 py-3 font-display text-base font-bold tracking-wider text-zinc-950 shadow-[0_0_28px_rgba(245,158,11,0.5)] hover:from-amber-400 hover:to-orange-400 transition-all whitespace-nowrap shrink-0 cursor-pointer"
               >
                 PLAY DEMO
@@ -1728,6 +1856,7 @@ export const GameHud: React.FC<GameHudProps> = ({
               <div className="mt-6 flex flex-wrap items-center justify-center gap-3">
                 <button
                   type="button"
+                  data-start="true"
                   onClick={onRespawnSafeZone}
                   className="inline-flex items-center gap-2 rounded-lg bg-red-600 px-6 py-2.5 font-display text-sm font-bold tracking-wider text-white hover:bg-red-500 transition-colors cursor-pointer"
                 >
@@ -1736,6 +1865,7 @@ export const GameHud: React.FC<GameHudProps> = ({
                 </button>
                 <button
                   type="button"
+                  data-start="true"
                   onClick={onRestart}
                   className="inline-flex items-center gap-2 rounded-lg border border-white/20 bg-zinc-900 px-4 py-2.5 font-display text-xs font-semibold tracking-wider text-zinc-200 hover:bg-zinc-800 transition-colors cursor-pointer"
                 >
@@ -1771,6 +1901,7 @@ export const GameHud: React.FC<GameHudProps> = ({
               </div>
               <button
                 type="button"
+                data-start="true"
                 onClick={onRestart}
                 className="mt-6 inline-flex items-center gap-2 rounded-lg bg-red-600 px-6 py-2.5 font-display text-sm font-bold text-white hover:bg-red-500 transition-colors cursor-pointer"
               >
@@ -1815,6 +1946,7 @@ export const GameHud: React.FC<GameHudProps> = ({
             </div>
             <button
               type="button"
+              data-start="true"
               onClick={onRestart}
               className="mt-6 inline-flex items-center gap-2 rounded-lg bg-amber-500 px-6 py-2.5 font-display text-sm font-bold text-zinc-950 hover:bg-amber-400 transition-colors cursor-pointer"
             >

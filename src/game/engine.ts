@@ -4,9 +4,7 @@ import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { Pass } from 'three/addons/postprocessing/Pass.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
-import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
-import { VignetteShader } from 'three/addons/shaders/VignetteShader.js';
 import type {
   AllyNameplate,
   BoxCollider,
@@ -40,8 +38,23 @@ import { NightRunner } from './nightRunner';
 import { TerritoryManager, type ActiveTerritoryHudInfo } from './territories';
 import { AllyManager } from './allies';
 import {
+  createCrysisShaderUniforms,
+  CrysisPostPass,
+  SunShaftsPass,
+  type CrysisShaderUniforms,
+} from './crysisShaders';
+import {
+  CameraSpringRig,
+  classifyLandingImpact,
+  classifySurfaceType,
+  computeMuscleUpStage,
+  type ParkourStateId,
+  type SurfaceMaterialKind,
+} from './parkourPhysics';
+import {
   HD4600Governor,
   probeGpuHardwareProfile,
+  type GovernorRenderConfig,
   type GpuHardwareProfile,
 } from './hd4600Governor';
 
@@ -222,11 +235,14 @@ export class AgraSurvivalEngine {
   private readonly renderer: THREE.WebGLRenderer;
   private readonly composer: EffectComposer | null = null;
   private readonly viewmodelPass: ViewmodelRenderPass | null = null;
+  private readonly sunShaftsPass: SunShaftsPass | null = null;
   private readonly bloomPass: UnrealBloomPass | null = null;
+  private readonly crysisPostPass: CrysisPostPass | null = null;
   private readonly scene: THREE.Scene;
   private readonly camera: THREE.PerspectiveCamera;
   private readonly gpuProfile: GpuHardwareProfile;
   private readonly governor: HD4600Governor;
+  private readonly crysisUniforms: CrysisShaderUniforms;
   private readonly isSoftwareGl: boolean;
   private useDirectForward = false;
   private viewportW = 1280;
@@ -272,9 +288,28 @@ export class AgraSurvivalEngine {
   private jumpBufferTimer = 0;
   private canMantle = false;
 
-  // Mantle, Speed Vault & Lunge kinematics
+  // Parkour Physics State, Camera Spring-Damper Rig & Charged Melee
+  private readonly camSpring = new CameraSpringRig();
+  private parkourState: ParkourStateId = 'GROUNDED';
+  private vaultKind: 'SPEED_VAULT' | 'KONG_VAULT' = 'SPEED_VAULT';
+  private peakFallSpeed = 0;
+  private heavyLandingTimer = 0;
+  private heavyLandingRecoveryScale = 1.0;
+  private lookDownInspect = false;
+  private savedPreLookDownPitch = -0.04;
+  private lowStaminaHeartbeatTimer = 0;
+  private lmbDownActive = false;
+  private lmbHoldTime = 0;
+  private overheadCharge = 0;
+  private currentFloorSurface: SurfaceMaterialKind = 'concrete';
+  private readonly climbGripLeft = new THREE.Vector3();
+  private readonly climbGripRight = new THREE.Vector3();
+  private readonly ledgeNormalWorld = new THREE.Vector3();
+
+  // Mantle, Speed/Kong Vault & Lunge kinematics
   private mantling = false;
   private mantleTimer = 0;
+  private mantleDuration = 1.15;
   private readonly mantleStart = new THREE.Vector3();
   private readonly mantleEnd = new THREE.Vector3();
 
@@ -457,6 +492,7 @@ export class AgraSurvivalEngine {
     this.gpuProfile = probeGpuHardwareProfile();
     this.isSoftwareGl = this.gpuProfile.isSoftwareGl;
     this.governor = new HD4600Governor(this.gpuProfile);
+    this.crysisUniforms = createCrysisShaderUniforms(this.isSoftwareGl);
     this.useDirectForward = this.governor.config.useDirectForward;
 
     this.viewportW = mountEl.clientWidth || window.innerWidth;
@@ -468,6 +504,7 @@ export class AgraSurvivalEngine {
       stencil: false,
       depth: true,
       precision: 'mediump',
+      preserveDrawingBuffer: this.isSoftwareGl,
     });
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
@@ -508,6 +545,9 @@ export class AgraSurvivalEngine {
     // 3. Three-point / Outdoor Golden Dusk-Nightfall Lighting + Player Flashlight
     const shadowMapSize = this.gpuProfile.isIntelIntegrated ? 1024 : 2048;
     this.lighting = new TimeOfDayLightingSystem(this.scene, this.isSoftwareGl, shadowMapSize);
+    if (!this.isSoftwareGl) {
+      this.lighting.setShadowDistance(this.governor.config.shadowDistance);
+    }
 
     this.flashlight = new THREE.SpotLight(0xfef9c3, 0, 42, Math.PI / 4.2, 0.55, 1.55);
     this.flashlight.castShadow = false;
@@ -521,11 +561,12 @@ export class AgraSurvivalEngine {
     // 4. Build World, Textures, Viewmodel, Zombies & Intro Controller
     const rawMaxAniso = this.renderer.capabilities.getMaxAnisotropy();
     const tunedAniso = this.gpuProfile.isIntelIntegrated
-      ? Math.min(2, rawMaxAniso)
-      : Math.min(4, rawMaxAniso);
+      ? Math.min(8, rawMaxAniso)
+      : Math.min(8, rawMaxAniso);
     this.textures = createProceduralTextures(tunedAniso);
     this.world = buildAgraWorld(this.scene, this.textures, this.isSoftwareGl, {
       isIntelIntegrated: this.gpuProfile.isIntelIntegrated,
+      crysisUniforms: this.crysisUniforms,
     });
     this.viewmodel = new WeaponAndEffects(this.scene, this.camera, this.textures);
     this.viewmodel.setVisible(false);
@@ -561,22 +602,30 @@ export class AgraSurvivalEngine {
         this.viewmodelPass = new ViewmodelRenderPass(this.scene, this.camera);
         this.viewmodelPass.enabled = false;
         this.composer.addPass(this.viewmodelPass);
+        // Quarter-resolution screen-space radial sun shafts (Crysis golden-hour god rays)
+        this.sunShaftsPass = new SunShaftsPass(w, h);
+        this.sunShaftsPass.enabled = this.governor.config.sunShaftsEnabled;
+        this.composer.addPass(this.sunShaftsPass);
         // Half-resolution bloom mip chain cuts fragment fill-rate by ~75% while preserving golden-hour glow
         this.bloomPass = new UnrealBloomPass(new THREE.Vector2(bloomW, bloomH), 0.42, 0.55, 0.82);
+        this.bloomPass.enabled = this.governor.config.bloomEnabled;
         this.composer.addPass(this.bloomPass);
-        const vignettePass = new ShaderPass(VignetteShader);
-        vignettePass.uniforms['offset'].value = 0.82;
-        vignettePass.uniforms['darkness'].value = 1.0;
-        this.composer.addPass(vignettePass);
+        // ACESFilmic tone mapping + sRGB conversion precedes CAS + grading + blue-noise dither
         this.composer.addPass(new OutputPass());
+        this.crysisPostPass = new CrysisPostPass(w, h);
+        this.composer.addPass(this.crysisPostPass);
         this.camera.layers.enable(2);
         this.renderer.compile(this.scene, this.camera);
         this.camera.layers.disable(2);
       } catch {
+        this.sunShaftsPass?.dispose();
+        this.crysisPostPass?.dispose();
         this.composer?.dispose();
         this.composer = null;
         this.viewmodelPass = null;
+        this.sunShaftsPass = null;
         this.bloomPass = null;
+        this.crysisPostPass = null;
       }
     }
 
@@ -588,7 +637,9 @@ export class AgraSurvivalEngine {
   }
 
   public startGame(shouldLockPointer = true): void {
-    this.sound.unlock();
+    if (shouldLockPointer) {
+      this.sound.unlock();
+    }
     this.resetState();
     this.phase = 'playing';
     this.viewmodel.setVisible(true);
@@ -934,11 +985,26 @@ export class AgraSurvivalEngine {
     this.playerVel.set(0, 0, 0);
     this.yaw = this.world.spawnYaw;
     this.pitch = -0.04;
+    this.camSpring.reset();
+    this.parkourState = 'GROUNDED';
+    this.vaultKind = 'SPEED_VAULT';
+    this.peakFallSpeed = 0;
+    this.heavyLandingTimer = 0;
+    this.heavyLandingRecoveryScale = 1.0;
+    this.lookDownInspect = false;
+    this.savedPreLookDownPitch = -0.04;
+    this.lowStaminaHeartbeatTimer = 0;
+    this.lmbDownActive = false;
+    this.lmbHoldTime = 0;
+    this.overheadCharge = 0;
+    this.currentFloorSurface = 'concrete';
     this.onGround = true;
     this.coyoteTimer = 0;
     this.jumpBufferTimer = 0;
     this.canMantle = false;
     this.mantling = false;
+    this.mantleTimer = 0;
+    this.mantleDuration = 1.15;
     this.vaulting = false;
     this.vaultTimer = 0;
     this.lungeTimer = 0;
@@ -1191,16 +1257,25 @@ export class AgraSurvivalEngine {
     const scale = this.governor.currentPixelRatio;
     this.renderer.setPixelRatio(scale);
     this.renderer.setSize(w, h);
-    if (this.composer && this.bloomPass) {
+    if (this.composer) {
       this.composer.setPixelRatio(scale);
       this.composer.setSize(w, h);
-      this.bloomPass.setSize(Math.max(1, Math.floor(w * 0.5)), Math.max(1, Math.floor(h * 0.5)));
+      if (this.bloomPass) {
+        this.bloomPass.setSize(Math.max(1, Math.floor(w * 0.5)), Math.max(1, Math.floor(h * 0.5)));
+      }
+      this.sunShaftsPass?.setSize(w, h);
+      this.crysisPostPass?.setSize(w, h);
     }
     this.renderer.shadowMap.needsUpdate = !this.isSoftwareGl;
   };
 
   private onPointerLockChange = () => {
     this.pointerLocked = document.pointerLockElement === this.renderer.domElement;
+    if (!this.pointerLocked) {
+      this.lmbDownActive = false;
+      this.lmbHoldTime = 0;
+      this.overheadCharge = 0;
+    }
     this.emitHud();
   };
 
@@ -1214,6 +1289,9 @@ export class AgraSurvivalEngine {
       this.keys[k] = false;
     }
     this.qHoldPending = false;
+    this.lmbDownActive = false;
+    this.lmbHoldTime = 0;
+    this.overheadCharge = 0;
     if (this.weaponWheelOpen) {
       this.closeWeaponWheel(false);
     }
@@ -1451,6 +1529,9 @@ export class AgraSurvivalEngine {
     this.lastYawMove += deltaYaw;
     this.viewmodelYawDelta += deltaYaw;
     this.viewmodelPitchDelta += deltaPitch;
+    if (this.lookDownInspect && deltaPitch > 0.045) {
+      this.lookDownInspect = false;
+    }
     this.pitch = THREE.MathUtils.clamp(this.pitch + deltaPitch, -1.42, 1.42);
   };
 
@@ -1492,15 +1573,35 @@ export class AgraSurvivalEngine {
         return;
       }
       if (this.headGrabState.active) return;
-      this.performMeleeAttack();
+      if (this.activeWeapon === 'bat') {
+        this.lmbDownActive = true;
+        this.lmbHoldTime = 0;
+        this.overheadCharge = 0;
+      } else {
+        this.performMeleeAttack(false);
+      }
     } else if (e.button === 2) {
       if (this.headGrabState.active) return;
       this.performCounterParry();
     }
   };
 
-  private onMouseUp = () => {
-    // Reserved for mouse button release behaviors
+  private onMouseUp = (e: MouseEvent) => {
+    if (e.button === 0 && this.lmbDownActive) {
+      const charged = this.lmbHoldTime >= 0.35;
+      this.lmbDownActive = false;
+      this.lmbHoldTime = 0;
+      this.overheadCharge = 0;
+      if (
+        this.phase === 'playing' &&
+        !this.devOverlayOpen &&
+        !this.radioOpen &&
+        !this.weaponWheelOpen &&
+        !this.headGrabState.active
+      ) {
+        this.performMeleeAttack(charged);
+      }
+    }
   };
 
   private onKeyDown = (e: KeyboardEvent) => {
@@ -1664,7 +1765,14 @@ export class AgraSurvivalEngine {
         }
       }
     } else if (e.code === 'KeyV' && !e.repeat) {
-      this.performParkourKick();
+      this.lookDownInspect = !this.lookDownInspect;
+      if (this.lookDownInspect) {
+        this.savedPreLookDownPitch = this.pitch > -0.6 ? this.pitch : -0.04;
+        this.pitch = THREE.MathUtils.lerp(this.pitch, -1.06, 0.55);
+      } else {
+        this.pitch = this.savedPreLookDownPitch;
+      }
+      this.emitHud();
     } else if ((e.code === 'ControlLeft' || e.code === 'KeyX') && !e.repeat) {
       if (this.postLandRollTimer > 0 && this.rollTimer <= 0) {
         this.startSafetyRoll(this.pendingHardFallDist);
@@ -2150,7 +2258,7 @@ export class AgraSurvivalEngine {
   // =========================================================================
   // ARKHAM-STYLE FREEFLOW COMBAT: STRIKE + LUNGE, COUNTER, KICK, TAKEDOWN
   // =========================================================================
-  private performMeleeAttack(): void {
+  private performMeleeAttack(isOverheadSmash = false): void {
     if (
       this.attackCooldown > 0 ||
       this.mantling ||
@@ -2178,26 +2286,36 @@ export class AgraSurvivalEngine {
       this.attackCooldown = cfg.attackCooldown * fatigueDurationMult;
       this.sound.playWeaponSwing('unarmed');
       this.viewmodel.triggerUnarmedHook(() => {
-        this.resolveMeleeStrikeHitCheck(cfg, true);
+        this.resolveMeleeStrikeHitCheck(cfg, true, false);
       });
       return;
     }
 
-    this.spendStamina(cfg.staminaCost);
+    const useOverhead = isOverheadSmash && this.activeWeapon === 'bat';
+    this.spendStamina(useOverhead ? cfg.staminaCost * 1.35 : cfg.staminaCost);
     const isExhausted = !window.devInfStamina && (this.exhaustionTimer > 0 || isExhaustedBefore);
 
     this.meleeSwingToggle = !this.meleeSwingToggle;
     const batAwakened = this.activeWeapon === 'bat' && this.awakening.state.isActive;
     const swingSpeedMult = batAwakened ? this.awakening.getSwingSpeedMultiplier() : 1.0;
     const fatigueDurationMult = isExhausted ? 1.4 : lowStamina ? 1.25 : 1.0;
-    this.attackCooldown = (cfg.attackCooldown * fatigueDurationMult) / swingSpeedMult;
-    this.viewmodel.triggerSwing((cfg.swingDuration * fatigueDurationMult) / swingSpeedMult);
+    this.attackCooldown = ((useOverhead ? cfg.attackCooldown * 1.25 : cfg.attackCooldown) * fatigueDurationMult) / swingSpeedMult;
+    if (useOverhead) {
+      this.viewmodel.triggerOverheadSmash((0.56 * fatigueDurationMult) / swingSpeedMult);
+      this.camSpring.addImpulse(-0.14, 0, -0.06, 0);
+    } else {
+      this.viewmodel.triggerSwing((cfg.swingDuration * fatigueDurationMult) / swingSpeedMult);
+    }
     this.sound.playWeaponSwing(this.activeWeapon);
 
-    this.resolveMeleeStrikeHitCheck(cfg, false);
+    this.resolveMeleeStrikeHitCheck(cfg, false, useOverhead);
   }
 
-  private resolveMeleeStrikeHitCheck(cfg: (typeof WEAPONS_BY_ID)[WeaponId], isUnarmedImpact: boolean): void {
+  private resolveMeleeStrikeHitCheck(
+    cfg: (typeof WEAPONS_BY_ID)[WeaponId],
+    isUnarmedImpact: boolean,
+    isOverheadSmash = false,
+  ): void {
     const batAwakened = cfg.id === 'bat' && this.awakening.state.isActive;
     const lookX = -Math.sin(this.yaw);
     const lookZ = -Math.cos(this.yaw);
@@ -2297,11 +2415,13 @@ export class AgraSurvivalEngine {
     let blockedPrimary = false;
     const aimSlope = Math.tan(THREE.MathUtils.clamp(this.pitch, -1.1, 1.1));
     const swingDir: MeleeSwingDirection =
-      !this.onGround || batAwakened
+      isOverheadSmash || !this.onGround || batAwakened
         ? 'overhead'
         : this.meleeSwingToggle
           ? 'left_to_right'
           : 'right_to_left';
+    const smashDmgMult = isOverheadSmash ? 1.55 : 1.0;
+    const smashKbMult = isOverheadSmash ? 1.4 : 1.0;
 
     for (const target of targets) {
       const dx = target.pos.x - this.playerPos.x;
@@ -2328,14 +2448,14 @@ export class AgraSurvivalEngine {
 
         hitAny = true;
         if (cfg.id === 'bat') {
-          this.awakening.addAwakeningCharge(9);
+          this.awakening.addAwakeningCharge(isOverheadSmash ? 13 : 9);
         }
         const headY = z.pos.y + (z.kind === 'brute' ? 2.45 : z.kind === 'dog' ? 0.85 : 1.72);
-        const isHeadCrit = Math.abs(aimWorldY - headY) <= (z.kind === 'dog' ? 0.42 : 0.46) && target.dot > 0.72;
+        const isHeadCrit = (isOverheadSmash || Math.abs(aimWorldY - headY) <= (z.kind === 'dog' ? 0.42 : 0.46)) && target.dot > 0.72;
         if (isHeadCrit) hitCrit = true;
 
-        const awkDmgMult = cfg.id === 'bat' ? this.awakening.getDamageMultiplier() : 1.0;
-        const awkKbMult = cfg.id === 'bat' ? this.awakening.getKnockbackMultiplier() : 1.0;
+        const awkDmgMult = (cfg.id === 'bat' ? this.awakening.getDamageMultiplier() : 1.0) * smashDmgMult;
+        const awkKbMult = (cfg.id === 'bat' ? this.awakening.getKnockbackMultiplier() : 1.0) * smashKbMult;
         const critMult = isHeadCrit ? 1.75 : 1.0;
         const baseDmg = (cfg.damage * durabilityScale * awkDmgMult + Math.min(20, this.comboCount * 3)) * critMult;
         const damage = Math.round(target === primary ? baseDmg : baseDmg * 0.75);
@@ -2346,7 +2466,7 @@ export class AgraSurvivalEngine {
           _tmpVecB,
           cfg.knockback * awkKbMult,
           isHeadCrit ? Math.max(cfg.stunDuration, 0.95) : cfg.stunDuration,
-          isHeadCrit || batAwakened,
+          isHeadCrit || batAwakened || isOverheadSmash,
         );
         if (killed) this.killCount++;
 
@@ -2380,8 +2500,8 @@ export class AgraSurvivalEngine {
         const isHeadCrit = Math.abs(aimWorldY - _tmpVecA.y) <= 0.45 && target.dot > 0.72;
         if (isHeadCrit) hitCrit = true;
 
-        const awkDmgMult = cfg.id === 'bat' ? this.awakening.getDamageMultiplier() : 1.0;
-        const awkKbMult = cfg.id === 'bat' ? this.awakening.getKnockbackMultiplier() : 1.0;
+        const awkDmgMult = (cfg.id === 'bat' ? this.awakening.getDamageMultiplier() : 1.0) * smashDmgMult;
+        const awkKbMult = (cfg.id === 'bat' ? this.awakening.getKnockbackMultiplier() : 1.0) * smashKbMult;
         const critMult = isHeadCrit ? 1.75 : 1.0;
         const baseDmg = (cfg.damage * durabilityScale * awkDmgMult + Math.min(20, this.comboCount * 3)) * critMult;
         const damage = Math.round(target === primary ? baseDmg : baseDmg * 0.75);
@@ -2390,7 +2510,7 @@ export class AgraSurvivalEngine {
         if (e.health <= 0) {
           e.markDead(_tmpVecB);
           this.killCount++;
-        } else if (batAwakened || cfg.knockback * awkKbMult >= 11) {
+        } else if (batAwakened || isOverheadSmash || cfg.knockback * awkKbMult >= 11) {
           _grabImpulse.set(nx * cfg.knockback * awkKbMult * 0.85, 4.4, nz * cfg.knockback * awkKbMult * 0.85);
           e.applyKnockdown(_grabImpulse);
         } else {
@@ -2419,14 +2539,14 @@ export class AgraSurvivalEngine {
         const nr = target.nightRunner;
         hitAny = true;
         if (cfg.id === 'bat') {
-          this.awakening.addAwakeningCharge(9);
+          this.awakening.addAwakeningCharge(isOverheadSmash ? 13 : 9);
         }
         nr.getHeadWorldPosition(_tmpVecA);
-        const isHeadCrit = Math.abs(aimWorldY - _tmpVecA.y) <= 0.45 && target.dot > 0.72;
+        const isHeadCrit = (isOverheadSmash || Math.abs(aimWorldY - _tmpVecA.y) <= 0.45) && target.dot > 0.72;
         if (isHeadCrit) hitCrit = true;
 
-        const awkDmgMult = cfg.id === 'bat' ? this.awakening.getDamageMultiplier() : 1.0;
-        const awkKbMult = cfg.id === 'bat' ? this.awakening.getKnockbackMultiplier() : 1.0;
+        const awkDmgMult = (cfg.id === 'bat' ? this.awakening.getDamageMultiplier() : 1.0) * smashDmgMult;
+        const awkKbMult = (cfg.id === 'bat' ? this.awakening.getKnockbackMultiplier() : 1.0) * smashKbMult;
         const critMult = isHeadCrit ? 1.75 : 1.0;
         const baseDmg = (cfg.damage * durabilityScale * awkDmgMult + Math.min(20, this.comboCount * 3)) * critMult;
         const damage = Math.round(target === primary ? baseDmg : baseDmg * 0.75);
@@ -2485,12 +2605,22 @@ export class AgraSurvivalEngine {
         this.viewmodel.triggerUnarmedHitstop(0.045);
       }
       const awkHitstop = cfg.id === 'bat' ? this.awakening.getHitstopBonus() : 0;
-      this.hitstopTimer = Math.max(0.04, (cfg.id === 'cleaver' ? 0.055 : 0.04) + awkHitstop);
-      this.hitMarkerFlash = hitCrit ? 0.22 : 0.14;
-      this.cameraShake = (cfg.id === 'cleaver' ? 0.26 : 0.18) + (hitCrit ? 0.1 : 0) + (batAwakened ? 0.08 : 0);
+      this.hitstopTimer = Math.max(
+        0.04,
+        (cfg.id === 'cleaver' ? 0.055 : 0.04) + awkHitstop + (isOverheadSmash ? 0.04 : 0),
+      );
+      this.hitMarkerFlash = hitCrit || isOverheadSmash ? 0.24 : 0.14;
+      this.cameraShake =
+        (cfg.id === 'cleaver' ? 0.26 : 0.18) +
+        (hitCrit ? 0.1 : 0) +
+        (batAwakened ? 0.08 : 0) +
+        (isOverheadSmash ? 0.14 : 0);
+      if (isOverheadSmash) {
+        this.camSpring.addImpulse(-0.12, 0.04, -0.1, 0);
+      }
       this.registerComboHit(1);
-      if (this.comboCount >= 3 || hitCrit || batAwakened) {
-        const heavy = hitCrit || batAwakened || this.comboCount >= 5;
+      if (this.comboCount >= 3 || hitCrit || batAwakened || isOverheadSmash) {
+        const heavy = hitCrit || batAwakened || isOverheadSmash || this.comboCount >= 5;
         this.spawnScreenBloodSpatter(heavy ? 6 : 4, heavy);
       }
       this.sound.playWeaponHit(cfg.id, false);
@@ -2862,21 +2992,22 @@ export class AgraSurvivalEngine {
 
   private startSafetyRoll(fallDist = 0): void {
     const horizSpeed = Math.hypot(this.playerVel.x, this.playerVel.z);
-    this.rollTimer = PARKOUR_CONFIG.ROLL_DURATION;
+    this.rollTimer = 0.68;
     this.postLandRollTimer = 0;
     this.pendingHardFallDist = 0;
     this.rollBufferTimer = 0;
+    this.heavyLandingTimer = 0;
     this.isCrouching = false;
     this.slideTimer = 0;
     this.sprintMomentum = 1.0;
-    this.rollSpeed = Math.max(this.preRollSpeed, horizSpeed, MOVEMENT_CONFIG.SPRINT_SPEED);
+    this.rollSpeed = Math.max(this.preRollSpeed, horizSpeed, MOVEMENT_CONFIG.SPRINT_SPEED * 1.15);
     this.rollDir.set(-Math.sin(this.yaw), 0, -Math.cos(this.yaw)).normalize();
     this.playerVel.x = this.rollDir.x * this.rollSpeed;
     this.playerVel.z = this.rollDir.z * this.rollSpeed;
     this.sound.playSafetyRoll();
     this.cameraShake = 0.08;
-    this.landingDipOffset = -0.22;
-    this.fovPunch = 3.5;
+    this.camSpring.addImpulse(-0.14, 0.06, -0.22, 0);
+    this.fovPunch = 4.0;
     this.viewmodel.spawnDustPuffs(this.playerPos, fallDist > 4 ? 10 : 7);
     this.awardParkourCombo(PARKOUR_CONFIG.ROLL_STYLE_POINTS, 'SAFETY ROLL', 0.45);
   }
@@ -3159,6 +3290,8 @@ export class AgraSurvivalEngine {
     this.preMantleSpeed = Math.hypot(this.playerVel.x, this.playerVel.z);
     this.mantling = true;
     this.mantleTimer = 0;
+    const lowStam = !window.devInfStamina && this.stamina < 25;
+    this.mantleDuration = lowStam ? 1.42 : 1.15;
     this.slideTimer = 0;
     this.isCrouching = false;
     this.wallRunSide = 0;
@@ -3166,8 +3299,21 @@ export class AgraSurvivalEngine {
     this.isVariableJump = false;
     this.postLandRollTimer = 0;
     this.pendingHardFallDist = 0;
+    this.peakFallSpeed = 0;
+    this.heavyLandingTimer = 0;
     this.mantleStart.copy(this.playerPos);
     this.mantleEnd.set(targetX, b.maxY + 0.02, targetZ);
+
+    // Exact 3D ledge lip grip coordinates along the facing edge
+    _forward.set(-Math.sin(this.yaw), 0, -Math.cos(this.yaw)).normalize();
+    _right.set(Math.cos(this.yaw), 0, -Math.sin(this.yaw)).normalize();
+    const lipX = THREE.MathUtils.clamp(this.playerPos.x + _forward.x * 0.48, b.minX, b.maxX);
+    const lipZ = THREE.MathUtils.clamp(this.playerPos.z + _forward.z * 0.48, b.minZ, b.maxZ);
+    this.climbGripLeft.set(lipX - _right.x * 0.24, b.maxY, lipZ - _right.z * 0.24);
+    this.climbGripRight.set(lipX + _right.x * 0.24, b.maxY, lipZ + _right.z * 0.24);
+    this.ledgeNormalWorld.set(-_forward.x, 0, -_forward.z);
+
+    this.camSpring.addImpulse(-0.18, 0, -0.14, 0);
     this.airPeakY = this.mantleEnd.y;
     this.playerVel.set(0, 0, 0);
     this.jumpBufferTimer = 0;
@@ -3179,6 +3325,9 @@ export class AgraSurvivalEngine {
 
   private beginVault(b: BoxCollider, targetX: number, targetZ: number): void {
     this.preVaultSpeed = Math.hypot(this.playerVel.x, this.playerVel.z);
+    const strafeHeld = Boolean(this.keys['KeyA'] || this.keys['KeyD']);
+    const isSprintFwd = Boolean(this.keys['ShiftLeft'] || this.keys['ShiftRight']) && !strafeHeld;
+    this.vaultKind = isSprintFwd && this.preVaultSpeed > 7.5 ? 'KONG_VAULT' : 'SPEED_VAULT';
     this.vaulting = true;
     this.vaultTimer = 0;
     this.slideTimer = 0;
@@ -3188,6 +3337,8 @@ export class AgraSurvivalEngine {
     this.isVariableJump = false;
     this.postLandRollTimer = 0;
     this.pendingHardFallDist = 0;
+    this.peakFallSpeed = 0;
+    this.heavyLandingTimer = 0;
     this.vaultStart.copy(this.playerPos);
     const landedPast =
       targetX <= b.minX - PLAYER_RADIUS ||
@@ -3195,11 +3346,21 @@ export class AgraSurvivalEngine {
       targetZ <= b.minZ - PLAYER_RADIUS ||
       targetZ >= b.maxZ + PLAYER_RADIUS;
     this.vaultEnd.set(targetX, landedPast ? Math.min(this.playerPos.y, b.minY) : b.maxY + 0.02, targetZ);
-    this.vaultPeakY = b.maxY + 0.45;
+    this.vaultPeakY = b.maxY + (this.vaultKind === 'KONG_VAULT' ? 0.54 : 0.45);
     this.airPeakY = this.vaultEnd.y;
     this.jumpBufferTimer = 0;
+    this.camSpring.addImpulse(
+      this.vaultKind === 'KONG_VAULT' ? -0.14 : -0.08,
+      this.vaultKind === 'SPEED_VAULT' ? -0.1 : 0,
+      -0.06,
+      0,
+    );
     this.spendStamina(14);
-    this.awardParkourCombo(PARKOUR_CONFIG.VAULT_STYLE_POINTS, 'SPEED VAULT', 0.36);
+    this.awardParkourCombo(
+      PARKOUR_CONFIG.VAULT_STYLE_POINTS,
+      this.vaultKind === 'KONG_VAULT' ? 'KONG VAULT' : 'SPEED VAULT',
+      0.36,
+    );
     this.awakening.addAwakeningCharge(6);
     this.sound.playLedgeGrab(true);
   }
@@ -3211,6 +3372,16 @@ export class AgraSurvivalEngine {
     this.parkourMoveTimer = Math.max(0, this.parkourMoveTimer - dt);
     this.exhaustionTimer = Math.max(0, this.exhaustionTimer - dt);
     this.hitSlowTimer = Math.max(0, this.hitSlowTimer - dt);
+    if (this.heavyLandingTimer > 0) {
+      this.heavyLandingTimer = Math.max(0, this.heavyLandingTimer - dt);
+      if (this.heavyLandingTimer <= 0) {
+        this.heavyLandingRecoveryScale = 1.0;
+      }
+    }
+
+    if (!this.onGround && this.playerVel.y < 0) {
+      this.peakFallSpeed = Math.max(this.peakFallSpeed, -this.playerVel.y);
+    }
 
     if (window.devImmortal) {
       this.health = this.maxHealth;
@@ -3219,13 +3390,7 @@ export class AgraSurvivalEngine {
 
     if (this.postLandRollTimer > 0) {
       this.postLandRollTimer = Math.max(0, this.postLandRollTimer - dt);
-      if (this.postLandRollTimer <= 0 && this.pendingHardFallDist > 4.8) {
-        const fallDmg = Math.min(26, Math.round((this.pendingHardFallDist - 4.6) * 5));
-        this.pendingHardFallDist = 0;
-        if (fallDmg > 0) {
-          this.takeDamage(fallDmg);
-        }
-      } else if (this.postLandRollTimer <= 0) {
+      if (this.postLandRollTimer <= 0) {
         this.pendingHardFallDist = 0;
       }
     }
@@ -3364,9 +3529,12 @@ export class AgraSurvivalEngine {
       const baseY = THREE.MathUtils.lerp(this.vaultStart.y, this.vaultEnd.y, t);
       const lift = Math.max(0, this.vaultPeakY - baseY);
       this.playerPos.y = baseY + Math.sin(t * Math.PI) * lift;
-      this.mantlePitchOffset = -Math.sin(t * Math.PI) * 0.11;
-      // 10-degree tilt to the right (-Z roll in Three.js camera)
-      this.mantleRollOffset = -Math.sin(t * Math.PI) * THREE.MathUtils.degToRad(PARKOUR_CONFIG.VAULT_TILT_DEG);
+      this.mantlePitchOffset = -Math.sin(t * Math.PI) * (this.vaultKind === 'KONG_VAULT' ? 0.22 : 0.11);
+      // 10-degree tilt to the right for Speed Vault; level forward tuck for Kong Vault
+      this.mantleRollOffset =
+        this.vaultKind === 'SPEED_VAULT'
+          ? -Math.sin(t * Math.PI) * THREE.MathUtils.degToRad(PARKOUR_CONFIG.VAULT_TILT_DEG)
+          : 0;
       this.camera.fov = THREE.MathUtils.lerp(this.camera.fov, 86 + this.parkourFlow * 3, 1 - Math.exp(-dt * 12));
       this.camera.updateProjectionMatrix();
       if (t >= 1) {
@@ -3384,28 +3552,20 @@ export class AgraSurvivalEngine {
       return;
     }
 
-    // 1B. Handle active Ledge Mantle (0.1s catch fall-arrest dip + 0.45s upward/forward climb)
+    // 1B. Handle active 4-Stage Ledge Grab & Muscle-Up (0.0s .. 1.15s)
     if (this.mantling) {
       this.mantleTimer += dt * vaultSpeedMult;
-      const catchDur = PARKOUR_CONFIG.LEDGE_CATCH_DURATION;
-      const climbDur = PARKOUR_CONFIG.LEDGE_CLIMB_DURATION;
-      const totalDur = catchDur + climbDur;
-      if (this.mantleTimer < catchDur) {
-        const ct = this.mantleTimer / catchDur;
-        this.playerPos.x = THREE.MathUtils.lerp(this.mantleStart.x, this.mantleEnd.x, ct * 0.08);
-        this.playerPos.z = THREE.MathUtils.lerp(this.mantleStart.z, this.mantleEnd.z, ct * 0.08);
-        this.playerPos.y = this.mantleStart.y - Math.sin(ct * Math.PI) * 0.16;
-        this.mantlePitchOffset = Math.sin(ct * Math.PI) * 0.11;
-        this.mantleRollOffset = Math.sin(ct * Math.PI) * 0.04;
-      } else {
-        const u = Math.min(1, (this.mantleTimer - catchDur) / climbDur);
-        const ease = 1 - Math.pow(1 - u, 3);
-        this.playerPos.x = THREE.MathUtils.lerp(this.mantleStart.x, this.mantleEnd.x, 0.08 + ease * 0.92);
-        this.playerPos.z = THREE.MathUtils.lerp(this.mantleStart.z, this.mantleEnd.z, 0.08 + ease * 0.92);
-        this.playerPos.y = THREE.MathUtils.lerp(this.mantleStart.y, this.mantleEnd.y, ease) + Math.sin(u * Math.PI) * 0.14;
-        this.mantlePitchOffset = -Math.sin(u * Math.PI) * 0.16;
-        this.mantleRollOffset = Math.sin(u * Math.PI) * 0.055;
-      }
+      const totalDur = this.mantleDuration;
+      const stagePose = computeMuscleUpStage(this.mantleTimer, totalDur);
+      const fp = stagePose.forwardProgress;
+      this.playerPos.x = THREE.MathUtils.lerp(this.mantleStart.x, this.mantleEnd.x, fp);
+      this.playerPos.z = THREE.MathUtils.lerp(this.mantleStart.z, this.mantleEnd.z, fp);
+      this.playerPos.y =
+        THREE.MathUtils.lerp(this.mantleStart.y, this.mantleEnd.y, stagePose.camYOffset > 0 ? Math.min(1, stagePose.camYOffset) : 0) +
+        (stagePose.stage === 1 ? stagePose.camYOffset : 0);
+      this.mantlePitchOffset = stagePose.camPitchOffset;
+      this.mantleRollOffset = stagePose.stage === 2 ? 0.045 : stagePose.stage === 3 ? -0.04 : 0;
+
       if (this.mantleTimer >= totalDur) {
         this.playerPos.copy(this.mantleEnd);
         this.mantling = false;
@@ -3576,9 +3736,10 @@ export class AgraSurvivalEngine {
     // 3. Smooth Ground Acceleration/Deceleration, Air Momentum, and Physics-Driven Parkour Slide
     const smoothSprint = this.sprintMomentum * this.sprintMomentum * (3 - 2 * this.sprintMomentum);
     const hitSlowMult = this.hitSlowTimer > 0 ? 0.65 : 1.0;
+    const heavySlowMult = this.heavyLandingTimer > 0 ? this.heavyLandingRecoveryScale : 1.0;
     const activeTopSpeed = (this.isCrouching
       ? MOVEMENT_CONFIG.CROUCH_SPEED
-      : THREE.MathUtils.lerp(MOVEMENT_CONFIG.WALK_SPEED, MOVEMENT_CONFIG.SPRINT_SPEED, smoothSprint)) * moveSpeedMult * hitSlowMult;
+      : THREE.MathUtils.lerp(MOVEMENT_CONFIG.WALK_SPEED, MOVEMENT_CONFIG.SPRINT_SPEED, smoothSprint)) * moveSpeedMult * hitSlowMult * heavySlowMult;
 
     if (this.lungeTimer > 0) {
       this.lungeTimer -= dt;
@@ -3881,6 +4042,7 @@ export class AgraSurvivalEngine {
 
     let groundHeight = 0;
     let landedCushion = false;
+    let landedColliderId: string | undefined;
     for (let i = 0; i < this.world.colliders.length; i++) {
       const b = this.world.colliders[i];
       if (b.disabled) continue;
@@ -3896,51 +4058,64 @@ export class AgraSurvivalEngine {
           if (topY >= groundHeight) {
             groundHeight = topY;
             landedCushion = Boolean(b.cushion);
+            landedColliderId = b.id;
           }
         }
       }
     }
 
+    this.currentFloorSurface = classifySurfaceType(landedColliderId);
+
     if (this.playerPos.y <= groundHeight) {
       if (!this.onGround) {
         const fallDistance = Math.max(0, this.airPeakY - groundHeight);
-        const absImpact = Math.abs(impactVel);
-        const isHardFall = fallDistance > PARKOUR_CONFIG.HARD_LAND_FALL_DIST || absImpact > 12.2;
+        const absImpact = Math.max(Math.abs(impactVel), this.peakFallSpeed);
+        const impact = classifyLandingImpact(absImpact, this.rollBufferTimer > 0, landedCushion);
 
-        if (isHardFall && (this.rollBufferTimer > 0 || landedCushion)) {
-          this.preRollSpeed = Math.max(horizSpeed, MOVEMENT_CONFIG.SPRINT_SPEED);
+        if (impact.tier === 'PARKOUR_ROLL') {
+          this.preRollSpeed = Math.max(horizSpeed, MOVEMENT_CONFIG.SPRINT_SPEED * 1.15);
           this.startSafetyRoll(fallDistance);
           this.viewmodel.triggerLandingImpact(fallDistance);
-          if (landedCushion) this.sound.playTarpLand();
         } else if (landedCushion) {
           this.sound.playTarpLand();
-          this.landingDipOffset = -0.18;
+          this.camSpring.addImpulse(impact.camPitchKick, 0, impact.camDropY, 0);
           this.viewmodel.triggerLandingImpact(Math.max(1.5, fallDistance));
-        } else if (isHardFall) {
-          // Hard landing (> 3.5m): downward compression dip, FOV punch, velocity-scaled 80Hz thud, & 0.25s Safety Roll window
-          const severity = THREE.MathUtils.clamp((fallDistance - 3.5) / 5.0, 0.2, 1.0);
+        } else if (impact.tier === 'CRITICAL_IMPACT' || impact.tier === 'HEAVY_BRACE') {
           this.sound.playLandingThud(true, absImpact);
-          this.cameraShake = 0.16 + severity * 0.16;
-          this.landingDipOffset = -(0.24 + severity * 0.2);
-          this.fovPunch = -(4.5 + severity * 4.5);
-          this.viewmodel.triggerLandingImpact(fallDistance);
-          this.viewmodel.spawnDustPuffs(this.playerPos, 9 + Math.round(severity * 4));
+          this.cameraShake = impact.tier === 'CRITICAL_IMPACT' ? 0.32 : 0.2;
+          this.camSpring.addImpulse(
+            impact.camPitchKick,
+            impact.tier === 'CRITICAL_IMPACT' ? 0.06 : 0,
+            impact.camDropY,
+            0,
+          );
+          this.fovPunch = impact.fovPunch;
+          this.heavyLandingTimer = impact.stunDuration;
+          this.heavyLandingRecoveryScale = impact.tier === 'CRITICAL_IMPACT' ? 0.15 : 0.25;
+          this.viewmodel.triggerLandingImpact(Math.max(4.0, fallDistance));
+          this.viewmodel.spawnDustPuffs(this.playerPos, impact.tier === 'CRITICAL_IMPACT' ? 14 : 9);
           this.postLandRollTimer = PARKOUR_CONFIG.ROLL_WINDOW;
           this.pendingHardFallDist = fallDistance;
           this.preRollSpeed = Math.max(horizSpeed, MOVEMENT_CONFIG.SPRINT_SPEED);
-        } else if (impactVel < -5.8) {
+          if (impact.damage > 0) {
+            this.takeDamage(impact.damage);
+          }
+        } else if (absImpact > 5.8) {
           this.sound.playLandingThud(false, absImpact);
           this.cameraShake = 0.08;
-          this.landingDipOffset = -0.13;
+          this.camSpring.addImpulse(impact.camPitchKick, 0, impact.camDropY, 0);
+          this.fovPunch = impact.fovPunch;
           this.viewmodel.triggerLandingImpact(Math.max(1.2, fallDistance));
           this.viewmodel.spawnDustPuffs(this.playerPos, 4);
-        } else if (impactVel < -2.4) {
+        } else if (absImpact > 2.4) {
+          this.camSpring.addImpulse(-0.02, 0, -0.05, 0);
           this.viewmodel.triggerLandingImpact(0.8);
         }
       }
 
       this.playerPos.y = groundHeight;
       this.playerVel.y = 0;
+      this.peakFallSpeed = 0;
       this.onGround = true;
       this.isVariableJump = false;
       this.wallRunSide = 0;
@@ -3986,8 +4161,8 @@ export class AgraSurvivalEngine {
       this.camera.updateProjectionMatrix();
     }
 
-    // Continuous subtle high-pass wind rush when > 12.5 m/s or during 2x+ Freeflow Combo
-    this.sound.updateWindLoop(true, postHorizSpeed, this.comboCount);
+    // Continuous subtle high-pass wind rush when > 12.5 m/s, 2x+ combo, or fast falling
+    this.sound.updateWindLoop(true, postHorizSpeed, this.comboCount, this.onGround ? 0 : this.playerVel.y);
   }
 
   private syncCameraToPlayer(dt: number): void {
@@ -4043,9 +4218,15 @@ export class AgraSurvivalEngine {
 
       this.bobPhase += safeDt * freq;
       const cosVal = Math.cos(this.bobPhase);
-      // Trigger footstep foley exactly at the bottom trough of every head-bob cycle (sin = -1)
+      // Trigger surface-aware footstep foley + subtle step spring impulse at the bottom trough
       if (this.onGround && this.prevBobCos < 0 && cosVal >= 0) {
-        this.sound.playFootstep(sprintRatio, this.isCrouching);
+        this.sound.playFootstep(sprintRatio, this.isCrouching, this.currentFloorSurface);
+        this.camSpring.addImpulse(
+          -(0.012 + sprintRatio * 0.018),
+          Math.sin(this.bobPhase * 0.5) * 0.008,
+          -(0.018 + sprintRatio * 0.022),
+          0,
+        );
       }
       this.prevBobCos = cosVal;
 
@@ -4061,6 +4242,18 @@ export class AgraSurvivalEngine {
       this.prevBobCos = 1;
     }
 
+    if (this.lookDownInspect) {
+      this.pitch = THREE.MathUtils.lerp(this.pitch, -1.06, 1 - Math.exp(-safeDt * 22));
+    }
+
+    const springState = this.camSpring.step(
+      safeDt,
+      this.heavyLandingTimer > 0 ? -0.32 : 0,
+      0,
+      this.heavyLandingTimer > 0 ? -0.22 : 0,
+      0,
+    );
+
     _right.set(Math.cos(this.yaw), 0, -Math.sin(this.yaw));
     const shakeX = this.cameraShake > 0 ? (Math.random() - 0.5) * this.cameraShake * 0.25 : 0;
     const shakeY = this.cameraShake > 0 ? (Math.random() - 0.5) * this.cameraShake * 0.25 : 0;
@@ -4068,14 +4261,21 @@ export class AgraSurvivalEngine {
     const zipVibY = this.activeZipline ? Math.cos(this.elapsed * 74) * 0.009 : 0;
 
     this.camera.position.set(
-      this.playerPos.x + _right.x * this.bobX + shakeX + zipVibX,
-      this.playerPos.y + PLAYER_EYE_HEIGHT + this.eyeHeightOffset + this.landingDipOffset + this.bobY + shakeY + zipVibY,
-      this.playerPos.z + _right.z * this.bobX,
+      this.playerPos.x + _right.x * (this.bobX + springState.posX) + shakeX + zipVibX,
+      this.playerPos.y +
+        PLAYER_EYE_HEIGHT +
+        this.eyeHeightOffset +
+        this.landingDipOffset +
+        springState.posY +
+        this.bobY +
+        shakeY +
+        zipVibY,
+      this.playerPos.z + _right.z * (this.bobX + springState.posX),
     );
     this.camera.rotation.order = 'YXZ';
     this.camera.rotation.y = this.yaw;
     this.camera.rotation.x =
-      THREE.MathUtils.clamp(this.pitch + this.mantlePitchOffset, -1.45, 1.45) +
+      THREE.MathUtils.clamp(this.pitch + this.mantlePitchOffset + springState.pitch, -1.45, 1.45) +
       this.rollPitchOffset;
 
     // Strafe Roll (±2.5 deg), Sprint Turn Roll (±4.0 deg), Slide Roll (-6.0 deg), & Zip-line sway
@@ -4091,7 +4291,13 @@ export class AgraSurvivalEngine {
     const zipSwayRollRad = this.activeZipline ? Math.sin(this.elapsed * 4.5) * 0.032 : 0;
 
     const targetRoll =
-      strafeTiltRad + sprintTurnTiltRad + this.mantleRollOffset + slideRollRad + wallRunRollRad + zipSwayRollRad;
+      strafeTiltRad +
+      sprintTurnTiltRad +
+      this.mantleRollOffset +
+      slideRollRad +
+      wallRunRollRad +
+      zipSwayRollRad +
+      springState.roll;
     this.camera.rotation.z = THREE.MathUtils.lerp(
       this.camera.rotation.z,
       targetRoll,
@@ -4194,6 +4400,17 @@ export class AgraSurvivalEngine {
       floodLights: this.world.floodLights,
       stringBulbMats: this.world.stringBulbMats,
     });
+
+    const atmo = this.lighting.getAtmosphereState();
+    this.crysisUniforms.uTime.value = this.elapsed;
+    this.crysisUniforms.uSunDir.value.copy(atmo.sunDir);
+    this.crysisUniforms.uSunColor.value.copy(atmo.sunColor);
+    this.crysisUniforms.uSkyHorizon.value.copy(atmo.skyHorizon);
+    this.crysisUniforms.uSkyZenith.value.copy(atmo.skyZenith);
+    if (this.sunShaftsPass && this.sunShaftsPass.enabled) {
+      this.camera.updateMatrixWorld();
+      this.sunShaftsPass.updateFromCamera(this.camera, atmo.sunDir, atmo.sunColor, atmo.sunIntensity);
+    }
   }
 
   private startLoop(): void {
@@ -4297,6 +4514,24 @@ export class AgraSurvivalEngine {
             this.slideCooldown = Math.max(0, this.slideCooldown - rawDt);
             this.firecrackerCooldown = Math.max(0, this.firecrackerCooldown - rawDt);
             this.lowStaminaPulseTimer = Math.max(0, this.lowStaminaPulseTimer - rawDt);
+
+            if (this.lmbDownActive && this.activeWeapon === 'bat' && this.attackCooldown <= 0) {
+              this.lmbHoldTime += rawDt;
+              this.overheadCharge = THREE.MathUtils.clamp((this.lmbHoldTime - 0.1) / 0.35, 0, 1);
+            } else {
+              this.overheadCharge = Math.max(0, this.overheadCharge - rawDt * 6);
+            }
+
+            if (!window.devInfStamina && this.stamina < 25) {
+              this.lowStaminaHeartbeatTimer -= rawDt;
+              if (this.lowStaminaHeartbeatTimer <= 0) {
+                this.lowStaminaHeartbeatTimer = 0.92;
+                this.sound.playLowStaminaHeartbeat();
+                this.sound.playLowStaminaBreath();
+              }
+            } else {
+              this.lowStaminaHeartbeatTimer = 0;
+            }
             if (this.liberationToastTimer > 0) {
               this.liberationToastTimer = Math.max(0, this.liberationToastTimer - rawDt);
               if (this.liberationToastTimer <= 0) {
@@ -4382,15 +4617,34 @@ export class AgraSurvivalEngine {
               this.sprintMomentum > 0.25 &&
               horizVelMag > MOVEMENT_CONFIG.WALK_SPEED + 0.5;
             this.intro.update(rawDt, isSprinting, this.introCamState);
-            const isLookingDown = !isCutsceneLocked && this.onGround && this.pitch < -0.72;
+            const isLookingDown = !isCutsceneLocked && (this.lookDownInspect || (this.onGround && this.pitch < -0.52));
 
             const strafeInput = isCutsceneLocked ? 0 : (this.keys['KeyD'] ? 1 : 0) - (this.keys['KeyA'] ? 1 : 0);
-            const mantleTotalDur = PARKOUR_CONFIG.LEDGE_CATCH_DURATION + PARKOUR_CONFIG.LEDGE_CLIMB_DURATION;
+            const mantleTotalDur = this.mantleDuration > 0 ? this.mantleDuration : 1.15;
             const safeZone = this.world.tajSafeZone;
             const inSafeZone =
               this.playerPos.z <= safeZone.maxZ &&
               this.playerPos.x >= safeZone.minX &&
               this.playerPos.x <= safeZone.maxX;
+
+            this.parkourState =
+              this.heavyLandingTimer > 0
+                ? 'HEAVY_LANDING'
+                : this.rollTimer > 0
+                  ? 'PARKOUR_ROLL'
+                  : this.slideTimer > 0
+                    ? 'SLIDE'
+                    : this.vaulting
+                      ? this.vaultKind
+                      : this.mantling
+                        ? 'MUSCLE_UP'
+                        : this.wallRunSide === -1
+                          ? 'WALL_RUN_LEFT'
+                          : this.wallRunSide === 1
+                            ? 'WALL_RUN_RIGHT'
+                            : !this.onGround
+                              ? 'AIRBORNE'
+                              : 'GROUNDED';
 
             if (!this.isFinisherActive) {
               this.updateHeadGrabSequence(rawDt);
@@ -4420,13 +4674,18 @@ export class AgraSurvivalEngine {
                 strafeInput,
                 vaultProgress: this.vaulting ? Math.min(1, this.vaultTimer / PARKOUR_CONFIG.VAULT_DURATION) : 0,
                 mantleProgress: this.mantling ? Math.min(1, this.mantleTimer / mantleTotalDur) : 0,
-                rollProgress: this.rollTimer > 0 ? 1 - this.rollTimer / PARKOUR_CONFIG.ROLL_DURATION : 0,
+                rollProgress: this.rollTimer > 0 ? 1 - this.rollTimer / 0.68 : 0,
                 isNight: this.isNightTime(),
                 inSafeZone,
                 horizSpeed: horizVelMag,
                 yawDelta: isCutsceneLocked ? 0 : this.viewmodelYawDelta,
                 pitchDelta: isCutsceneLocked ? 0 : this.viewmodelPitchDelta,
                 wallPullback: isCutsceneLocked ? 0 : this.computeViewmodelWallPullback(),
+                climbState: this.mantling ? 'MUSCLE_UP' : 'NONE',
+                climbPhaseTime: this.mantling ? (this.mantleTimer / mantleTotalDur) * 1.15 : 0,
+                leftGripWorld: this.mantling ? this.climbGripLeft : undefined,
+                rightGripWorld: this.mantling ? this.climbGripRight : undefined,
+                ledgeNormalWorld: this.mantling ? this.ledgeNormalWorld : undefined,
                 awakeningActive: this.awakening.state.isActive,
                 awakeningPose: this.awakening.getViewmodelPose(),
                 awakeningBatEmissive: this.awakening.getBatCrimsonEmissive(),
@@ -4435,7 +4694,21 @@ export class AgraSurvivalEngine {
                 headGrabTimer: this.headGrabState.timer,
                 batFaceDriveActive: this.batFaceDriveState.active,
                 batFaceDriveTimer: this.batFaceDriveState.timer,
-                inspectLeftArm: Boolean(this.keys['KeyV']),
+                inspectLeftArm: false,
+                parkourState: this.parkourState,
+                vaultKind: this.vaultKind,
+                isHeavyLanding: this.heavyLandingTimer > 0,
+                overheadChargeRatio: this.overheadCharge,
+                lowStaminaTremor: !window.devInfStamina && this.stamina < 25,
+                lowerBodySync: isCutsceneLocked
+                  ? undefined
+                  : {
+                      x: this.playerPos.x,
+                      y: this.playerPos.y,
+                      z: this.playerPos.z,
+                      yaw: this.yaw,
+                      pitch: this.camera.rotation.x,
+                    },
               },
             );
             this.viewmodelYawDelta = 0;
@@ -4619,18 +4892,31 @@ export class AgraSurvivalEngine {
         this.sound.stopContinuousLoops();
       }
 
-      this.governor.sampleFrame(rawDt, (pixelRatio, bloomEnabled, useDirectForward) => {
-        this.useDirectForward = useDirectForward;
-        this.renderer.setPixelRatio(pixelRatio);
+      this.governor.sampleFrame(rawDt, (cfg: GovernorRenderConfig) => {
+        this.useDirectForward = cfg.useDirectForward;
+        this.renderer.setPixelRatio(cfg.pixelRatio);
         this.renderer.setSize(this.viewportW, this.viewportH);
-        if (this.composer && this.bloomPass) {
-          this.composer.setPixelRatio(pixelRatio);
+        this.crysisUniforms.uFoliageLodStart.value = Math.max(14, cfg.foliageCullMeters - 10);
+        this.crysisUniforms.uFoliageLodEnd.value = cfg.foliageCullMeters;
+        this.crysisUniforms.uPomMaxDist.value = cfg.pomMaxMeters;
+        this.lighting.setShadowDistance(cfg.shadowDistance);
+        if (this.composer) {
+          this.composer.setPixelRatio(cfg.pixelRatio);
           this.composer.setSize(this.viewportW, this.viewportH);
-          this.bloomPass.setSize(
-            Math.max(1, Math.floor(this.viewportW * 0.5)),
-            Math.max(1, Math.floor(this.viewportH * 0.5)),
-          );
-          this.bloomPass.enabled = bloomEnabled;
+          if (this.bloomPass) {
+            this.bloomPass.setSize(
+              Math.max(1, Math.floor(this.viewportW * 0.5)),
+              Math.max(1, Math.floor(this.viewportH * 0.5)),
+            );
+            this.bloomPass.enabled = cfg.bloomEnabled;
+          }
+          if (this.sunShaftsPass) {
+            this.sunShaftsPass.setSize(this.viewportW, this.viewportH);
+            this.sunShaftsPass.enabled = cfg.sunShaftsEnabled;
+          }
+          if (this.crysisPostPass) {
+            this.crysisPostPass.setSize(this.viewportW, this.viewportH);
+          }
         }
         this.renderer.shadowMap.needsUpdate = !this.isSoftwareGl;
       });
@@ -4672,24 +4958,22 @@ export class AgraSurvivalEngine {
         this.emitHud();
       }
 
+      const renderElapsedMs = performance.now() - now;
       if (this.isSoftwareGl) {
-        this.afterDraw(tick);
+        this.afterDraw(tick, renderElapsedMs);
       } else {
         this.frameId = requestAnimationFrame(tick);
       }
     };
 
-    if (this.isSoftwareGl) {
-      this.afterDraw(tick);
-    } else {
-      this.frameId = requestAnimationFrame(tick);
-    }
+    this.frameId = requestAnimationFrame(tick);
   }
 
-  private afterDraw(cb: () => void): void {
+  private afterDraw(cb: () => void, lastFrameMs = 0): void {
     const gl = this.renderer.getContext() as WebGL2RenderingContext;
     const sync = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0);
     gl.flush();
+    const restMs = lastFrameMs > 300 ? Math.min(800, Math.round(lastFrameMs * 0.35)) : 80;
     const poll = () => {
       if (this.disposed) return;
       const state = sync && gl.getSyncParameter(sync, gl.SYNC_STATUS);
@@ -4697,7 +4981,7 @@ export class AgraSurvivalEngine {
         this.frameId = window.setTimeout(poll, 5);
       } else {
         if (sync) gl.deleteSync(sync);
-        this.frameId = window.setTimeout(cb, 80);
+        this.frameId = window.setTimeout(cb, restMs);
       }
     };
     this.frameId = window.setTimeout(poll, 5);
@@ -4944,6 +5228,11 @@ export class AgraSurvivalEngine {
       slowMoActive: this.slowMoTimer > 0 || this.weaponWheelOpen,
       parkourFlow: Number(this.parkourFlow.toFixed(2)),
       parkourMove: this.parkourMoveTimer > 0 ? this.parkourMoveLabel : undefined,
+      parkourState: this.parkourState,
+      speedKmh: Math.round(Math.hypot(this.playerVel.x, this.playerVel.z) * 3.6),
+      overheadCharge: Number(this.overheadCharge.toFixed(2)),
+      lookDownInspect: this.lookDownInspect,
+      heavyLanding: this.heavyLandingTimer > 0,
       killCount: this.killCount,
       maxCombo: this.maxCombo,
       elapsedSeconds: Math.round(this.playTimeSeconds),
@@ -5691,6 +5980,8 @@ export class AgraSurvivalEngine {
     }
     this.infectedEnemies.length = 0;
     this.textures.dispose();
+    this.sunShaftsPass?.dispose();
+    this.crysisPostPass?.dispose();
     this.composer?.dispose();
     this.renderer.dispose();
     if (this.renderer.domElement.parentNode === this.mountEl) {

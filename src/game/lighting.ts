@@ -49,6 +49,7 @@ export class TimeOfDayLightingSystem {
   public readonly hemiLight: THREE.HemisphereLight;
   public readonly rimLight: THREE.DirectionalLight;
   private readonly scene: THREE.Scene;
+  private currentShadowRadius = 75;
 
   constructor(scene: THREE.Scene, isSoftwareGl: boolean, shadowMapSize = 2048) {
     this.scene = scene;
@@ -265,6 +266,34 @@ export class TimeOfDayLightingSystem {
     }
 
     this.skyMesh.position.copy(cameraPos);
+  }
+
+  public setShadowDistance(radius: number): void {
+    const clamped = THREE.MathUtils.clamp(radius, 35, 90);
+    if (Math.abs(clamped - this.currentShadowRadius) < 1.0) return;
+    this.currentShadowRadius = clamped;
+    const cam = this.sunLight.shadow.camera;
+    cam.left = -clamped;
+    cam.right = clamped;
+    cam.top = clamped;
+    cam.bottom = -clamped;
+    cam.updateProjectionMatrix();
+  }
+
+  public getAtmosphereState(): {
+    sunDir: THREE.Vector3;
+    sunColor: THREE.Color;
+    sunIntensity: number;
+    skyHorizon: THREE.Color;
+    skyZenith: THREE.Color;
+  } {
+    return {
+      sunDir: this.skyMat.uniforms.uSunDir.value as THREE.Vector3,
+      sunColor: this.skyMat.uniforms.uSunColor.value as THREE.Color,
+      sunIntensity: this.skyMat.uniforms.uSunIntensity.value as number,
+      skyHorizon: this.skyMat.uniforms.uHorizonColor.value as THREE.Color,
+      skyZenith: this.skyMat.uniforms.uZenithColor.value as THREE.Color,
+    };
   }
 
   public dispose(): void {

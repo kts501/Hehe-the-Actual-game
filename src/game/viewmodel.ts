@@ -1,5 +1,14 @@
 import * as THREE from 'three';
 import type { AwakeningViewmodelPose } from './awakening';
+import {
+  computeMuscleUpStage,
+  computeStrideGait,
+  computeVaultKinematics,
+  createDefaultMuscleUpPose,
+  createDefaultStrideGaitPose,
+  createDefaultVaultKinematicsPose,
+  type ParkourStateId,
+} from './parkourPhysics';
 import type { ProceduralTextureSet } from './textures';
 import { WEAPONS_BY_ID, type WeaponId } from './weapons';
 
@@ -7,6 +16,7 @@ export type WeaponAnimState =
   | 'idle'
   | 'swing_left'
   | 'swing_right'
+  | 'overhead_smash'
   | 'parry'
   | 'takedown'
   | 'blocked'
@@ -41,6 +51,18 @@ export interface ParkourAnimDetail {
   batFaceDriveActive?: boolean;
   batFaceDriveTimer?: number;
   inspectLeftArm?: boolean;
+  parkourState?: ParkourStateId;
+  vaultKind?: 'SPEED_VAULT' | 'KONG_VAULT';
+  isHeavyLanding?: boolean;
+  overheadChargeRatio?: number;
+  lowStaminaTremor?: boolean;
+  lowerBodySync?: {
+    x: number;
+    y: number;
+    z: number;
+    yaw: number;
+    pitch: number;
+  };
 }
 
 interface SparkParticle {
@@ -168,6 +190,8 @@ const RIGHT_POSE_TABLE: Record<
 const _toTarget = new THREE.Vector3();
 const _uDir = new THREE.Vector3();
 const _poleProj = new THREE.Vector3();
+const _batGripWorld = new THREE.Vector3();
+const _batGripLocal = new THREE.Vector3();
 const _sideAxis = new THREE.Vector3();
 const _upperDir = new THREE.Vector3();
 const _zAxis = new THREE.Vector3();
@@ -1157,6 +1181,7 @@ export class WeaponAndEffects {
   private readonly batBloodOverlay: THREE.Mesh;
   private readonly batTipMarker = new THREE.Object3D();
   private readonly batThroatMarker = new THREE.Object3D();
+  private readonly batLeftGripMarker = new THREE.Object3D();
   private readonly daggerGroup = new THREE.Group();
   private readonly cleaverGroup = new THREE.Group();
 
@@ -1169,7 +1194,20 @@ export class WeaponAndEffects {
   private readonly trailBaseHistory: THREE.Vector3[] = [];
   private trailFade = 0;
 
-  // Preserved Parkour Legs, Zipline Hook, Shockwave & Particle Pools
+  // Articulated Yaw-Only Full-Body Lower Rig (Scene Layer 2) + Zipline Hook
+  private readonly lowerBodyRoot = new THREE.Group();
+  private readonly torsoPelvis = new THREE.Group();
+  private readonly leftHipPivot = new THREE.Group();
+  private readonly leftKneePivot = new THREE.Group();
+  private readonly leftAnklePivot = new THREE.Group();
+  private readonly rightHipPivot = new THREE.Group();
+  private readonly rightKneePivot = new THREE.Group();
+  private readonly rightAnklePivot = new THREE.Group();
+  private readonly lowerBodyStridePose = createDefaultStrideGaitPose();
+  private readonly muscleUpPose = createDefaultMuscleUpPose();
+  private readonly vaultPose = createDefaultVaultKinematicsPose();
+  private stridePhase = 0;
+  private legVisibilityBlend = 0;
   private readonly leftLegPivot = new THREE.Group();
   private readonly rightLegPivot = new THREE.Group();
   private readonly ziplineHookPivot = new THREE.Group();
@@ -1218,6 +1256,9 @@ export class WeaponAndEffects {
   // Smoothed Kinematic State
   private readonly curRightPos = new THREE.Vector3(0.29, -0.26, -0.44);
   private readonly curRightEuler = new THREE.Euler(-0.38, 0.95, -1.05);
+  private readonly curLeftPos = new THREE.Vector3(-0.28, -0.2, -0.46);
+  private readonly curLeftEuler = new THREE.Euler(0.22, 0.38, -0.32);
+  private twoHandBlend = 0;
   private curVmRoll = 0;
   private curVmPullback = 0;
   private swayYawLag = 0;
@@ -2103,11 +2144,13 @@ export class WeaponAndEffects {
     this.batBloodOverlay.visible = false;
     this.batGroup.add(this.batBloodOverlay);
 
-    // Markers for procedural swing motion-trail ribbon (attached to rightWeaponSocket so all weapons share it)
+    // Markers for procedural swing motion-trail ribbon & two-handed lower bat grip
     this.batThroatMarker.position.set(0, 0.26, 0);
     this.batTipMarker.position.set(0, 0.67, 0);
+    this.batLeftGripMarker.position.set(0, -0.058, 0);
     this.rightWeaponSocket.add(this.batThroatMarker);
     this.rightWeaponSocket.add(this.batTipMarker);
+    this.batGroup.add(this.batLeftGripMarker);
 
     // --- Swappable Weapon 1: Scavenger Short Blade / Stylized Dagger (Left Wheel Slot) ---
     // Rotated -90° around Y so cutting edge (-Z) faces forward along palm knuckles (+Y_palm)
@@ -2271,45 +2314,173 @@ export class WeaponAndEffects {
     this.viewmodelGroup.add(this.trailMesh);
 
     // =========================================================================
-    // 5. DUAL PARKOUR LEGS & BOOTS, ZIPLINE HOOK & PARTICLE POOLS (preserved)
+    // 5. FULL-BODY ARTICULATED LOWER RIG (Layer 2 Yaw-Only World Root) + LEGACY PIVOTS
     // =========================================================================
-    const buildParkourLeg = (pivot: THREE.Group, isRight: boolean) => {
-      const thigh = new THREE.Mesh(smoothGeo(trackGeo(new THREE.CapsuleGeometry(0.076, 0.28, 8, 14))), jeanMat);
-      thigh.rotation.x = Math.PI / 2;
-      thigh.position.z = -0.14;
-      pivot.add(thigh);
+    const beltBuckleMat = trackMat(
+      new THREE.MeshStandardMaterial({ color: 0x71717a, roughness: 0.35, metalness: 0.72 }),
+    );
+    const kneePadMat = trackMat(
+      new THREE.MeshStandardMaterial({ color: 0x1e2024, roughness: 0.65, metalness: 0.12 }),
+    );
+    const sneakerUpperMat = trackMat(
+      new THREE.MeshStandardMaterial({ color: 0x3b2f2a, roughness: 0.78, metalness: 0.04 }),
+    );
+    const sneakerAccentMat = trackMat(
+      new THREE.MeshStandardMaterial({ color: 0xb45309, roughness: 0.62, metalness: 0.08 }),
+    );
+    const laceMat = trackMat(
+      new THREE.MeshStandardMaterial({ color: 0xe5e7eb, roughness: 0.85, metalness: 0.0 }),
+    );
 
-      const shin = new THREE.Mesh(smoothGeo(trackGeo(new THREE.CapsuleGeometry(0.064, 0.36, 8, 14))), jeanMat);
-      shin.rotation.x = Math.PI / 2;
-      shin.position.z = -0.38;
-      pivot.add(shin);
+    // Waist/Pelvis & Tactical Belt (kept low and open-framed behind eye axis so legs & sneakers remain unobstructed)
+    this.torsoPelvis.position.set(0, 0, 0);
+    const pelvisBlock = new THREE.Mesh(
+      smoothGeo(trackGeo(new THREE.CylinderGeometry(0.16, 0.15, 0.15, 12, 1, true))),
+      jeanMat,
+    );
+    pelvisBlock.scale.set(1.12, 1.0, 0.78);
+    pelvisBlock.position.set(0, 0.03, 0.01);
+    this.torsoPelvis.add(pelvisBlock);
 
-      const cuff = new THREE.Mesh(smoothGeo(trackGeo(new THREE.CylinderGeometry(0.064, 0.066, 0.07, 12))), leatherMat);
-      cuff.rotation.x = Math.PI / 2;
-      cuff.position.z = -0.53;
-      pivot.add(cuff);
+    const utilityBelt = new THREE.Mesh(
+      smoothGeo(trackGeo(new THREE.CylinderGeometry(0.168, 0.168, 0.052, 14))),
+      leatherMat,
+    );
+    utilityBelt.scale.set(1.14, 1.0, 0.8);
+    utilityBelt.position.set(0, 0.115, 0.01);
+    this.torsoPelvis.add(utilityBelt);
 
-      const shoe = new THREE.Mesh(smoothGeo(trackGeo(new THREE.CapsuleGeometry(0.064, 0.16, 8, 14))), bootMat);
-      shoe.rotation.x = Math.PI / 2;
-      shoe.scale.set(1.0, 1.0, 1.15);
-      shoe.position.set(isRight ? 0.005 : -0.005, 0.032, -0.62);
-      pivot.add(shoe);
+    const beltBuckle = new THREE.Mesh(
+      trackGeo(new THREE.BoxGeometry(0.068, 0.048, 0.025)),
+      beltBuckleMat,
+    );
+    beltBuckle.position.set(0, 0.115, -0.13);
+    this.torsoPelvis.add(beltBuckle);
+    this.lowerBodyRoot.add(this.torsoPelvis);
 
-      const shoeSole = new THREE.Mesh(smoothGeo(trackGeo(new THREE.CapsuleGeometry(0.066, 0.17, 6, 12))), soleMat);
-      shoeSole.rotation.x = Math.PI / 2;
-      shoeSole.scale.set(1.04, 0.45, 1.18);
-      shoeSole.position.set(isRight ? 0.005 : -0.005, -0.028, -0.62);
-      pivot.add(shoeSole);
+    const buildArticulatedLeg = (
+      hipPivot: THREE.Group,
+      kneePivot: THREE.Group,
+      anklePivot: THREE.Group,
+      sideSign: -1 | 1,
+    ) => {
+      hipPivot.position.set(sideSign * 0.135, 0, 0);
+      this.lowerBodyRoot.add(hipPivot);
+
+      // Thigh (tapered cargo pant leg)
+      const thighMesh = new THREE.Mesh(
+        smoothGeo(trackGeo(new THREE.CylinderGeometry(0.082, 0.066, 0.42, 12))),
+        jeanMat,
+      );
+      thighMesh.position.set(0, -0.21, 0);
+      hipPivot.add(thighMesh);
+
+      // Cargo thigh pocket
+      const pocketMesh = new THREE.Mesh(
+        trackGeo(new THREE.BoxGeometry(0.032, 0.13, 0.095)),
+        sleeveMat,
+      );
+      pocketMesh.position.set(sideSign * 0.072, -0.2, -0.01);
+      hipPivot.add(pocketMesh);
+
+      // Knee joint + protective pad
+      kneePivot.position.set(0, -0.42, 0);
+      hipPivot.add(kneePivot);
+
+      const kneeJoint = new THREE.Mesh(
+        smoothGeo(trackGeo(new THREE.SphereGeometry(0.064, 10, 8))),
+        jeanMat,
+      );
+      kneePivot.add(kneeJoint);
+
+      const kneePad = new THREE.Mesh(
+        smoothGeo(trackGeo(new THREE.BoxGeometry(0.092, 0.098, 0.036))),
+        kneePadMat,
+      );
+      kneePad.position.set(0, 0.005, -0.056);
+      kneePivot.add(kneePad);
+
+      // Shin / Calf (tapered down to ankle cuff)
+      const shinMesh = new THREE.Mesh(
+        smoothGeo(trackGeo(new THREE.CylinderGeometry(0.062, 0.046, 0.4, 12))),
+        jeanMat,
+      );
+      shinMesh.position.set(0, -0.2, 0);
+      kneePivot.add(shinMesh);
+
+      const ankleCuff = new THREE.Mesh(
+        smoothGeo(trackGeo(new THREE.CylinderGeometry(0.051, 0.053, 0.065, 12))),
+        leatherMat,
+      );
+      ankleCuff.position.set(0, -0.375, 0);
+      kneePivot.add(ankleCuff);
+
+      // Ankle Pivot + Multi-Part Parkour Sneaker
+      anklePivot.position.set(0, -0.41, 0);
+      kneePivot.add(anklePivot);
+
+      // Sneaker Midsole + Rubber Outsole (points forward along -Z)
+      const outsole = new THREE.Mesh(
+        trackGeo(new THREE.BoxGeometry(0.098, 0.028, 0.255)),
+        soleMat,
+      );
+      outsole.position.set(0, -0.068, -0.052);
+      anklePivot.add(outsole);
+
+      // Sneaker Vamp / Upper
+      const upper = new THREE.Mesh(
+        smoothGeo(trackGeo(new THREE.BoxGeometry(0.092, 0.058, 0.22))),
+        sneakerUpperMat,
+      );
+      upper.position.set(0, -0.032, -0.042);
+      anklePivot.add(upper);
+
+      // Rounded Toe Cap
+      const toeCap = new THREE.Mesh(
+        smoothGeo(trackGeo(new THREE.SphereGeometry(0.048, 10, 8))),
+        soleMat,
+      );
+      toeCap.scale.set(0.96, 0.56, 1.05);
+      toeCap.position.set(0, -0.045, -0.155);
+      anklePivot.add(toeCap);
+
+      // Heel Counter & Collar
+      const heelCounter = new THREE.Mesh(
+        smoothGeo(trackGeo(new THREE.CylinderGeometry(0.046, 0.048, 0.08, 10))),
+        sneakerAccentMat,
+      );
+      heelCounter.position.set(0, -0.015, 0.044);
+      anklePivot.add(heelCounter);
+
+      // Padded Tongue
+      const tongue = new THREE.Mesh(
+        trackGeo(new THREE.BoxGeometry(0.062, 0.032, 0.085)),
+        bootMat,
+      );
+      tongue.position.set(0, 0.002, -0.055);
+      tongue.rotation.x = 0.28;
+      anklePivot.add(tongue);
+
+      // Crossed Laces (3 clean bars)
+      for (let l = 0; l < 3; l++) {
+        const lace = new THREE.Mesh(
+          trackGeo(new THREE.BoxGeometry(0.058, 0.008, 0.012)),
+          laceMat,
+        );
+        lace.position.set(0, 0.004 - l * 0.008, -0.052 - l * 0.028);
+        anklePivot.add(lace);
+      }
     };
 
-    this.leftLegPivot.position.set(-0.18, -0.74, -0.14);
-    this.leftLegPivot.visible = false;
-    buildParkourLeg(this.leftLegPivot, false);
-    camera.add(this.leftLegPivot);
+    buildArticulatedLeg(this.leftHipPivot, this.leftKneePivot, this.leftAnklePivot, -1);
+    buildArticulatedLeg(this.rightHipPivot, this.rightKneePivot, this.rightAnklePivot, 1);
 
-    this.rightLegPivot.position.set(0.18, -0.74, -0.14);
+    this.lowerBodyRoot.visible = false;
+    this.scene.add(this.lowerBodyRoot);
+
+    this.leftLegPivot.visible = false;
     this.rightLegPivot.visible = false;
-    buildParkourLeg(this.rightLegPivot, true);
+    camera.add(this.leftLegPivot);
     camera.add(this.rightLegPivot);
 
     const hookGlowMat = trackMat(
@@ -2705,6 +2876,7 @@ export class WeaponAndEffects {
     assignViewmodelLayer(this.viewmodelGroup, false);
     assignViewmodelLayer(this.leftArmRoot, true);
     assignViewmodelLayer(this.unarmedViewModel, false);
+    assignViewmodelLayer(this.lowerBodyRoot, false);
     assignViewmodelLayer(this.leftLegPivot, false);
     assignViewmodelLayer(this.rightLegPivot, false);
     assignViewmodelLayer(this.ziplineHookPivot, false);
@@ -2730,6 +2902,7 @@ export class WeaponAndEffects {
       this.viewmodelGroup.visible = false;
       this.leftArmRoot.visible = false;
       this.unarmedViewModel.visible = false;
+      this.lowerBodyRoot.visible = false;
       this.leftLegPivot.visible = false;
       this.rightLegPivot.visible = false;
       this.ziplineHookPivot.visible = false;
@@ -3030,6 +3203,15 @@ export class WeaponAndEffects {
     this.resetTrailHistory();
   }
 
+  public triggerOverheadSmash(duration = 0.56): void {
+    this.animState = 'overhead_smash';
+    this.animTime = 0;
+    this.animDuration = Math.max(0.32, duration);
+    this.swingArcMat.color.setHex(0xf97316);
+    this.swingArcMesh.rotation.z = 1.55;
+    this.resetTrailHistory();
+  }
+
   public triggerParry(): void {
     this.animState = 'parry';
     this.animTime = 0;
@@ -3081,8 +3263,6 @@ export class WeaponAndEffects {
   public triggerKick(isDropkick = false): void {
     this.kickTime = 0;
     this.kickIsDropkick = isDropkick;
-    this.rightLegPivot.visible = true;
-    this.leftLegPivot.visible = isDropkick;
   }
 
   public triggerHeadGrabWhiff(): void {
@@ -3429,6 +3609,32 @@ export class WeaponAndEffects {
     const batFaceDriveActive = parkourDetail?.batFaceDriveActive ?? false;
     const batFaceDriveTimer = parkourDetail?.batFaceDriveTimer ?? 0;
     const inspectLeftArm = parkourDetail?.inspectLeftArm ?? false;
+    const parkourState: ParkourStateId =
+      parkourDetail?.parkourState ??
+      (isRolling
+        ? 'PARKOUR_ROLL'
+        : isSliding
+          ? 'SLIDE'
+          : isVaulting
+            ? parkourDetail?.vaultKind === 'KONG_VAULT'
+              ? 'KONG_VAULT'
+              : 'SPEED_VAULT'
+            : climbState === 'MUSCLE_UP' || isMantling
+              ? 'MUSCLE_UP'
+              : climbState === 'WALL_SCRAMBLE'
+                ? 'WALL_SCRAMBLE'
+                : wallRunSide === -1
+                  ? 'WALL_RUN_LEFT'
+                  : wallRunSide === 1
+                    ? 'WALL_RUN_RIGHT'
+                    : isAirborne
+                      ? 'AIRBORNE'
+                      : 'GROUNDED');
+    const vaultKind = parkourDetail?.vaultKind ?? 'SPEED_VAULT';
+    const isHeavyLanding = parkourDetail?.isHeavyLanding ?? parkourState === 'HEAVY_LANDING';
+    const overheadChargeRatio = THREE.MathUtils.clamp(parkourDetail?.overheadChargeRatio ?? 0, 0, 1);
+    const lowStaminaTremor = parkourDetail?.lowStaminaTremor ?? false;
+    const lowerBodySync = parkourDetail?.lowerBodySync;
     void isNight;
     void inSafeZone;
 
@@ -3446,6 +3652,7 @@ export class WeaponAndEffects {
       !isZiplining &&
       !isMantling &&
       !isVaulting &&
+      !isHeavyLanding &&
       !inspectLeftArm;
 
     this.unarmedViewModel.visible = usingDedicatedUnarmed;
@@ -3502,15 +3709,126 @@ export class WeaponAndEffects {
       whiffRotZ = lunge * 0.42;
     }
 
-    this.leftArmRoot.position.set(
-      THREE.MathUtils.lerp(-0.28, -0.15, this.leftInspectBlend) + whiffX,
-      THREE.MathUtils.lerp(-0.2, -0.09, this.leftInspectBlend) + whiffY,
-      THREE.MathUtils.lerp(-0.46, -0.36, this.leftInspectBlend) + whiffZ,
+    // Left Arm Kinematics: two-handed bat grip, parkour vault/climb/heavy-landing brace, or off-hand guard
+    const wantsTwoHandBat =
+      !usingDedicatedUnarmed &&
+      this.activeWeapon === 'bat' &&
+      !inspectLeftArm &&
+      !awakeningPose?.active &&
+      !headGrabActive &&
+      !batFaceDriveActive &&
+      climbState === 'NONE' &&
+      !isZiplining &&
+      !isMantling &&
+      !isVaulting &&
+      !isRolling &&
+      !isSliding &&
+      !isHeavyLanding &&
+      wallRunSide === 0;
+
+    this.twoHandBlend = THREE.MathUtils.lerp(
+      this.twoHandBlend,
+      wantsTwoHandBat ? 1 : 0,
+      1 - Math.exp(-16 * dt),
     );
-    const inspectRotX = 0.22 + Math.sin(this.leftInspectSpin * 0.65) * 0.38 * this.leftInspectBlend + whiffRotX;
-    const inspectRotY = 0.38 + this.leftInspectSpin * this.leftInspectBlend;
-    const inspectRotZ = -0.32 + Math.sin(this.leftInspectSpin * 0.45) * 0.42 * this.leftInspectBlend + whiffRotZ;
-    this.leftArmRoot.rotation.set(inspectRotX, inspectRotY, inspectRotZ);
+
+    let lPosX = THREE.MathUtils.lerp(-0.28, -0.15, this.leftInspectBlend) + whiffX;
+    let lPosY = THREE.MathUtils.lerp(-0.2, -0.09, this.leftInspectBlend) + whiffY;
+    let lPosZ = THREE.MathUtils.lerp(-0.46, -0.36, this.leftInspectBlend) + whiffZ;
+    let lRotX = 0.22 + Math.sin(this.leftInspectSpin * 0.65) * 0.38 * this.leftInspectBlend + whiffRotX;
+    let lRotY = 0.38 + this.leftInspectSpin * this.leftInspectBlend;
+    let lRotZ = -0.32 + Math.sin(this.leftInspectSpin * 0.45) * 0.42 * this.leftInspectBlend + whiffRotZ;
+
+    if (this.twoHandBlend > 0.02) {
+      this.camera.updateMatrixWorld(true);
+      this.viewmodelGroup.updateMatrixWorld(true);
+      this.batLeftGripMarker.getWorldPosition(_batGripWorld);
+      _batGripLocal.copy(_batGripWorld);
+      this.camera.worldToLocal(_batGripLocal);
+      // Place wrist back/left (-X, +Z) and rotate Y negative (-0.82 rad) so palm & fingers wrap across the bat grip
+      const gripX = THREE.MathUtils.clamp(_batGripLocal.x - 0.052, -0.34, 0.26);
+      const gripY = THREE.MathUtils.clamp(_batGripLocal.y - 0.012, -0.38, 0.22);
+      const gripZ = THREE.MathUtils.clamp(_batGripLocal.z + 0.048, -0.62, -0.2);
+      const gripRotX = 0.28 - overheadChargeRatio * 0.22;
+      const gripRotY = -0.82;
+      const gripRotZ = 0.36;
+      lPosX = THREE.MathUtils.lerp(lPosX, gripX, this.twoHandBlend);
+      lPosY = THREE.MathUtils.lerp(lPosY, gripY, this.twoHandBlend);
+      lPosZ = THREE.MathUtils.lerp(lPosZ, gripZ, this.twoHandBlend);
+      lRotX = THREE.MathUtils.lerp(lRotX, gripRotX, this.twoHandBlend);
+      lRotY = THREE.MathUtils.lerp(lRotY, gripRotY, this.twoHandBlend);
+      lRotZ = THREE.MathUtils.lerp(lRotZ, gripRotZ, this.twoHandBlend);
+    } else if (!inspectLeftArm) {
+      if (isHeavyLanding) {
+        lPosX = -0.24;
+        lPosY = -0.34;
+        lPosZ = -0.44;
+        lRotX = -0.58;
+        lRotY = 0.14;
+        lRotZ = 0.18;
+      } else if (isVaulting) {
+        const plantArc = Math.sin(vaultProgress * Math.PI);
+        lPosX = vaultKind === 'KONG_VAULT' ? -0.24 : -0.22;
+        lPosY = -0.22 - plantArc * 0.1;
+        lPosZ = -0.52 - plantArc * 0.08;
+        lRotX = -0.42 - plantArc * 0.25;
+        lRotY = 0.18;
+        lRotZ = -0.14;
+      } else if (climbState === 'MUSCLE_UP' || isMantling) {
+        const mPose = computeMuscleUpStage(
+          climbState === 'MUSCLE_UP' ? climbPhaseTime : mantleProgress * 1.15,
+          1.15,
+          this.muscleUpPose,
+        );
+        if (mPose.stage === 1 || mPose.stage === 2) {
+          lPosX = -0.25;
+          lPosY = mPose.stage === 1 ? 0.04 : -0.1;
+          lPosZ = -0.48;
+          lRotX = -0.42 + mPose.wristFlexion * 0.45;
+          lRotY = 0.14;
+          lRotZ = -0.12;
+        } else {
+          lPosX = -0.26;
+          lPosY = mPose.stage === 3 ? -0.32 : -0.24;
+          lPosZ = -0.42;
+          lRotX = -0.68 + (mPose.stage === 4 ? 0.45 : 0);
+          lRotY = 0.18;
+          lRotZ = -0.15;
+        }
+      } else if (climbState === 'WALL_SCRAMBLE') {
+        const wave = Math.sin(climbPhaseTime * 24) * scrambleSide;
+        lPosX = -0.24;
+        lPosY = -0.06 + wave * 0.1;
+        lPosZ = -0.46;
+        lRotX = -0.38;
+        lRotY = 0.14;
+        lRotZ = -0.1;
+      } else if (wallRunSide === -1) {
+        lPosX = -0.32;
+        lPosY = -0.14 + Math.sin(elapsed * 16) * 0.022;
+        lPosZ = -0.48;
+        lRotX = -0.24;
+        lRotY = 0.22;
+        lRotZ = 0.28;
+      }
+    }
+
+    const leftDamp = 1 - Math.exp(-(wantsTwoHandBat ? 28 : 16) * dt);
+    this.curLeftPos.x = THREE.MathUtils.lerp(this.curLeftPos.x, lPosX, leftDamp);
+    this.curLeftPos.y = THREE.MathUtils.lerp(this.curLeftPos.y, lPosY, leftDamp);
+    this.curLeftPos.z = THREE.MathUtils.lerp(this.curLeftPos.z, lPosZ, leftDamp);
+    this.curLeftEuler.x = THREE.MathUtils.lerp(this.curLeftEuler.x, lRotX, leftDamp);
+    this.curLeftEuler.y = THREE.MathUtils.lerp(this.curLeftEuler.y, lRotY, leftDamp);
+    this.curLeftEuler.z = THREE.MathUtils.lerp(this.curLeftEuler.z, lRotZ, leftDamp);
+
+    const leftTremorX = lowStaminaTremor ? Math.sin(elapsed * 42) * 0.0028 : 0;
+    const leftTremorY = lowStaminaTremor ? Math.cos(elapsed * 37) * 0.0024 : 0;
+    this.leftArmRoot.position.set(
+      this.curLeftPos.x + leftTremorX,
+      this.curLeftPos.y + leftTremorY + equipOffsetY * 0.45,
+      this.curLeftPos.z,
+    );
+    this.leftArmRoot.rotation.copy(this.curLeftEuler);
 
     // Pumped-Up bat barrel fiery aura pulse (0.30..0.60 opacity)
     if (awakeningActive && this.activeWeapon === 'bat') {
@@ -3584,12 +3902,12 @@ export class WeaponAndEffects {
     const isCleaver = this.activeWeapon === 'cleaver';
 
     // Right Arm Idle Pose (State A Unarmed Guard vs State C Bat/Cleaver/Dagger Ready)
-    let rPosX = (isUnarmed ? 0.34 : isDagger ? 0.27 : isCleaver ? 0.31 : 0.29) + fig8X + this.swayYawLag * 0.16;
-    let rPosY = (isUnarmed ? -0.28 : isDagger ? -0.25 : isCleaver ? -0.28 : -0.26) + fig8Y + breathPrimary * 0.0035 - this.swayPitchLag * 0.14;
-    let rPosZ = (isUnarmed ? -0.52 : isDagger ? -0.47 : isCleaver ? -0.45 : -0.44) + breathPrimary * 0.002;
-    let rRotX = (isUnarmed ? -1.08 : isDagger ? -0.72 : isCleaver ? -0.34 : -0.38) + breathPrimary * 0.014 + this.swayPitchLag * 0.65;
-    let rRotY = (isUnarmed ? -0.22 : isDagger ? 0.78 : isCleaver ? 0.98 : 0.95) + breathWrist * 0.012 + this.swayYawLag * 0.65;
-    let rRotZ = (isUnarmed ? 0.25 : isDagger ? -0.96 : isCleaver ? -1.02 : -1.05) - strafeInput * 0.055;
+    let rPosX = (isUnarmed ? 0.34 : isDagger ? 0.27 : isCleaver ? 0.31 : 0.25) + fig8X + this.swayYawLag * 0.16;
+    let rPosY = (isUnarmed ? -0.28 : isDagger ? -0.25 : isCleaver ? -0.28 : -0.19) + fig8Y + breathPrimary * 0.0035 - this.swayPitchLag * 0.14;
+    let rPosZ = (isUnarmed ? -0.52 : isDagger ? -0.47 : isCleaver ? -0.45 : -0.46) + breathPrimary * 0.002;
+    let rRotX = (isUnarmed ? -1.08 : isDagger ? -0.72 : isCleaver ? -0.34 : -0.34) + breathPrimary * 0.014 + this.swayPitchLag * 0.65;
+    let rRotY = (isUnarmed ? -0.22 : isDagger ? 0.78 : isCleaver ? 0.98 : 0.88) + breathWrist * 0.012 + this.swayYawLag * 0.65;
+    let rRotZ = (isUnarmed ? 0.25 : isDagger ? -0.96 : isCleaver ? -1.02 : -0.92) - strafeInput * 0.055;
 
     let rightFingerPose: RightHandPose = isUnarmed ? 'UNARMED_READY' : 'WEAPON_GRIP';
     let rightExertionStrain = 0;
@@ -3640,8 +3958,18 @@ export class WeaponAndEffects {
       }
     }
 
-    // 3. Parkour Slide (C while sprinting)
-    if (isSliding) {
+    // 3. Heavy Landing Brace, Parkour Slide, Roll, Wall-Run, Zipline, Vault, Muscle-Up, Airborne
+    if (isHeavyLanding) {
+      rPosX = 0.24;
+      rPosY = -0.35;
+      rPosZ = -0.44;
+      rRotX = -1.62;
+      rRotY = 0.14;
+      rRotZ = isUnarmed ? 0.12 : -0.45;
+      rightFingerPose = 'PARKOUR_OPEN';
+      rightExertionStrain = 7;
+      dampHz = 22;
+    } else if (isSliding) {
       rPosX = 0.32;
       rPosY = -0.34;
       rPosZ = -0.3;
@@ -3652,7 +3980,6 @@ export class WeaponAndEffects {
       dampHz = 16;
     }
 
-    // 4. Rolling, Wall-Run, Zipline, Speed Vault, Ledge Grab & Mantle, Airborne Jump
     if (isRolling) {
       rPosX = 0.2;
       rPosY = -0.36;
@@ -3662,7 +3989,7 @@ export class WeaponAndEffects {
       rRotZ = isUnarmed ? 0.18 : -0.6;
       if (isUnarmed) rightFingerPose = 'TIGHT_FIST';
       dampHz = 18;
-    } else if (wallRunSide !== 0) {
+    } else if (!isHeavyLanding && !isSliding && wallRunSide !== 0) {
       if (wallRunSide === -1) {
         rPosX = 0.3;
         rPosY = -0.24 + Math.cos(elapsed * 16) * 0.022;
@@ -3697,13 +4024,23 @@ export class WeaponAndEffects {
       dampHz = 18;
     } else if (isVaulting) {
       const plantArc = Math.sin(vaultProgress * Math.PI);
-      rPosX = 0.32;
-      rPosY = -0.26 - plantArc * 0.05;
-      rPosZ = -0.48 - plantArc * 0.06;
-      rRotX = isUnarmed ? -1.32 + 0.35 * plantArc : -0.35;
-      rRotY = isUnarmed ? -0.15 : 0.85;
-      rRotZ = isUnarmed ? 0.16 : -0.78;
-      if (isUnarmed) rightFingerPose = 'PARKOUR_OPEN';
+      if (vaultKind === 'KONG_VAULT') {
+        rPosX = 0.25;
+        rPosY = -0.22 - plantArc * 0.1;
+        rPosZ = -0.52 - plantArc * 0.08;
+        rRotX = -1.58 + plantArc * 0.25;
+        rRotY = -0.08;
+        rRotZ = 0.12;
+        rightFingerPose = 'PARKOUR_OPEN';
+      } else {
+        rPosX = 0.32;
+        rPosY = -0.26 - plantArc * 0.05;
+        rPosZ = -0.48 - plantArc * 0.06;
+        rRotX = isUnarmed ? -1.32 + 0.35 * plantArc : -0.35;
+        rRotY = isUnarmed ? -0.15 : 0.85;
+        rRotZ = isUnarmed ? 0.16 : -0.78;
+        if (isUnarmed) rightFingerPose = 'PARKOUR_OPEN';
+      }
       dampHz = 18;
     } else if (climbState === 'WALL_SCRAMBLE') {
       const wave = Math.sin(climbPhaseTime * 24) * scrambleSide;
@@ -3717,79 +4054,60 @@ export class WeaponAndEffects {
       rightExertionStrain = -4;
       dampHz = 24;
     } else if (climbState === 'MUSCLE_UP' || isMantling) {
-      if (climbState === 'MUSCLE_UP' && rightGripWorld) {
-        if (climbPhaseTime < 0.42) {
-          this.camera.updateMatrixWorld(true);
-          this.viewmodelGroup.updateMatrixWorld(true);
-          _ikRightLocal.copy(rightGripWorld);
-          this.viewmodelGroup.worldToLocal(_ikRightLocal);
+      const mStage = computeMuscleUpStage(
+        climbState === 'MUSCLE_UP' ? climbPhaseTime : mantleProgress * 1.15,
+        1.15,
+        this.muscleUpPose,
+      );
+      if ((mStage.stage === 1 || mStage.stage === 2) && rightGripWorld) {
+        this.camera.updateMatrixWorld(true);
+        this.viewmodelGroup.updateMatrixWorld(true);
+        _ikRightLocal.copy(rightGripWorld);
+        this.viewmodelGroup.worldToLocal(_ikRightLocal);
 
-          _ikRightLocal.z = Math.min(-0.18, _ikRightLocal.z + 0.03);
-          _ikRightLocal.y = THREE.MathUtils.clamp(_ikRightLocal.y + 0.015, -0.68, 0.16);
-          _ikReachVec.subVectors(_ikRightLocal, _ikRightShoulder);
-          if (_ikReachVec.length() > 0.72) {
-            _ikReachVec.setLength(0.72);
-            _ikRightLocal.copy(_ikRightShoulder).add(_ikReachVec);
-          }
-
-          const pullU = THREE.MathUtils.clamp((climbPhaseTime - 0.14) / 0.28, 0, 1);
-          const tremor = climbPhaseTime >= 0.14 ? Math.sin(elapsed * 18 * Math.PI * 2) * 0.003 : 0;
-
-          rPosX = _ikRightLocal.x - tremor;
-          rPosY = _ikRightLocal.y + tremor * 0.7;
-          rPosZ = _ikRightLocal.z;
-          rRotX = isUnarmed ? -1.48 + pullU * 0.32 : -0.45 + pullU * 0.18;
-          rRotY = isUnarmed ? -0.08 : 0.78;
-          rRotZ = isUnarmed ? 0.06 : -0.82;
-          rightFingerPose = isUnarmed ? (climbPhaseTime < 0.06 ? 'PARKOUR_OPEN' : 'TIGHT_FIST') : 'WEAPON_GRIP';
-          rightExertionStrain = climbPhaseTime >= 0.14 ? 8 * Math.sin(pullU * Math.PI) : -3;
-          dampHz = 30;
-        } else {
-          const u3 = THREE.MathUtils.clamp((climbPhaseTime - 0.42) / 0.2, 0, 1);
-          if (u3 < 0.55) {
-            const press = u3 / 0.55;
-            rPosX = THREE.MathUtils.lerp(0.24, 0.28, press);
-            rPosY = THREE.MathUtils.lerp(-0.32, -0.36, press);
-            rPosZ = THREE.MathUtils.lerp(-0.42, -0.36, press);
-            rRotX = isUnarmed ? -1.74 : -0.5;
-            rRotY = isUnarmed ? -0.1 : 0.78;
-            rRotZ = isUnarmed ? -0.12 : -0.82;
-            if (isUnarmed) rightFingerPose = 'PARKOUR_OPEN';
-            rightExertionStrain = 5 * (1 - press);
-          } else {
-            const rec = (u3 - 0.55) / 0.45;
-            const sRec = rec * rec * (3 - 2 * rec);
-            rPosX = THREE.MathUtils.lerp(0.28, 0.29, sRec);
-            rPosY = THREE.MathUtils.lerp(-0.36, -0.26, sRec);
-            rPosZ = THREE.MathUtils.lerp(-0.36, -0.44, sRec);
-            rRotX = THREE.MathUtils.lerp(-1.2, isUnarmed ? -1.08 : -0.38, sRec);
-            rRotY = THREE.MathUtils.lerp(0.4, isUnarmed ? -0.22 : 0.95, sRec);
-            rRotZ = THREE.MathUtils.lerp(-0.4, isUnarmed ? 0.25 : -1.05, sRec);
-            rightExertionStrain = 0;
-          }
-          dampHz = 22;
+        _ikRightLocal.z = Math.min(-0.18, _ikRightLocal.z + 0.03);
+        _ikRightLocal.y = THREE.MathUtils.clamp(_ikRightLocal.y + 0.015, -0.68, 0.16);
+        _ikReachVec.subVectors(_ikRightLocal, _ikRightShoulder);
+        if (_ikReachVec.length() > 0.72) {
+          _ikReachVec.setLength(0.72);
+          _ikRightLocal.copy(_ikRightShoulder).add(_ikReachVec);
         }
+
+        const tremor = mStage.stage === 2 ? Math.sin(elapsed * 18 * Math.PI * 2) * 0.003 : 0;
+        rPosX = _ikRightLocal.x - tremor;
+        rPosY = _ikRightLocal.y + tremor * 0.7;
+        rPosZ = _ikRightLocal.z;
+        rRotX = -1.48 + mStage.wristFlexion * 0.55;
+        rRotY = -0.08;
+        rRotZ = 0.06;
+        rightFingerPose = mStage.fingerPose === 'CRIMP_LEDGE' ? 'TIGHT_FIST' : 'PARKOUR_OPEN';
+        rightExertionStrain = mStage.stage === 2 ? 8 : 3;
+        dampHz = 30;
+      } else if (mStage.stage === 3) {
+        // Turnover: palms press flat onto rooftop surface (FLAT_PUSH)
+        const u3 = THREE.MathUtils.clamp((climbPhaseTime - 0.48) / 0.32, 0, 1);
+        rPosX = THREE.MathUtils.lerp(0.24, 0.28, u3);
+        rPosY = THREE.MathUtils.lerp(-0.22, -0.36, u3);
+        rPosZ = THREE.MathUtils.lerp(-0.46, -0.38, u3);
+        rRotX = -1.72;
+        rRotY = -0.08;
+        rRotZ = -0.1;
+        rightFingerPose = 'PARKOUR_OPEN';
+        rightExertionStrain = 6;
+        dampHz = 24;
       } else {
-        if (mantleProgress < 0.24) {
-          const reach = mantleProgress / 0.24;
-          rPosX = THREE.MathUtils.lerp(0.29, 0.22, reach);
-          rPosY = THREE.MathUtils.lerp(-0.24, -0.06, reach);
-          rPosZ = THREE.MathUtils.lerp(-0.44, -0.56, reach);
-          rRotX = THREE.MathUtils.lerp(isUnarmed ? -1.08 : -0.38, -1.48, reach);
-          rRotY = isUnarmed ? -0.1 : 0.72;
-          rRotZ = isUnarmed ? 0.08 : -0.78;
-          if (isUnarmed) rightFingerPose = 'PARKOUR_OPEN';
-        } else {
-          const pull = (mantleProgress - 0.24) / 0.76;
-          rPosX = THREE.MathUtils.lerp(0.22, 0.3, pull);
-          rPosY = THREE.MathUtils.lerp(-0.06, -0.36, pull);
-          rPosZ = THREE.MathUtils.lerp(-0.56, -0.38, pull);
-          rRotX = THREE.MathUtils.lerp(-1.48, isUnarmed ? -1.1 : -0.45, pull);
-          rRotY = isUnarmed ? -0.12 : 0.82;
-          rRotZ = isUnarmed ? 0.14 : -0.88;
-          if (isUnarmed) rightFingerPose = 'PARKOUR_OPEN';
-        }
-        dampHz = 18;
+        // Stage 4: Dip Press & Sprint Exit
+        const u4 = THREE.MathUtils.clamp((climbPhaseTime - 0.8) / 0.35, 0, 1);
+        const sRec = u4 * u4 * (3 - 2 * u4);
+        rPosX = THREE.MathUtils.lerp(0.28, 0.29, sRec);
+        rPosY = THREE.MathUtils.lerp(-0.36, -0.26, sRec);
+        rPosZ = THREE.MathUtils.lerp(-0.38, -0.44, sRec);
+        rRotX = THREE.MathUtils.lerp(-1.55, isUnarmed ? -1.08 : -0.38, sRec);
+        rRotY = THREE.MathUtils.lerp(-0.08, isUnarmed ? -0.22 : 0.95, sRec);
+        rRotZ = THREE.MathUtils.lerp(-0.1, isUnarmed ? 0.25 : -1.05, sRec);
+        rightFingerPose = isUnarmed ? 'UNARMED_READY' : 'WEAPON_GRIP';
+        rightExertionStrain = 0;
+        dampHz = 20;
       }
     } else if (this.kickTime >= 0 && this.kickIsDropkick) {
       rPosX = 0.34;
@@ -3819,6 +4137,27 @@ export class WeaponAndEffects {
       }
     }
 
+    // Charged Overhead Bat Smash windup raise while LMB held
+    if (
+      overheadChargeRatio > 0.04 &&
+      this.activeWeapon === 'bat' &&
+      this.animState === 'idle' &&
+      !isHeavyLanding &&
+      !isSliding &&
+      !isVaulting &&
+      climbState === 'NONE'
+    ) {
+      const c = overheadChargeRatio;
+      rPosX = THREE.MathUtils.lerp(rPosX, 0.14, c);
+      rPosY = THREE.MathUtils.lerp(rPosY, 0.16, c);
+      rPosZ = THREE.MathUtils.lerp(rPosZ, -0.36, c);
+      rRotX = THREE.MathUtils.lerp(rRotX, 0.28, c);
+      rRotY = THREE.MathUtils.lerp(rRotY, 0.22, c);
+      rRotZ = THREE.MathUtils.lerp(rRotZ, -0.18, c);
+      rightExertionStrain = 5 * c;
+      dampHz = 22;
+    }
+
     if (!isZiplining) {
       this.ziplineHookPivot.visible = false;
     }
@@ -3834,7 +4173,34 @@ export class WeaponAndEffects {
         this.animTime += dt;
         const t = Math.min(1, this.animTime / this.animDuration);
 
-        if (this.animState === 'swing_left' || this.animState === 'swing_right') {
+        if (this.animState === 'overhead_smash') {
+          dampHz = 30;
+          const cleaveEnd = 0.36;
+          if (t < cleaveEnd) {
+            const u = t / cleaveEnd;
+            const slam = u * u * (3 - 2 * u);
+            trailActive = true;
+            rightExertionStrain = 10;
+            rPosX = THREE.MathUtils.lerp(0.14, 0.06, slam);
+            rPosY = THREE.MathUtils.lerp(0.16, -0.36, slam);
+            rPosZ = THREE.MathUtils.lerp(-0.36, -0.58, slam);
+            rRotX = THREE.MathUtils.lerp(0.28, -1.65, slam);
+            rRotY = THREE.MathUtils.lerp(0.22, 0.08, slam);
+            rRotZ = THREE.MathUtils.lerp(-0.18, -0.12, slam);
+          } else {
+            const rec = (t - cleaveEnd) / (1 - cleaveEnd);
+            const easeR = 1 - Math.pow(1 - rec, 2);
+            dampHz = 15;
+            rightExertionStrain = 9 * (1 - easeR);
+            rPosX = THREE.MathUtils.lerp(0.06, rPosX, easeR);
+            rPosY = THREE.MathUtils.lerp(-0.36, rPosY, easeR);
+            rPosZ = THREE.MathUtils.lerp(-0.58, rPosZ, easeR);
+            rRotX = THREE.MathUtils.lerp(-1.65, rRotX, easeR);
+            rRotY = THREE.MathUtils.lerp(0.08, rRotY, easeR);
+            rRotZ = THREE.MathUtils.lerp(-0.12, rRotZ, easeR);
+          }
+          this.swingArcMat.opacity = t < 0.45 ? Math.sin((t / 0.45) * Math.PI) * 0.72 : 0;
+        } else if (this.animState === 'swing_left' || this.animState === 'swing_right') {
           const isForehand = this.animState === 'swing_left';
           const dirSign = isForehand ? 1 : -1;
           dampHz = this.activeWeapon === 'dagger' ? 28 : this.activeWeapon === 'cleaver' ? 18 : 24;
@@ -4185,98 +4551,122 @@ export class WeaponAndEffects {
     }
 
     // -------------------------------------------------------------------------
-    // E. Dual Parkour Legs & Boots (preserved)
+    // E. Full-Body Articulated Lower Rig (Yaw-Only Layer 2 World Space)
     // -------------------------------------------------------------------------
     if (this.kickTime >= 0) {
       this.kickTime += dt;
       const dur = this.kickIsDropkick ? 0.42 : 0.34;
-      const kp = this.kickTime / dur;
-      if (kp >= 1) {
+      if (this.kickTime >= dur) {
         this.kickTime = -1;
         this.kickIsDropkick = false;
-        this.leftLegPivot.visible = false;
-        this.rightLegPivot.visible = false;
-      } else {
-        const thrust = Math.sin(kp * Math.PI);
+      }
+    }
+
+    const pitchCheck = lowerBodySync?.pitch ?? 0;
+    const showLowerBody =
+      this.masterVisible &&
+      lowerBodySync !== undefined &&
+      (pitchCheck < -0.2 ||
+        isLookingDown ||
+        isRolling ||
+        isSliding ||
+        isVaulting ||
+        isMantling ||
+        climbState !== 'NONE' ||
+        wallRunSide !== 0 ||
+        isAirborne ||
+        isHeavyLanding ||
+        this.kickTime >= 0);
+
+    this.legVisibilityBlend = THREE.MathUtils.lerp(
+      this.legVisibilityBlend,
+      showLowerBody ? 1 : 0,
+      1 - Math.exp(-20 * dt),
+    );
+    this.lowerBodyRoot.visible = this.legVisibilityBlend > 0.04 && lowerBodySync !== undefined;
+
+    if (this.lowerBodyRoot.visible && lowerBodySync) {
+      if (horizSpeed > 0.25 && !isAirborne && !isSliding && !isRolling) {
+        this.stridePhase += dt * (isSprinting ? 13.5 : 8.8) * THREE.MathUtils.clamp(horizSpeed / 7.5, 0.35, 1.35);
+      }
+      const gait = computeStrideGait(
+        horizSpeed,
+        isAirborne,
+        this.stridePhase,
+        parkourState,
+        this.lowerBodyStridePose,
+      );
+
+      let lThigh = gait.leftThighX;
+      let lKnee = gait.leftKneeX;
+      let lAnkle = gait.leftAnkleX;
+      let rThigh = gait.rightThighX;
+      let rKnee = gait.rightKneeX;
+      let rAnkle = gait.rightAnkleX;
+      let hipBobY = gait.hipBobY;
+      let torsoPitch = gait.torsoPitch;
+
+      if (climbState === 'MUSCLE_UP' || isMantling) {
+        const mPose = computeMuscleUpStage(
+          climbState === 'MUSCLE_UP' ? climbPhaseTime : mantleProgress * 1.15,
+          1.15,
+          this.muscleUpPose,
+        );
+        lThigh = mPose.leftThighX;
+        lKnee = mPose.leftKneeX;
+        rThigh = mPose.rightThighX;
+        rKnee = mPose.rightKneeX;
+        hipBobY = mPose.stage <= 2 ? -0.08 : 0.05;
+        torsoPitch = mPose.stage === 3 ? 0.38 : 0.14;
+      } else if (isVaulting) {
+        const vPose = computeVaultKinematics(vaultKind, vaultProgress, this.vaultPose);
+        lThigh = vPose.leftThighX;
+        lKnee = vPose.leftKneeX;
+        rThigh = vPose.rightThighX;
+        rKnee = vPose.rightKneeX;
+        hipBobY = 0.08 * Math.sin(vaultProgress * Math.PI);
+        torsoPitch = 0.24;
+      } else if (this.kickTime >= 0) {
+        const dur = this.kickIsDropkick ? 0.42 : 0.34;
+        const thrust = Math.sin(THREE.MathUtils.clamp(this.kickTime / dur, 0, 1) * Math.PI);
         if (this.kickIsDropkick) {
-          this.leftLegPivot.visible = true;
-          this.rightLegPivot.visible = true;
-          this.leftLegPivot.position.set(-0.15 + thrust * 0.03, -0.62 + thrust * 0.44, -0.14 - thrust * 0.36);
-          this.leftLegPivot.rotation.set(thrust * 0.44, 0, -thrust * 0.08);
-          this.rightLegPivot.position.set(0.15 - thrust * 0.03, -0.62 + thrust * 0.44, -0.14 - thrust * 0.36);
-          this.rightLegPivot.rotation.set(thrust * 0.44, 0, thrust * 0.08);
+          lThigh = 1.42 * thrust;
+          lKnee = 0.22;
+          lAnkle = -0.25;
+          rThigh = 1.42 * thrust;
+          rKnee = 0.22;
+          rAnkle = -0.25;
+          hipBobY = 0.12 * thrust;
         } else {
-          this.leftLegPivot.visible = false;
-          this.rightLegPivot.visible = true;
-          this.rightLegPivot.position.set(0.12 - thrust * 0.1, -0.64 + thrust * 0.42, -0.15 - thrust * 0.34);
-          this.rightLegPivot.rotation.set(thrust * 0.48, 0, thrust * 0.14);
+          rThigh = 1.48 * thrust;
+          rKnee = 0.18;
+          rAnkle = -0.28;
         }
       }
-    } else if (isRolling) {
-      this.leftLegPivot.visible = true;
-      this.rightLegPivot.visible = true;
-      this.leftLegPivot.position.set(-0.14, -0.48, -0.28);
-      this.leftLegPivot.rotation.set(0.55, 0, -0.08);
-      this.rightLegPivot.position.set(0.14, -0.48, -0.28);
-      this.rightLegPivot.rotation.set(0.55, 0, 0.08);
-    } else if (wallRunSide !== 0) {
-      this.leftLegPivot.visible = true;
-      this.rightLegPivot.visible = true;
-      const stride = Math.sin(elapsed * 16) * 0.12;
-      this.leftLegPivot.position.set(-0.17, -0.62 + stride, -0.2);
-      this.leftLegPivot.rotation.set(0.28 + stride * 0.8, 0, wallRunSide * -0.16);
-      this.rightLegPivot.position.set(0.17, -0.62 - stride, -0.2);
-      this.rightLegPivot.rotation.set(0.28 - stride * 0.8, 0, wallRunSide * -0.16);
-    } else if (isSliding) {
-      this.leftLegPivot.visible = true;
-      this.rightLegPivot.visible = true;
-      this.leftLegPivot.position.set(-0.14, -0.49, -0.27);
-      this.leftLegPivot.rotation.set(0.18, 0, -0.09);
-      this.rightLegPivot.position.set(0.12, -0.42, -0.36);
-      this.rightLegPivot.rotation.set(0.28, 0, 0.1);
-    } else if (isVaulting) {
-      this.leftLegPivot.visible = true;
-      this.rightLegPivot.visible = true;
-      this.leftLegPivot.position.set(-0.16, -0.52, -0.26);
-      this.leftLegPivot.rotation.set(0.32, 0, -0.18);
-      this.rightLegPivot.position.set(0.16, -0.56, -0.22);
-      this.rightLegPivot.rotation.set(0.26, 0, 0.12);
-    } else if (climbState === 'WALL_SCRAMBLE') {
-      this.leftLegPivot.visible = true;
-      this.rightLegPivot.visible = true;
-      const drive = Math.sin(climbPhaseTime * 22) * scrambleSide;
-      this.leftLegPivot.position.set(-0.16, -0.58 + drive * 0.14, -0.22);
-      this.leftLegPivot.rotation.set(0.35 + drive * 0.35, 0, -0.06);
-      this.rightLegPivot.position.set(0.16, -0.58 - drive * 0.14, -0.22);
-      this.rightLegPivot.rotation.set(0.35 - drive * 0.35, 0, 0.06);
-    } else if (climbState === 'MUSCLE_UP' || isMantling) {
-      this.leftLegPivot.visible = true;
-      this.rightLegPivot.visible = true;
-      const kneeDrive = climbState === 'MUSCLE_UP' ? THREE.MathUtils.clamp((climbPhaseTime - 0.14) / 0.32, 0, 1) : 0.6;
-      this.leftLegPivot.position.set(-0.16, -0.62 + kneeDrive * 0.08, -0.18 - kneeDrive * 0.08);
-      this.leftLegPivot.rotation.set(0.2 + kneeDrive * 0.22, 0, -0.06);
-      this.rightLegPivot.position.set(0.16, -0.58 + kneeDrive * 0.14, -0.2 - kneeDrive * 0.12);
-      this.rightLegPivot.rotation.set(0.26 + kneeDrive * 0.28, 0, 0.08);
-    } else if (isAirborne || isZiplining) {
-      this.leftLegPivot.visible = true;
-      this.rightLegPivot.visible = true;
-      const tuck = Math.sin(elapsed * 8) * 0.025;
-      this.leftLegPivot.position.set(-0.18, -0.64 + tuck, -0.18);
-      this.leftLegPivot.rotation.set(0.18, 0, -0.04);
-      this.rightLegPivot.position.set(0.18, -0.62 - tuck, -0.2);
-      this.rightLegPivot.rotation.set(0.24, 0, 0.04);
-    } else if (isLookingDown) {
-      this.leftLegPivot.visible = true;
-      this.rightLegPivot.visible = true;
-      const stride = Math.sin(elapsed * 9) * moveSpeedRatio * 0.08;
-      this.leftLegPivot.position.set(-0.16, -0.82, -0.1 + stride);
-      this.leftLegPivot.rotation.set(-0.75, 0, -0.03);
-      this.rightLegPivot.position.set(0.16, -0.82, -0.1 - stride);
-      this.rightLegPivot.rotation.set(-0.75, 0, 0.03);
-    } else {
-      this.leftLegPivot.visible = false;
-      this.rightLegPivot.visible = false;
+
+      // Sync lowerBodyRoot to yaw-only world coordinates slightly behind eye axis so looking down reveals belt, legs & sneakers
+      const backZ = isRolling ? -0.18 : 0.14;
+      const sinY = Math.sin(lowerBodySync.yaw);
+      const cosY = Math.cos(lowerBodySync.yaw);
+      this.lowerBodyRoot.position.set(
+        lowerBodySync.x + sinY * backZ,
+        lowerBodySync.y + 0.94 + hipBobY,
+        lowerBodySync.z + cosY * backZ,
+      );
+      const wallRoll = wallRunSide !== 0 ? wallRunSide * -0.18 : 0;
+      const rollFlip = isRolling ? Math.sin(THREE.MathUtils.clamp(parkourDetail?.rollProgress ?? 0, 0, 1) * Math.PI) * 0.42 : 0;
+      this.lowerBodyRoot.rotation.set(rollFlip, lowerBodySync.yaw, wallRoll);
+
+      this.torsoPelvis.rotation.set(torsoPitch, 0, 0);
+      this.leftHipPivot.rotation.set(lThigh, 0, 0);
+      this.leftKneePivot.rotation.set(-lKnee, 0, 0);
+      this.leftAnklePivot.rotation.set(lAnkle, 0, 0);
+      this.rightHipPivot.rotation.set(rThigh, 0, 0);
+      this.rightKneePivot.rotation.set(-rKnee, 0, 0);
+      this.rightAnklePivot.rotation.set(rAnkle, 0, 0);
     }
+    this.leftLegPivot.visible = false;
+    this.rightLegPivot.visible = false;
 
     // -------------------------------------------------------------------------
     // F. Shockwave, Sparks, Blood, Dust Puffs & Firecrackers (preserved)
@@ -4649,6 +5039,7 @@ export class WeaponAndEffects {
     this.camera.remove(this.viewmodelGroup);
     this.camera.remove(this.leftArmRoot);
     this.camera.remove(this.unarmedViewModel);
+    this.scene.remove(this.lowerBodyRoot);
     this.camera.remove(this.leftLegPivot);
     this.camera.remove(this.rightLegPivot);
     this.camera.remove(this.ziplineHookPivot);
